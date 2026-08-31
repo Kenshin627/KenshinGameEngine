@@ -26,6 +26,9 @@ namespace backend
         bool supportsBufferInt64Atomics = false;
         bool supportsTimelineSemaphore  = false;
 
+        // True when surface extensions were enabled at instance creation.
+        bool surfaceEnabled = false;
+
         // Queue family selection. transferFamily prefers a dedicated DMA
         // family (TRANSFER without GRAPHICS/COMPUTE) for async streaming
         // uploads (M6); falls back to compute-only, then graphics.

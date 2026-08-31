@@ -7,11 +7,20 @@
 #include "kenshin/Common.h"
 
 #include <memory>
+#include <vector>
 
 KENSHIN_NS_BEGIN
 
 namespace backend
 {
+
+    /// Per-frame render parameters (S1.3: clear only; grows over stages).
+    struct FrameBeginInfo
+    {
+        u32 width  = 0;
+        u32 height = 0;
+        f32 clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    };
 
     enum class GpuType
     {
@@ -66,6 +75,20 @@ namespace backend
         virtual bool initialize(const BackendInitParams& params) = 0;
         virtual void shutdown() = 0;
         virtual const BackendCaps& caps() const = 0;
+
+        // ---- frame loop (S1.3) ------------------------------------------
+        /// Begin a frame: waits for the in-flight slot, (re)creates render
+        /// targets on size change, acquires the swapchain image and records
+        /// the clear into the frame command buffer.
+        virtual bool beginFrame(const FrameBeginInfo& info) = 0;
+
+        /// End the frame: blits the offscreen target to the swapchain image,
+        /// submits and presents.
+        virtual void endFrame() = 0;
+
+        /// Blocking readback of the most recently ended frame's offscreen
+        /// target. Output: RGBA8, rows top-down. Returns false on failure.
+        virtual bool readbackFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) = 0;
     };
 
     /// Factory implemented by the Vulkan backend (src/backend/).

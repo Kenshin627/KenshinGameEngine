@@ -87,11 +87,21 @@ namespace backend
                 });
         }
 
+        graphicsFamily = context.graphicsFamily;
+        computeFamily  = context.computeFamily;
+        transferFamily = context.transferFamily;
+
+        std::vector<const char*> deviceExtensions;
+        if (context.surfaceEnabled)
+            deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
         const VkDeviceCreateInfo createInfo {
             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
             .pNext = &features12,
             .queueCreateInfoCount = static_cast<u32>(queueInfos.size()),
             .pQueueCreateInfos = queueInfos.data(),
+            .enabledExtensionCount = static_cast<u32>(deviceExtensions.size()),
+            .ppEnabledExtensionNames = deviceExtensions.empty() ? nullptr : deviceExtensions.data(),
         };
 
         if (const VkResult result = vkCreateDevice(context.physicalDevice, &createInfo,

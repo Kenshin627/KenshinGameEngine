@@ -20,6 +20,9 @@ namespace backend
     struct VulkanDevice
     {
         VkDevice device = VK_NULL_HANDLE;
+        u32 graphicsFamily = 0xFFFFFFFFu;
+        u32 computeFamily  = 0xFFFFFFFFu;
+        u32 transferFamily = 0xFFFFFFFFu;
         VkQueue graphicsQueue = VK_NULL_HANDLE;
         VkQueue computeQueue = VK_NULL_HANDLE;
         VkQueue transferQueue = VK_NULL_HANDLE; // aliases graphicsQueue when same family

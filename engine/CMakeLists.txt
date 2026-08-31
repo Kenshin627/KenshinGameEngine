@@ -21,12 +21,16 @@ endif()
 add_library(kenshin_engine STATIC
     src/Version.cpp
     src/backend/VulkanBackend.cpp
+    src/backend/vulkan/FrameSync.cpp
+    src/backend/vulkan/GpuImage.cpp
+    src/backend/vulkan/Swapchain.cpp
     src/backend/vulkan/VulkanContext.cpp
     src/backend/vulkan/VulkanDevice.cpp
     src/core/Input.cpp
     src/core/Log.cpp
     src/core/Timer.cpp
     src/core/Window.cpp
+    src/util/BmpWriter.cpp
 )
 add_library(kenshin::engine ALIAS kenshin_engine)
 

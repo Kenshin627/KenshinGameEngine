@@ -22,6 +22,10 @@ namespace backend
         void shutdown() override;
         const BackendCaps& caps() const override { return m_caps; }
 
+        bool beginFrame(const FrameBeginInfo& info) override;
+        void endFrame() override;
+        bool readbackFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) override;
+
     private:
         struct Impl;
         std::unique_ptr<Impl> m_impl;

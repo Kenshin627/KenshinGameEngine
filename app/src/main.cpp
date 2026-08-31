@@ -1,22 +1,27 @@
-// KENSHINDemo entry (S1.2: Vulkan device init + capability report).
+// KENSHINDemo entry (S1.3: swapchain + frame loop + screenshot pipeline).
 // Usage:
-//   KENSHINDemo                    normal windowed loop (ESC quits)
-//   KENSHINDemo --frames N         auto-exit after N pumped frames
-//   KENSHINDemo --validation       enable Vulkan validation layer
-//   KENSHINDemo --selftest-window  selftest: create -> programmatic resize -> close,
-//                                  asserts the event chain via log output
+//   KENSHINDemo                                  windowed loop (ESC quits)
+//   KENSHINDemo --frames N                       auto-exit after N frames
+//   KENSHINDemo --validation                     enable Vulkan validation layer
+//   KENSHINDemo --size WxH                       client size (default 1600x900)
+//   KENSHINDemo --cam yaw,pitch,dist[,x,y,z]     camera params (consumed from S1.5 on)
+//   KENSHINDemo --screenshot path.bmp            capture the last rendered frame
+//   KENSHINDemo --selftest-window                window event-chain selftest (no GPU)
 
 #include "kenshin/Version.h"
 #include "kenshin/backend/RenderBackend.h"
 #include "kenshin/core/Input.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Window.h"
+#include "kenshin/util/BmpWriter.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
 
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -24,9 +29,13 @@ namespace
 {
     struct Args
     {
-        int  frames = -1;      // -1 = run until the user closes
+        int  frames = -1;                            // -1 = run until the user closes
+        int  width = 1600;
+        int  height = 900;
         bool selftest = false;
         bool validation = false;
+        std::string cam;                             // parsed by Camera (S1.5)
+        std::string screenshot;
     };
 
     Args parseArgs(int argc, char** argv)
@@ -40,8 +49,32 @@ namespace
                 args.validation = true;
             else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
                 args.frames = std::atoi(argv[++i]);
+            else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc)
+                sscanf_s(argv[++i], "%dx%d", &args.width, &args.height);
+            else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc)
+                args.cam = argv[++i];
+            else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
+                args.screenshot = argv[++i];
+        }
+        if (args.width <= 0 || args.height <= 0)
+        {
+            args.width = 1600;
+            args.height = 900;
         }
         return args;
+    }
+
+    /// Deterministic clear color for a frame index: exact k/255 values so the
+    /// float32 -> UNORM round trip reproduces the same byte in every run.
+    void clearColorForFrame(int frame, kenshin::f32 out[4])
+    {
+        const int r = (frame * 37 + 11) & 0xFF;
+        const int g = (frame * 61 + 3) & 0xFF;
+        const int b = (frame * 97 + 200) & 0xFF;
+        out[0] = static_cast<kenshin::f32>(r) / 255.0f;
+        out[1] = static_cast<kenshin::f32>(g) / 255.0f;
+        out[2] = static_cast<kenshin::f32>(b) / 255.0f;
+        out[3] = 1.0f;
     }
 
     void selftestWindow()
@@ -104,8 +137,12 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (!args.cam.empty())
+        KENSHIN_INFO("camera params '{}' (consumed from S1.5 on)", args.cam);
+
     kenshin::core::Window window;
-    if (!window.create({"KENSHIN Demo", 1600, 900}))
+    if (!window.create({"KENSHIN Demo", static_cast<kenshin::u32>(args.width),
+                        static_cast<kenshin::u32>(args.height)}))
     {
         KENSHIN_ERROR("window create failed");
         kenshin::log::shutdown();
@@ -148,8 +185,50 @@ int main(int argc, char** argv)
         }
         input.nextFrame();
 
+        const bool isLastFrame = args.frames >= 0 && frame + 1 >= args.frames;
+
+        kenshin::f32 color[4];
+        clearColorForFrame(frame, color);
+        if (isLastFrame)
+        {
+            const int r = static_cast<int>(color[0] * 255.0f + 0.5f);
+            const int g = static_cast<int>(color[1] * 255.0f + 0.5f);
+            const int b = static_cast<int>(color[2] * 255.0f + 0.5f);
+            KENSHIN_INFO("frame {} expected color = ({},{},{})", frame, r, g, b);
+        }
+
+        kenshin::backend::FrameBeginInfo beginInfo;
+        beginInfo.width = window.width();
+        beginInfo.height = window.height();
+        beginInfo.clearColor[0] = color[0];
+        beginInfo.clearColor[1] = color[1];
+        beginInfo.clearColor[2] = color[2];
+        beginInfo.clearColor[3] = color[3];
+        if (!backend->beginFrame(beginInfo))
+        {
+            KENSHIN_ERROR("beginFrame failed");
+            break;
+        }
+        backend->endFrame();
+
+        // Capture on the last frame (or when the user is closing).
+        const bool exiting = isLastFrame || window.isOpen() == false;
+        if (!args.screenshot.empty() && exiting)
+        {
+            std::vector<kenshin::u8> rgba;
+            kenshin::u32 w = 0, h = 0;
+            if (const auto parent = std::filesystem::path(args.screenshot).parent_path();
+                !parent.empty())
+                std::filesystem::create_directories(parent);
+            if (backend->readbackFrame(rgba, w, h) &&
+                kenshin::util::writeBmp24(args.screenshot, rgba, w, h))
+                KENSHIN_INFO("screenshot written: {} ({}x{})", args.screenshot, w, h);
+            else
+                KENSHIN_ERROR("screenshot FAILED");
+        }
+
         ++frame;
-        if (args.frames >= 0 && frame >= args.frames)
+        if (isLastFrame)
         {
             KENSHIN_INFO("reached --frames {} -> close", args.frames);
             window.requestClose();

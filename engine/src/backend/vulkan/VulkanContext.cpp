@@ -134,6 +134,7 @@ namespace backend
         {
             instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
             instanceExtensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+            surfaceEnabled = true;
         }
 
         const VkApplicationInfo app {
