@@ -1,11 +1,13 @@
-// KENSHINDemo entry (S1.1: window + input).
+// KENSHINDemo entry (S1.2: Vulkan device init + capability report).
 // Usage:
 //   KENSHINDemo                    normal windowed loop (ESC quits)
 //   KENSHINDemo --frames N         auto-exit after N pumped frames
+//   KENSHINDemo --validation       enable Vulkan validation layer
 //   KENSHINDemo --selftest-window  selftest: create -> programmatic resize -> close,
 //                                  asserts the event chain via log output
 
 #include "kenshin/Version.h"
+#include "kenshin/backend/RenderBackend.h"
 #include "kenshin/core/Input.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Window.h"
@@ -15,6 +17,7 @@
 #include <Windows.h>
 
 #include <cstring>
+#include <memory>
 #include <string>
 
 namespace
@@ -23,6 +26,7 @@ namespace
     {
         int  frames = -1;      // -1 = run until the user closes
         bool selftest = false;
+        bool validation = false;
     };
 
     Args parseArgs(int argc, char** argv)
@@ -32,6 +36,8 @@ namespace
         {
             if (std::strcmp(argv[i], "--selftest-window") == 0)
                 args.selftest = true;
+            else if (std::strcmp(argv[i], "--validation") == 0)
+                args.validation = true;
             else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
                 args.frames = std::atoi(argv[++i]);
         }
@@ -63,7 +69,7 @@ namespace
         else
         {
             KENSHIN_ERROR("selftest: step2 resize FAILED (got {}x{})",
-                     window.width(), window.height());
+                          window.width(), window.height());
             std::exit(2);
         }
 
@@ -108,6 +114,29 @@ int main(int argc, char** argv)
     window.onResize = [](kenshin::u32 w, kenshin::u32 h) { KENSHIN_INFO("resize {}x{}", w, h); };
     window.onClose  = []() { KENSHIN_INFO("closing (user)"); };
 
+    // Vulkan device init (S1.2): capability report + int64 atomics gate
+    auto backend = kenshin::backend::createVulkanBackend();
+    kenshin::backend::BackendInitParams backendParams;
+    backendParams.nativeWindowHandle = window.nativeHandle();
+    backendParams.enableValidation = args.validation;
+    if (!backend->initialize(backendParams))
+    {
+        KENSHIN_ERROR("vulkan backend init failed");
+        backend->shutdown();
+        kenshin::log::shutdown();
+        return 1;
+    }
+    if (!backend->caps().enabledShaderBufferInt64Atomics)
+    {
+        // HARD GATE: the 64-bit atomic VisBuffer depends on this feature.
+        KENSHIN_ERROR("GATE FAILED: shaderBufferInt64Atomics not supported — "
+                      "stop and decide the 32-bit packed fallback (see staged-plan risk table)");
+        backend->shutdown();
+        kenshin::log::shutdown();
+        return 2;
+    }
+    KENSHIN_INFO("[vulkan] gate shaderBufferInt64Atomics: OK");
+
     int frame = 0;
     while (window.pumpEvents())
     {
@@ -128,6 +157,7 @@ int main(int argc, char** argv)
     }
 
     KENSHIN_INFO("main loop exited after {} frames", frame);
+    backend->shutdown();
     kenshin::log::shutdown();
     return 0;
 }

@@ -13,7 +13,7 @@
 
 **Phase 1 · 窗口与 Vulkan 底座**
 - [x] S1.1 Win32 窗口与输入 ✅ 2026-08-31
-- [ ] S1.2 Vulkan 1.2 设备初始化（volk+VMA+特性报告，shaderBufferInt64Atomics 即停检查）
+- [x] S1.2 Vulkan 1.2 设备初始化（volk+VMA+特性报告，shaderBufferInt64Atomics 即停检查）✅ 2026-08-31
 - [ ] S1.3 交换链 + 帧循环 + 截图管线
 - [ ] S1.4 Slang 着色器管理（.slang→SPIR-V，uint64 原子冒烟）
 - [ ] S1.5 ImGui + 相机 + 帧统计面板

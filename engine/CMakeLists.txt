@@ -20,6 +20,9 @@ endif()
 
 add_library(kenshin_engine STATIC
     src/Version.cpp
+    src/backend/VulkanBackend.cpp
+    src/backend/vulkan/VulkanContext.cpp
+    src/backend/vulkan/VulkanDevice.cpp
     src/core/Input.cpp
     src/core/Log.cpp
     src/core/Timer.cpp
@@ -59,3 +62,13 @@ endif()
 find_package(spdlog CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm)
+
+# Vulkan backend deps (kept PRIVATE: raw API types never leave the backend)
+find_package(volk CONFIG REQUIRED)
+find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+target_link_libraries(kenshin_engine PRIVATE
+    volk::volk volk::volk_headers GPUOpen::VulkanMemoryAllocator)
+target_compile_definitions(kenshin_engine PRIVATE
+    VK_NO_PROTOTYPES           # volk supplies all vk entry points
+    VK_USE_PLATFORM_WIN32_KHR  # Win32 surface for present support check
+)
