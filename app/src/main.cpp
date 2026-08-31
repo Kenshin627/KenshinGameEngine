@@ -56,6 +56,7 @@ namespace
         bool selftest = false;
         bool selftestShader = false;
         bool validation = true;   // dev default ON; --no-validation to disable
+        int resizeAt = -1;                           // frame index to program-resize (S2.3)
         std::string cam;                             // parsed by Camera (S1.5)
         std::string mesh = "cube";                   // cube | sphere | knot | <path.obj>
         std::string screenshot;
@@ -71,6 +72,8 @@ namespace
                 args.selftest = true;
             else if (std::strcmp(argv[i], "--selftest-shader") == 0)
                 args.selftestShader = true;
+            else if (std::strcmp(argv[i], "--resize-at") == 0 && i + 1 < argc)
+                args.resizeAt = std::atoi(argv[++i]);
             else if (std::strcmp(argv[i], "--validation") == 0)
                 args.validation = true;
             else if (std::strcmp(argv[i], "--no-validation") == 0)
@@ -601,6 +604,23 @@ int main(int argc, char** argv)
         }
         input.nextFrame();
 
+        // Programmatic mid-run resize (S2.3 verification): shrink then grow;
+        // the swapchain must rebuild and rendering must continue cleanly.
+        if (args.resizeAt >= 0 && frame == args.resizeAt)
+        {
+            const HWND hwnd = static_cast<HWND>(window.nativeHandle());
+            for (const int pass : {0, 1})
+            {
+                RECT r {0, 0, pass == 0 ? 640 : 960, pass == 0 ? 480 : 720};
+                AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+                SetWindowPos(hwnd, nullptr, 60, 60,
+                             r.right - r.left, r.bottom - r.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+                window.pumpEvents();
+            }
+            KENSHIN_INFO("[resize-test] resized at frame {}", frame);
+        }
+
         const kenshin::f32 dt = static_cast<kenshin::f32>(frameTimer.elapsedSeconds());
         frameTimer.reset();
 
@@ -672,10 +692,13 @@ int main(int argc, char** argv)
             std::memcpy(draw.viewProj, &viewProj, sizeof(draw.viewProj));
             const kenshin::f32 kdArr[4] = {meshKd.r, meshKd.g, meshKd.b, 1.0f};
             std::memcpy(draw.kd, kdArr, sizeof(draw.kd));
-            // Light from the camera direction so visible faces are lit.
-            const glm::vec3 fwd = camera.forward();
-            const kenshin::f32 light[4] = {-fwd.x, -fwd.y, -fwd.z, 0.0f};
+            // Studio light from upper-left-front; camera position feeds the
+            // Blinn-Phong specular half-vector.
+            const kenshin::f32 light[4] = {0.35f, 0.8f, 0.45f, 0.0f};
             std::memcpy(draw.lightDir, light, sizeof(draw.lightDir));
+            const kenshin::f32 camArr[4] = {camera.position.x, camera.position.y,
+                                            camera.position.z, 0.0f};
+            std::memcpy(draw.camPos, camArr, sizeof(draw.camPos));
             backend->drawMesh(draw);
         }
 

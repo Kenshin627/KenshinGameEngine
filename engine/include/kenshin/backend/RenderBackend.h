@@ -152,6 +152,7 @@ namespace backend
             f32 viewProj[16];     // column-major mat4 (glm layout)
             f32 kd[4];            // material diffuse RGBA
             f32 lightDir[4] = {0.4f, 0.7f, -0.5f, 0.0f}; // TO light, world
+            f32 camPos[4] = {};   // world-space camera position (specular)
         };
         /// Upload a mesh (staging copy, one-time). Returns handle or kInvalidMeshHandle.
         virtual u32 createMeshBuffer(const MeshUpload& upload) = 0;

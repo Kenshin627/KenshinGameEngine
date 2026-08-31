@@ -1224,7 +1224,7 @@ namespace backend
         const VkPushConstantRange pushRange {
             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             .offset = 0,
-            .size = 96, // mat4 viewProj (64) + kd (16) + lightDir (16)
+            .size = 112, // mat4 viewProj (64) + kd (16) + lightDir (16) + camPos (16)
         };
         const VkPipelineLayoutCreateInfo layoutInfo {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -1312,7 +1312,10 @@ namespace backend
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .polygonMode = VK_POLYGON_MODE_FILL,
             .cullMode = VK_CULL_MODE_BACK_BIT,
-            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            // Mesh convention is CCW in object space (staged-plan 0.5); the
+            // projection's clip-space Y flip inverts rasterized winding, so
+            // the rasterizer's front face is CLOCKWISE.
+            .frontFace = VK_FRONT_FACE_CLOCKWISE,
             .lineWidth = 1.0f,
         };
         const VkPipelineMultisampleStateCreateInfo multisample {
@@ -1390,10 +1393,12 @@ namespace backend
             f32 viewProj[16];
             f32 kd[4];
             f32 lightDir[4];
+            f32 camPos[4];
         } pushData {};
         std::memcpy(pushData.viewProj, draw.viewProj, sizeof(pushData.viewProj));
         std::memcpy(pushData.kd, draw.kd, sizeof(pushData.kd));
         std::memcpy(pushData.lightDir, draw.lightDir, sizeof(pushData.lightDir));
+        std::memcpy(pushData.camPos, draw.camPos, sizeof(pushData.camPos));
 
         // Rendering pass scoped to this draw: color LOAD (clear already done),
         // depth CLEAR (each frame's first draw resets it).
