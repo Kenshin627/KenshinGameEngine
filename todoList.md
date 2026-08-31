@@ -8,8 +8,8 @@
 ## 阶段进度（与 staged-plan.md §5 同步）
 
 **Phase 0 · 工程与基础设施**
-- [ ] S0.1 仓库与双项目构建系统（engine/app）
-- [ ] S0.2 spdlog 日志 / Assert / Timer / Catch2 接入
+- [x] S0.1 仓库与双项目构建系统（engine/app）✅ 2026-08-31
+- [x] S0.2 spdlog 日志 / Assert / Timer / Catch2 接入 ✅ 2026-08-31
 
 **Phase 1 · 窗口与 Vulkan 底座**
 - [ ] S1.1 Win32 窗口与输入
