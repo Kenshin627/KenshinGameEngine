@@ -1,0 +1,14 @@
+{
+  "name": "kengine",
+  "version-string": "0.1.0",
+  "builtin-baseline": "d015e31e90838a4c9dfa3eed45979bc70d9357fc",
+  "dependencies": [
+    "glm",
+    "spdlog",
+    "catch2",
+    "volk",
+    "vulkan-memory-allocator",
+    "imgui",
+    "meshoptimizer"
+  ]
+}

@@ -1,0 +1,19 @@
+# 构建产物
+build/
+out/
+vcpkg_installed/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# 日志与截图（运行时产物）
+log/
+*.bmp
+
+# 系统杂项
+Thumbs.db
+Desktop.ini
