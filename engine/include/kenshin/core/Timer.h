@@ -2,9 +2,9 @@
 
 // ── High-resolution timer (QueryPerformanceCounter) ────────────
 
-#include "ke/Common.h"
+#include "kenshin/Common.h"
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 /// Absolute time in seconds (monotonic, process-wide consistent).
 double getAbsoluteSeconds();
@@ -34,4 +34,4 @@ private:
     i64 m_startTicks;
 };
 
-KE_NS_END
+KENSHIN_NS_END

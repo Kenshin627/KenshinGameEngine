@@ -1,48 +1,48 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ── KEngine engine project ──────────────────────────────────────
+# ── KENSHIN engine project ──────────────────────────────────────
 # Structure follows renderEngine: include/ke (internal headers) mirrors src/,
 # and backend/ is the only module allowed to make raw GPU API calls (from S1.2 on).
 
-project(KEngine VERSION 0.1.0 LANGUAGES CXX)
+project(KENSHIN VERSION 0.1.0 LANGUAGES CXX)
 
 # Git short SHA (for the version banner; falls back to "unknown" without git)
 execute_process(
     COMMAND git rev-parse --short HEAD
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE KE_GIT_SHA
+    OUTPUT_VARIABLE KENSHIN_GIT_SHA
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET
 )
-if(NOT KE_GIT_SHA)
-    set(KE_GIT_SHA "unknown")
+if(NOT KENSHIN_GIT_SHA)
+    set(KENSHIN_GIT_SHA "unknown")
 endif()
 
-add_library(ke_engine STATIC
+add_library(kenshin_engine STATIC
     src/Version.cpp
     src/core/Input.cpp
     src/core/Log.cpp
     src/core/Timer.cpp
     src/core/Window.cpp
 )
-add_library(ke::engine ALIAS ke_engine)
+add_library(kenshin::engine ALIAS kenshin_engine)
 
-target_compile_features(ke_engine PUBLIC cxx_std_20)
+target_compile_features(kenshin_engine PUBLIC cxx_std_20)
 
-target_include_directories(ke_engine PUBLIC
+target_include_directories(kenshin_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_compile_definitions(ke_engine PUBLIC
-    KE_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
-    KE_VERSION_MINOR=${PROJECT_VERSION_MINOR}
-    KE_VERSION_PATCH=${PROJECT_VERSION_PATCH}
-    KE_GIT_SHA="${KE_GIT_SHA}"
-    $<$<CONFIG:Debug>:KE_BUILD_DEBUG=1>
+target_compile_definitions(kenshin_engine PUBLIC
+    KENSHIN_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    KENSHIN_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    KENSHIN_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    KENSHIN_GIT_SHA="${KENSHIN_GIT_SHA}"
+    $<$<CONFIG:Debug>:KENSHIN_BUILD_DEBUG=1>
 )
 
 if(MSVC)
-    target_compile_options(ke_engine PRIVATE
+    target_compile_options(kenshin_engine PRIVATE
         /W4 /permissive- /utf-8 /MP
         /w14242   # conversion from 'int' to 'size_t', possible loss of data
         /w14254   # operator conversion, possible loss of data
@@ -58,4 +58,4 @@ endif()
 # Public deps (their headers appear in our public headers -> PUBLIC)
 find_package(spdlog CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
-target_link_libraries(ke_engine PUBLIC spdlog::spdlog glm::glm)
+target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm)

@@ -1,11 +1,11 @@
-#include "ke/core/Log.h"
+#include "kenshin/core/Log.h"
 
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
 #include <filesystem>
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 namespace log
 {
@@ -29,11 +29,11 @@ namespace log
         console->set_pattern(kPattern);
 
         auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
-            (fs::path(logDir) / "ke.log").string(), true /*truncate on start*/);
+            (fs::path(logDir) / "kenshin.log").string(), true /*truncate on start*/);
         file->set_pattern(kPattern);
 
         s_logger = std::make_shared<spdlog::logger>(
-            "ke", spdlog::sinks_init_list{console, file});
+            "kenshin", spdlog::sinks_init_list{console, file});
         s_logger->set_level(spdlog::level::trace);
         s_logger->flush_on(spdlog::level::warn);
 
@@ -56,4 +56,4 @@ namespace log
 
 } // namespace log
 
-KE_NS_END
+KENSHIN_NS_END

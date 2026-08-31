@@ -1,14 +1,14 @@
-// KEngineDemo entry (S1.1: window + input).
+// KENSHINDemo entry (S1.1: window + input).
 // Usage:
-//   KEngineDemo                    normal windowed loop (ESC quits)
-//   KEngineDemo --frames N         auto-exit after N pumped frames
-//   KEngineDemo --selftest-window  selftest: create -> programmatic resize -> close,
+//   KENSHINDemo                    normal windowed loop (ESC quits)
+//   KENSHINDemo --frames N         auto-exit after N pumped frames
+//   KENSHINDemo --selftest-window  selftest: create -> programmatic resize -> close,
 //                                  asserts the event chain via log output
 
-#include "ke/Version.h"
-#include "ke/core/Input.h"
-#include "ke/core/Log.h"
-#include "ke/core/Window.h"
+#include "kenshin/Version.h"
+#include "kenshin/core/Input.h"
+#include "kenshin/core/Log.h"
+#include "kenshin/core/Window.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -40,13 +40,13 @@ namespace
 
     void selftestWindow()
     {
-        ke::core::Window window;
-        if (!window.create({"KEngine S1.1 selftest", 1600, 900}))
+        kenshin::core::Window window;
+        if (!window.create({"KENSHIN S1.1 selftest", 1600, 900}))
         {
-            KE_ERROR("selftest: window create FAILED");
+            KENSHIN_ERROR("selftest: window create FAILED");
             std::exit(2);
         }
-        KE_INFO("selftest: step1 window-created ok");
+        KENSHIN_INFO("selftest: step1 window-created ok");
 
         // Programmatic resize -> WM_SIZE should surface via pumpEvents.
         // (SetWindowPos takes the outer rect; convert a 1024x768 client rect first.)
@@ -59,10 +59,10 @@ namespace
                      SWP_NOZORDER | SWP_NOACTIVATE);
         window.pumpEvents();
         if (window.width() == 1024 && window.height() == 768)
-            KE_INFO("selftest: step2 resize 1024x768 ok");
+            KENSHIN_INFO("selftest: step2 resize 1024x768 ok");
         else
         {
-            KE_ERROR("selftest: step2 resize FAILED (got {}x{})",
+            KENSHIN_ERROR("selftest: step2 resize FAILED (got {}x{})",
                      window.width(), window.height());
             std::exit(2);
         }
@@ -70,17 +70,17 @@ namespace
         // Inject a key event (synthesized message) -> Input state
         SendMessageW(hwnd, WM_KEYDOWN, 'A', 0);
         SendMessageW(hwnd, WM_KEYUP, 'A', 0);
-        if (ke::core::Input::get().keyReleased('A'))
-            KE_INFO("selftest: step3 key event ok");
+        if (kenshin::core::Input::get().keyReleased('A'))
+            KENSHIN_INFO("selftest: step3 key event ok");
         else
         {
-            KE_ERROR("selftest: step3 key event FAILED");
+            KENSHIN_ERROR("selftest: step3 key event FAILED");
             std::exit(2);
         }
 
         window.requestClose();
         window.pumpEvents();
-        KE_INFO("selftest: PASSED");
+        KENSHIN_INFO("selftest: PASSED");
     }
 } // namespace
 
@@ -88,33 +88,33 @@ int main(int argc, char** argv)
 {
     const Args args = parseArgs(argc, argv);
 
-    ke::log::init();
-    KE_INFO("{}", ke::getBanner());
+    kenshin::log::init();
+    KENSHIN_INFO("{}", kenshin::getBanner());
 
     if (args.selftest)
     {
         selftestWindow();
-        ke::log::shutdown();
+        kenshin::log::shutdown();
         return 0;
     }
 
-    ke::core::Window window;
-    if (!window.create({"KEngine Demo", 1600, 900}))
+    kenshin::core::Window window;
+    if (!window.create({"KENSHIN Demo", 1600, 900}))
     {
-        KE_ERROR("window create failed");
-        ke::log::shutdown();
+        KENSHIN_ERROR("window create failed");
+        kenshin::log::shutdown();
         return 1;
     }
-    window.onResize = [](ke::u32 w, ke::u32 h) { KE_INFO("resize {}x{}", w, h); };
-    window.onClose  = []() { KE_INFO("closing (user)"); };
+    window.onResize = [](kenshin::u32 w, kenshin::u32 h) { KENSHIN_INFO("resize {}x{}", w, h); };
+    window.onClose  = []() { KENSHIN_INFO("closing (user)"); };
 
     int frame = 0;
     while (window.pumpEvents())
     {
-        auto& input = ke::core::Input::get();
+        auto& input = kenshin::core::Input::get();
         if (input.keyPressed(VK_ESCAPE))
         {
-            KE_INFO("ESC pressed -> close");
+            KENSHIN_INFO("ESC pressed -> close");
             window.requestClose();
         }
         input.nextFrame();
@@ -122,12 +122,12 @@ int main(int argc, char** argv)
         ++frame;
         if (args.frames >= 0 && frame >= args.frames)
         {
-            KE_INFO("reached --frames {} -> close", args.frames);
+            KENSHIN_INFO("reached --frames {} -> close", args.frames);
             window.requestClose();
         }
     }
 
-    KE_INFO("main loop exited after {} frames", frame);
-    ke::log::shutdown();
+    KENSHIN_INFO("main loop exited after {} frames", frame);
+    kenshin::log::shutdown();
     return 0;
 }

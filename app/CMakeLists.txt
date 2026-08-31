@@ -1,17 +1,17 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ── KEngineApp application project ──────────────────────────────
+# ── KENSHINApp application project ──────────────────────────────
 # The demo executable: grows into the full demo scene over the stages
 # (--frames/--screenshot/--cam).
 
-project(KEngineApp VERSION 0.1.0 LANGUAGES CXX)
+project(KENSHINApp VERSION 0.1.0 LANGUAGES CXX)
 
-add_executable(KEngineDemo
+add_executable(KENSHINDemo
     src/main.cpp
 )
 
-target_link_libraries(KEngineDemo PRIVATE ke::engine)
+target_link_libraries(KENSHINDemo PRIVATE kenshin::engine)
 
 if(MSVC)
-    target_compile_options(KEngineDemo PRIVATE /W4 /permissive- /utf-8 /MP)
+    target_compile_options(KENSHINDemo PRIVATE /W4 /permissive- /utf-8 /MP)
 endif()

@@ -1,17 +1,17 @@
 #pragma once
 
-// ── KEngine common basics ───────────────────────────────────────
+// ── KENSHIN common basics ───────────────────────────────────────
 // Namespace macros and scalar type aliases (same role as
 // renderEngine::Common.h in the reference project).
 
 #include <cstddef>
 #include <cstdint>
 
-#define KE_NS_BEGIN namespace ke {
-#define KE_NS_END   }
-#define KE_NS_USING using namespace ke;
+#define KENSHIN_NS_BEGIN namespace kenshin {
+#define KENSHIN_NS_END   }
+#define KENSHIN_NS_USING using namespace kenshin;
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 using i8  = int8_t;
 using i16 = int16_t;
@@ -29,4 +29,4 @@ using f64 = double;
 using usize = size_t;
 using isize = std::ptrdiff_t;
 
-KE_NS_END
+KENSHIN_NS_END

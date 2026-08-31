@@ -1,10 +1,10 @@
-#include "ke/core/Timer.h"
+#include "kenshin/core/Timer.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 namespace
 {
@@ -31,4 +31,4 @@ i64 Timer::ticksNow()
     return counter.QuadPart;
 }
 
-KE_NS_END
+KENSHIN_NS_END

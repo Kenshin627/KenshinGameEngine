@@ -1,6 +1,6 @@
-#include "ke/core/Input.h"
+#include "kenshin/core/Input.h"
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 namespace core
 {
@@ -93,4 +93,4 @@ namespace core
 
 } // namespace core
 
-KE_NS_END
+KENSHIN_NS_END

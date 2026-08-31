@@ -1,4 +1,4 @@
-# KEngine 待办清单
+# KENSHIN 待办清单
 
 > 记录待办事项。阶段进度与 [docs/staged-plan.md](docs/staged-plan.md) 同步维护；
 > 临时事项、想法、优化点记在下面"杂项待办"里，做完打勾或删除。

@@ -1,21 +1,21 @@
-#include "ke/Version.h"
+#include "kenshin/Version.h"
 
 #include <cstdio>
 
-#ifndef KE_VERSION_MAJOR
-#define KE_VERSION_MAJOR 0
+#ifndef KENSHIN_VERSION_MAJOR
+#define KENSHIN_VERSION_MAJOR 0
 #endif
-#ifndef KE_VERSION_MINOR
-#define KE_VERSION_MINOR 0
+#ifndef KENSHIN_VERSION_MINOR
+#define KENSHIN_VERSION_MINOR 0
 #endif
-#ifndef KE_VERSION_PATCH
-#define KE_VERSION_PATCH 0
+#ifndef KENSHIN_VERSION_PATCH
+#define KENSHIN_VERSION_PATCH 0
 #endif
-#ifndef KE_GIT_SHA
-#define KE_GIT_SHA "unknown"
+#ifndef KENSHIN_GIT_SHA
+#define KENSHIN_GIT_SHA "unknown"
 #endif
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 namespace
 {
@@ -29,10 +29,10 @@ namespace
             return;
         std::snprintf(s_versionString, sizeof(s_versionString),
                       "%d.%d.%d+%s",
-                      KE_VERSION_MAJOR, KE_VERSION_MINOR, KE_VERSION_PATCH,
-                      KE_GIT_SHA);
+                      KENSHIN_VERSION_MAJOR, KENSHIN_VERSION_MINOR, KENSHIN_VERSION_PATCH,
+                      KENSHIN_GIT_SHA);
         std::snprintf(s_banner, sizeof(s_banner),
-                      "KEngine %s (%s build)",
+                      "KENSHIN %s (%s build)",
                       s_versionString, getBuildConfig());
         s_initialized = true;
     }
@@ -46,7 +46,7 @@ const char* getVersionString()
 
 const char* getBuildConfig()
 {
-#if defined(KE_BUILD_DEBUG) || defined(_DEBUG)
+#if defined(KENSHIN_BUILD_DEBUG) || defined(_DEBUG)
     return "Debug";
 #else
     return "Release";
@@ -59,4 +59,4 @@ const char* getBanner()
     return s_banner;
 }
 
-KE_NS_END
+KENSHIN_NS_END

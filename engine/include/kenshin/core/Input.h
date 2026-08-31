@@ -4,9 +4,9 @@
 // Raw Window events -> Input state (down/pressed/released + mouse deltas + wheel).
 // Call nextFrame() at the end of each frame to clear per-frame state.
 
-#include "ke/Common.h"
+#include "kenshin/Common.h"
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 namespace core
 {
@@ -59,4 +59,4 @@ namespace core
 
 } // namespace core
 
-KE_NS_END
+KENSHIN_NS_END

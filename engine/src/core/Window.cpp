@@ -1,7 +1,7 @@
-#include "ke/core/Window.h"
+#include "kenshin/core/Window.h"
 
-#include "ke/core/Input.h"
-#include "ke/core/Log.h"
+#include "kenshin/core/Input.h"
+#include "kenshin/core/Log.h"
 
 #ifndef UNICODE
 #define UNICODE
@@ -16,14 +16,14 @@
 
 #include <cstdlib>
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 namespace core
 {
 
     namespace
     {
-        constexpr const wchar_t* kClassName = L"KEngineWindow";
+        constexpr const wchar_t* kClassName = L"KENSHINWindow";
         bool s_classRegistered = false;
 
         std::wstring toWide(const std::string& utf8)
@@ -74,7 +74,7 @@ namespace core
             wc.lpszClassName = kClassName;
             if (!RegisterClassExW(&wc))
             {
-                KE_ERROR("RegisterClassExW failed: {}", GetLastError());
+                KENSHIN_ERROR("RegisterClassExW failed: {}", GetLastError());
                 return false;
             }
             s_classRegistered = true;
@@ -91,7 +91,7 @@ namespace core
                                  nullptr, nullptr, hInstance, this);
         if (!m_hwnd)
         {
-            KE_ERROR("CreateWindowExW failed: {}", GetLastError());
+            KENSHIN_ERROR("CreateWindowExW failed: {}", GetLastError());
             return false;
         }
 
@@ -100,7 +100,7 @@ namespace core
         ShowWindow(static_cast<HWND>(m_hwnd), SW_SHOW);
         UpdateWindow(static_cast<HWND>(m_hwnd));
 
-        KE_INFO("Window created {}x{}", m_width, m_height);
+        KENSHIN_INFO("Window created {}x{}", m_width, m_height);
         return true;
     }
 
@@ -231,9 +231,9 @@ namespace core
         if (m_hwnd)
             DestroyWindow(static_cast<HWND>(m_hwnd));
         m_hwnd = nullptr;
-        KE_INFO("Window closed");
+        KENSHIN_INFO("Window closed");
     }
 
 } // namespace core
 
-KE_NS_END
+KENSHIN_NS_END

@@ -5,12 +5,12 @@
 // (resize/keys/mouse/wheel/close); the native handle is exposed for
 // Vulkan surface creation (S1.3).
 
-#include "ke/Common.h"
+#include "kenshin/Common.h"
 
 #include <functional>
 #include <string>
 
-KE_NS_BEGIN
+KENSHIN_NS_BEGIN
 
 namespace core
 {
@@ -20,7 +20,7 @@ namespace core
 
     struct WindowDesc
     {
-        std::string title = "KEngine";
+        std::string title = "KENSHIN";
         u32 width  = 1600;
         u32 height = 900;
         bool resizable = true;
@@ -76,4 +76,4 @@ namespace core
 
 } // namespace core
 
-KE_NS_END
+KENSHIN_NS_END

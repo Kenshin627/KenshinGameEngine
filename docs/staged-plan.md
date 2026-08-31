@@ -1,6 +1,6 @@
-# KEngine 虚拟几何系统 —— 分阶段（Phase/Stage）实施与测试方案
+# KENSHIN 虚拟几何系统 —— 分阶段（Phase/Stage）实施与测试方案
 
-> 配套文档：《KEngine 虚拟几何系统（类 Nanite）从零搭建方案》（总体架构，已批准）。
+> 配套文档：《KENSHIN 虚拟几何系统（类 Nanite）从零搭建方案》（总体架构，已批准）。
 > 本文档把总体方案拆成 **5 个 Phase、20 个 Stage**。核心原则：**每个 Stage 独立实现、独立验证，
 > 验证不通过不进入下一 Stage；每个 Phase 收尾有里程碑验收**。这样任何 bug 都被限制在单个 Stage
 > 的小范围内、且在引入当下就被抓住，不会堆积到管线成型后才发现。
@@ -48,7 +48,7 @@ GPU 侧每个 pass（剔除、光栅化）都写一个**CPU 参考实现**（同
 
 ### 0.5 全局约定（防经典 bug，一次定死）
 
-- **坐标系**：右手系、Y-up、单位=米；**正面 = 逆时针（CCW）绕序**；SW 光栅绕序剔除、投影矩阵、OBJ 加载（OBJ 默认 CCW）全按此约定，CPU/GPU 参考实现共用 `ke/math/` 同一套公式与常量。
+- **坐标系**：右手系、Y-up、单位=米；**正面 = 逆时针（CCW）绕序**；SW 光栅绕序剔除、投影矩阵、OBJ 加载（OBJ 默认 CCW）全按此约定，CPU/GPU 参考实现共用 `kenshin/math/` 同一套公式与常量。
 - **深度**：Vulkan [0,1]，**反向 Z 不用**（v1 直接 z 线性/非线性均可，但 VisBuffer 的 depth 量化公式 CPU/GPU 必须同一份代码导出的常量）。
 - **demo 场景定义**（S3.4/S4.6 的截图验证依赖它有层次）：同一网格（环面结）摆 **近（1m）/中（8m）/远（60m）三组实例** + 一个 cube 参照物，固定 `--cam` 参数集（近景/远景两张）；LOD 层级视图必须呈现"近深远浅"的渐变才算过。
 
@@ -112,15 +112,15 @@ GPU 侧每个 pass（剔除、光栅化）都写一个**CPU 参考实现**（同
 
 **改动**：
 ```
-KEngine/
+KENSHIN/
 ├── CMakeLists.txt            # 工作区：add_subdirectory(engine app tools tests)
 ├── CMakePresets.json         # windows-msvc-debug / -release，vcpkg toolchain (C:\vcpkg)
 ├── vcpkg.json                # volk vma imgui glm catch2 spdlog meshoptimizer slang
 ├── .gitignore                # build/ .vs/ *.user out/ log/ 等
-├── engine/                   # ── 引擎项目 project(KEngine) → ke_engine 静态库 ──
+├── engine/                   # ── 引擎项目 project(KENSHIN) → kenshin_engine 静态库 ──
 │   ├── CMakeLists.txt
-│   ├── include/ke/           # 内部公共头（include/ke 与 src/ 镜像，参照 renderEngine）
-│   │   ├── Common.h          # KE_NS_BEGIN/END、基础类型、版本
+│   ├── include/kenshin/           # 内部公共头（include/ke 与 src/ 镜像，参照 renderEngine）
+│   │   ├── Common.h          # KENSHIN_NS_BEGIN/END、基础类型、版本
 │   │   ├── Engine.h          # 引擎门面 + 子系统容器（type-indexed map）
 │   │   ├── ISubsystem.h      # 子系统接口：onInit/onShutdown/onBeginFrame/onEndFrame
 │   │   ├── core/             # Window(Win32)、Timer、Input、Version
@@ -136,20 +136,20 @@ KEngine/
 │   │   └── DebugOverlay.h    # ImGui 调试面板宿主（对应 renderEngine::DebugOverlay）
 │   ├── src/                  # 与 include/ke 镜像的实现目录
 │   └── shaders/              # Slang 源（.slang，运行时编译到 SPIR-V）
-├── app/                      # ── 应用项目 project(KEngineApp) → KEngineDemo ──
-│   ├── CMakeLists.txt        # 链接 ke_engine
+├── app/                      # ── 应用项目 project(KENSHINApp) → KENSHINDemo ──
+│   ├── CMakeLists.txt        # 链接 kenshin_engine
 │   └── src/main.cpp          # 打印版本日志后退出码 0（后续长成 demo 场景）
 ├── tools/CMakeLists.txt      # 预留（S3.3 填 kgeo_builder CLI）
 └── tests/CMakeLists.txt      # 预留（S0.2 填 Catch2）
 ```
 
-注：renderEngine 的 `Interfaces/` 公共 API 边界层（DLL 分发、app 只见接口）暂不引入——KEngine 的 app 在同仓库静态链接，直接 include 引擎头；将来要 DLL 分发时再加该层（结构已为此留位）。命名风格对齐参考项目：PascalCase 类名、m_ 成员前缀、I 前缀接口、KE_NS 宏。
+注：renderEngine 的 `Interfaces/` 公共 API 边界层（DLL 分发、app 只见接口）暂不引入——KENSHIN 的 app 在同仓库静态链接，直接 include 引擎头；将来要 DLL 分发时再加该层（结构已为此留位）。命名风格对齐参考项目：PascalCase 类名、m_ 成员前缀、I 前缀接口、KENSHIN_NS 宏。
 
 **验证**：
 ```bash
 cmake --preset windows-msvc-release
 cmake --build --preset windows-msvc-release
-./build/release/app/KEngineDemo.exe    # 打印 "KEngine 0.0.1 (engine=<sha>, build=<cfg>)" 退出码 0
+./build/release/app/KENSHINDemo.exe    # 打印 "KENSHIN 0.0.1 (engine=<sha>, build=<cfg>)" 退出码 0
 ctest --preset windows-msvc-release    # 空测试集，通过
 ```
 **通过标准**：以上四条全部成功；`git log` 有初始 commit。
@@ -158,9 +158,9 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 ### 阶段 S0.2 —— 基础设施：spdlog 日志 / Assert / Timer / 测试框架
 
-**目标**：集成 **spdlog**（vcpkg）并做轻封装：`KE_INFO/WARN/ERROR` 宏、彩色控制台 + 滚动文件（`log/ke.log`，5MB×3 轮转）、模块 tag 分类；断言宏（Release 可关）；高精度计时器（QueryPerformanceCounter）；Catch2 接入并有第一个冒烟测试。
+**目标**：集成 **spdlog**（vcpkg）并做轻封装：`KENSHIN_INFO/WARN/ERROR` 宏、彩色控制台 + 滚动文件（`log/ke.log`，5MB×3 轮转）、模块 tag 分类；断言宏（Release 可关）；高精度计时器（QueryPerformanceCounter）；Catch2 接入并有第一个冒烟测试。
 
-**改动**：`engine/include/ke/core/{Log.h,Assert.h,Timer.h}` + `engine/src/core/{Log.cpp,Timer.cpp}`（Log 为 spdlog 薄封装，fmt 随 spdlog 附带）；`tests/src/smoke.cpp`（断言 `1+1==2`、日志字符串格式化）。
+**改动**：`engine/include/kenshin/core/{Log.h,Assert.h,Timer.h}` + `engine/src/core/{Log.cpp,Timer.cpp}`（Log 为 spdlog 薄封装，fmt 随 spdlog 附带）；`tests/src/smoke.cpp`（断言 `1+1==2`、日志字符串格式化）。
 
 **验证**：ctest 绿（1 test）；demo 日志文件生成且含级别标签。
 **通过标准**：V1 通过；日志同时落控制台与文件。
@@ -169,9 +169,9 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 ### 阶段 S1.1 —— Win32 窗口与输入
 
-**目标**：`ke::core::Window`（Win32）：创建/标题/尺寸、WM_SIZE/WM_CLOSE/键盘/鼠标事件 → 回调；`ke::engine::Input` 维护按键/鼠标增量状态。无任何 GPU。
+**目标**：`kenshin::core::Window`（Win32）：创建/标题/尺寸、WM_SIZE/WM_CLOSE/键盘/鼠标事件 → 回调；`kenshin::engine::Input` 维护按键/鼠标增量状态。无任何 GPU。
 
-**改动**：`include/ke/core/Window.h`、`src/core/Window.cpp`、`include/ke/core/Input.h` 等；app 主循环轮询事件并打印 resize/按键日志。
+**改动**：`include/kenshin/core/Window.h`、`src/core/Window.cpp`、`include/kenshin/core/Input.h` 等；app 主循环轮询事件并打印 resize/按键日志。
 
 **验证**：V3——运行 demo：日志出现 `Window created 1600x900`；手动拖拽窗口，日志出现 resize 序列；ESC 打印并退出（本轮无需截图）。
 **通过标准**：事件无丢失（按键按下/抬起成对）、resize 不崩溃。
@@ -182,7 +182,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 **目标**：volk 加载 → instance（校验层按需开启+debug messenger）→ 物理设备选择（独显优先，打印名称/API 版本）→ 逻辑设备（Vulkan 1.2，开启 `shaderBufferInt64Atomics`、`timelineSemaphore`，校验不支持则记录并允许继续）→ 图形+计算队列 → VMA 初始化。
 
-**改动**：`include/ke/backend/RenderBackend.h`（首批抽象类型与枚举）+ `src/backend/vulkan/{VulkanContext,VulkanDevice}.cpp`（volk/VMA/设备/队列，参照 renderEngine "backend 是唯一裸 GPU API 调用处"的纪律）；app 启动时创建并打印**设备能力报告**，随后销毁退出。
+**改动**：`include/kenshin/backend/RenderBackend.h`（首批抽象类型与枚举）+ `src/backend/vulkan/{VulkanContext,VulkanDevice}.cpp`（volk/VMA/设备/队列，参照 renderEngine "backend 是唯一裸 GPU API 调用处"的纪律）；app 启动时创建并打印**设备能力报告**，随后销毁退出。
 
 **验证**：V3——日志含：
 ```
@@ -199,9 +199,9 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 **目标**：surface（VK_KHR_win32_surface）→ swapchain（3 缓冲 FIFO）→ 帧同步（per-frame 信号量+围栏）→ begin/endFrame → 清屏色呈现（颜色随帧号变化）。**同时落地 V2 无头验证管线**：`--frames N --screenshot path --size WxH --cam yaw,pitch,dist[,target]`（相机参数显式指定 ⇒ 所有 V2 截图可复现）；渲染走**离屏 color image**（TRANSFER_SRC 布局）→ blit 到 swapchain 呈现，截图从离屏 image 读取（不碰 swapchain 的 present 布局），vkCmdCopyImage→host 缓冲→写 BMP（手写 BMP 编码器 ~80 行，零依赖）。
 
-**改动**：`src/backend/vulkan/{Swapchain,FrameSync}.cpp` + `include/ke/raii/`（Image/Imageview 包装）；`src/util/BmpWriter.cpp`；app 参数解析。
+**改动**：`src/backend/vulkan/{Swapchain,FrameSync}.cpp` + `include/kenshin/raii/`（Image/Imageview 包装）；`src/util/BmpWriter.cpp`；app 参数解析。
 
-**验证**：V2——`KEngineDemo --frames 3 --size 640x360 --screenshot shot.bmp` 退出码 0；BMP 文件 640×360；第 3 帧清屏色与日志中帧号对应的预期色一致（脚本读 BMP 首像素比对）。
+**验证**：V2——`KENSHINDemo --frames 3 --size 640x360 --screenshot shot.bmp` 退出码 0；BMP 文件 640×360；第 3 帧清屏色与日志中帧号对应的预期色一致（脚本读 BMP 首像素比对）。
 **通过标准**：三次连续运行截图逐字节一致（确定性渲染）。
 
 ---
@@ -210,7 +210,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 **目标**：`ShaderManager`：从 `engine/shaders/` 读 **.slang** 源（选 Slang 而非 GLSL 的理由：语法为 HLSL 超集，Nanite 参考资料里的 shader 几乎可直接搬；官方 SPIR-V 后端支持 64 位整数原子），经 **Slang 运行时库**（slang C API；vcpkg 有 slang port 则用之，否则 vendor 官方二进制发行版到 ThirdParty/slang）编译为 SPIR-V，内存缓存+编译错误带行号日志；支持 `#include` 模块。
 
-**改动**：`include/ke/manager/ShaderManager.h` 等；`shaders/test_atomic.slang`——**冒烟即验证核心路径**：`RWStructuredBuffer<uint64_t>` 上 `atomicMax` + 4 元素 reduce，读回结果核对（同时覆盖 Slang 的 uint64 原子→SPIR-V Int64Atomics 能力链路，VisBuffer 的命门）。
+**改动**：`include/kenshin/manager/ShaderManager.h` 等；`shaders/test_atomic.slang`——**冒烟即验证核心路径**：`RWStructuredBuffer<uint64_t>` 上 `atomicMax` + 4 元素 reduce，读回结果核对（同时覆盖 Slang 的 uint64 原子→SPIR-V Int64Atomics 能力链路，VisBuffer 的命门）。
 
 **验证**：V1+V3——demo 运行 test_atomic.slang 并读回结果 `[1,2,3,4]→reduce=10`、原子 max=预期值，日志确认；故意写错 shader 时日志带 `error: line N` 且程序不崩溃。
 **通过标准**：uint64 atomicMax 路径编译执行正确（若 HLSL 风格 `InterlockedMax` 方法语法在 SPIR-V 后端有坑（issue #4120），改用 Slang 原生 `atomicMax()` 自由函数写法；两者都不通则回退 GLSL+shaderc，编译器接口双支持成本很低）。
@@ -232,7 +232,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 **目标**：`MeshData`（SOA：pos f32×3 / normal f32×3 / uv f32×2 + u32 索引）；手写 OBJ 加载（v/vn/vt/f，多边形扇三角化，缺属性补默认，索引重映射；MTL：Ka/Kd/texture 名，v1 单材质）；程序化生成器（UV 球、环面结，可选 fBm 位移，参数直接控制三角形数）。
 
-**改动**：`include/ke/assets/{MeshData.h,ObjLoader.h,ProceduralMesh.h}` + 实现；tests：加载 `tetra/cube/grid` 与已知答案比对（计数与包围盒精确匹配）；程序化生成器固定参数 → 固定三角形数。
+**改动**：`include/kenshin/assets/{MeshData.h,ObjLoader.h,ProceduralMesh.h}` + 实现；tests：加载 `tetra/cube/grid` 与已知答案比对（计数与包围盒精确匹配）；程序化生成器固定参数 → 固定三角形数。
 
 **验证**：V1 全绿。
 **通过标准**：三种 OBJ 计数/包围盒精确匹配；环面结 1,048,576 三角形生成 < 2s。
@@ -243,7 +243,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 **目标**：GPU buffer 上传（staging copy）、图形管线（顶点布局 PNU、push constant MVP、深度测试）、绘制网格。这是后续所有验证的**对照基线**。
 
-**改动**：`include/ke/renderer/BaselineRenderer.h` + `src/renderer/BaselineRenderer.cpp`；`shaders/baseline.slang`(VS/FS entry points)。相机矩阵走 **UBO**（3×mat4=192B 超 push constant 保证下限 128B，push constant 只放小参数）。
+**改动**：`include/kenshin/renderer/BaselineRenderer.h` + `src/renderer/BaselineRenderer.cpp`；`shaders/baseline.slang`(VS/FS entry points)。相机矩阵走 **UBO**（3×mat4=192B 超 push constant 保证下限 128B，push constant 只放小参数）。
 
 **验证**：V2——固定相机画 cube 与环面结（不位移），截图与手工推导的投影包围盒比对（cube 八顶点应落在预期屏幕坐标 ±2px）；`tests` 中加 CPU 投影参考。
 **通过标准**：深度正确（近面遮挡远面，截图像素检查两个已知点颜色）；三角形绕序正确（无背面错误）。
@@ -263,7 +263,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 **目标**：引入 meshoptimizer（vcpkg，版本须 ≥ v0.25/1.0，提供 `buildMeshletsSpatial`/`partitionClusters`/带 `Sparse|ErrorAbsolute|LockBorder` flag 的 `simplify`）与其官方单头微库 **clusterlod.h**（demo 目录，MIT；固定 commit 落到 `ThirdParty/clusterlod/`，vcpkg 版本过旧则整库 vendor）——后者就是"簇化→分组→锁边→简化→重簇化→递归→DAG"完整构建循环的生产级实现（zeux 2025 文章的主角）。本阶段先跑通：对测试网格执行 `clodBuild`，把每层每组的簇结构（三角形数、顶点数、LOD 误差）打进日志。
 
-**改动**：`include/ke/geometry/ClusterLodBuilder.h`（对 clusterlod.h 的封装：MeshData → clodMesh 适配）+ 实现；tests：
+**改动**：`include/kenshin/geometry/ClusterLodBuilder.h`（对 clusterlod.h 的封装：MeshData → clodMesh 适配）+ 实现；tests：
 - 尺寸上限：每簇三角形 ≤128 **且顶点 ≤256**（256 = 光栅器 groupshared 缓存上限）；
 - 覆盖：第 0 层簇的三角形并集 = 输入网格全部三角形，无重复；
 - 层级数 ≈ log₂(N/128)±2（grid 128 三角形 → 1-2 层；1M 三角形环面结 → ~13±2 层）；
@@ -284,7 +284,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 - **单调误差传播**：自叶向根 `pErr(c) = max(err(c), 子群 max err)`，bounds 同步取并集（唯一切割的保证）；
 - 簇顶点/索引导出为连续池（供 GPU 上传与 .kgeo 序列化）。
 
-**改动**：`include/ke/geometry/ClusterDag.h`（DAG 数据结构）+ `ClusterDagBuilder.cpp`（装配 + 传播）；tests：
+**改动**：`include/kenshin/geometry/ClusterDag.h`（DAG 数据结构）+ `ClusterDagBuilder.cpp`（装配 + 传播）；tests：
 - **无环**：多父 DAG 的 Kahn 拓扑检查；
 - **误差单调**：所有父子边 `pErr(parent) ≥ err(parent)`，且沿根→叶路径父误差 ≥ 子误差；
 - **同组一致**：同组成员的 (pErr, bounds) 完全相同；
@@ -300,7 +300,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 **目标**：二进制格式（little-endian）：`header{magic 'KGE1', version, meshCount} + 簇表{boundsSphere×2f4, err, pErr, childBegin/Count, vertOffset, triOffset} + 顶点池 + 索引池`，全部 16 字节对齐段；`kgeo_builder input.obj -o out.kgeo --report`；引擎侧 Reader。
 
-**改动**：`include/ke/geometry/KGeoFile.h` + 读写实现；`tools/kgeo_builder/main.cpp`；tests：roundtrip（写→读→逐字段相等）；tools 加到 ctest（CLI 冒烟：构建 grid.kgeo）。
+**改动**：`include/kenshin/geometry/KGeoFile.h` + 读写实现；`tools/kgeo_builder/main.cpp`；tests：roundtrip（写→读→逐字段相等）；tools 加到 ctest（CLI 冒烟：构建 grid.kgeo）。
 
 **验证**：V1 roundtrip 绿；V3——对 1,048,576 三角形环面结跑 CLI：日志输出构建各阶段耗时、层数、簇数、文件大小；文件可重新加载。
 **通过标准**：**M1a 验收**——builder 全链路 + 全部单测绿。
@@ -325,7 +325,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 **目标**：.kgeo → 常驻 GPU 缓冲：`ClusterTable`（bounds/err/pErr/偏移）、`VertexPool`、`IndexPool`、`InstanceData`（transform+meshId）；**多 mesh 聚合**（MeshRegistry：每个 .kgeo 追加进共享池，记录 per-mesh 簇范围 [clusterBegin, clusterEnd) 与实例的 meshId 映射）；描述符集绑定；上传走 staging。
 
-**改动**：`include/ke/renderer/VirtualGeometryScene.h` + 实现。
+**改动**：`include/kenshin/renderer/VirtualGeometryScene.h` + 实现。
 
 **验证**：V1——上传后读回 GPU 缓冲做 CRC32 与源数据一致；V3 日志（缓冲尺寸/偏移）。
 **通过标准**：校验和一致；100 万面网格上传 < 0.5s。

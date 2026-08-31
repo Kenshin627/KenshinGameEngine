@@ -19,12 +19,12 @@
     },
     {
       "name": "windows-msvc-debug",
-      "displayName": "KEngine x64 Debug (MSVC + vcpkg)",
+      "displayName": "KENSHIN x64 Debug (MSVC + vcpkg)",
       "inherits": "base"
     },
     {
       "name": "windows-msvc-release",
-      "displayName": "KEngine x64 Release (MSVC + vcpkg)",
+      "displayName": "KENSHIN x64 Release (MSVC + vcpkg)",
       "inherits": "base"
     }
   ],
