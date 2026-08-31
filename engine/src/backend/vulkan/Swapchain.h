@@ -41,6 +41,7 @@ namespace backend
                       u32 width, u32 height);
 
     private:
+        const char* m_presentModeName = "FIFO";
         // graphicsFamily unused while sharing stays EXCLUSIVE (single queue family)
         bool createSwapchain(VkPhysicalDevice physicalDevice, VkDevice device,
                              u32 width, u32 height);

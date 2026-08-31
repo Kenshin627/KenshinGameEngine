@@ -197,7 +197,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 ### 阶段 S1.3 —— 交换链 + 帧循环 + 截图管线
 
-**目标**：surface（VK_KHR_win32_surface）→ swapchain（3 缓冲 FIFO）→ 帧同步（per-frame 信号量+围栏）→ begin/endFrame → 清屏色呈现（颜色随帧号变化）。**同时落地 V2 无头验证管线**：`--frames N --screenshot path --size WxH --cam yaw,pitch,dist[,target]`（相机参数显式指定 ⇒ 所有 V2 截图可复现）；渲染走**离屏 color image**（TRANSFER_SRC 布局）→ blit 到 swapchain 呈现，截图从离屏 image 读取（不碰 swapchain 的 present 布局），vkCmdCopyImage→host 缓冲→写 BMP（手写 BMP 编码器 ~80 行，零依赖）。
+**目标**：surface（VK_KHR_win32_surface）→ swapchain（MAILBOX 优先，回退 FIFO）→ 帧同步（per-frame 信号量+围栏）→ begin/endFrame → 清屏色呈现（颜色随帧号变化）。**同时落地 V2 无头验证管线**：`--frames N --screenshot path --size WxH --cam yaw,pitch,dist[,target]`（相机参数显式指定 ⇒ 所有 V2 截图可复现）；渲染走**离屏 color image**（TRANSFER_SRC 布局）→ blit 到 swapchain 呈现，截图从离屏 image 读取（不碰 swapchain 的 present 布局），vkCmdCopyImage→host 缓冲→写 BMP（手写 BMP 编码器 ~80 行，零依赖）。
 
 **改动**：`src/backend/vulkan/{Swapchain,FrameSync}.cpp` + `include/kenshin/raii/`（Image/Imageview 包装）；`src/util/BmpWriter.cpp`；app 参数解析。
 

@@ -46,8 +46,9 @@ namespace backend
         if (!createSwapchain(physicalDevice, device, width, height))
             return false;
 
-        KENSHIN_INFO("[vulkan] swapchain {}x{}, {} images, FIFO",
-                     extent.width, extent.height, static_cast<u32>(images.size()));
+        KENSHIN_INFO("[vulkan] swapchain {}x{}, {} images, {}",
+                     extent.width, extent.height, static_cast<u32>(images.size()),
+                     m_presentModeName);
         return true;
     }
 
@@ -113,6 +114,17 @@ namespace backend
         if (extent.width == 0xFFFFFFFFu)
             newExtent = {width, height}; // some window systems report "match the window"
 
+        // Present mode: prefer MAILBOX (low-latency vsync); FIFO is the
+        // guaranteed fallback. User decision 2026-08-31: default MAILBOX.
+        u32 modeCount = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &modeCount, nullptr);
+        std::vector<VkPresentModeKHR> modes(modeCount);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &modeCount, modes.data());
+        VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        for (const auto mode : modes)
+            if (mode == VK_PRESENT_MODE_MAILBOX_KHR) { presentMode = mode; break; }
+        m_presentModeName = presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO";
+
         const u32 imageCount = (caps.minImageCount + 1 <= caps.maxImageCount || caps.maxImageCount == 0)
                              ? caps.minImageCount + 1
                              : caps.maxImageCount;
@@ -129,7 +141,7 @@ namespace backend
             .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .preTransform = caps.currentTransform,
             .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-            .presentMode = VK_PRESENT_MODE_FIFO_KHR,
+            .presentMode = presentMode,
             .clipped = VK_TRUE,
             .oldSwapchain = VK_NULL_HANDLE,
         };
