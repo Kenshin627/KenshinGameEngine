@@ -27,8 +27,12 @@ namespace backend
 
         /// One present-wait semaphore per swapchain image: a semaphore stays
         /// "in use by the swapchain" until its present completes, so reusing
-        /// it is only safe when the SAME image is presented again (canonical
-        /// fix for the present/submit semaphore race the validation layer reports).
+        /// it is only safe when the SAME image is presented again.
+        /// Canonical pattern per the Khronos guide "Swapchain Semaphore Reuse"
+        /// (https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html):
+        /// semaphores indexed by swapchain image, fences/cmd buffers by frame
+        /// slot. Violations trip VUID-vkQueueSubmit-pSignalSemaphores-00067.
+        /// Future option: VK_EXT_swapchain_maintenance1 present fences.
         std::vector<VkSemaphore> presentSemaphores;
 
         /// Index of the last acquired image (valid after acquire() == SUCCESS/SUBOPTIMAL).

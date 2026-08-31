@@ -51,7 +51,7 @@ GPU 侧每个 pass（剔除、光栅化）都写一个**CPU 参考实现**（同
 **Vulkan 工程约定**（用户 2026-08-31 定，对 S1.4 起所有阶段有约束力）：
 
 - **Frames in Flight = 2~3**，每帧槽位资源（命令缓冲区、同步对象、Descriptor Set、离屏目标）完全独立——已按此实现（2 槽位）。
-- **跨队列依赖优先 Timeline Semaphore**（S4.1 transfer→graphics 上传、M6 流式加载即用）；swapchain 的 acquire/present 保留 Binary Semaphore（WSI 限制，timeline 不适用）。
+- **跨队列依赖优先 Timeline Semaphore**（S4.1 transfer→graphics 上传、M6 流式加载即用）；swapchain 的 acquire/present 保留 Binary Semaphore（WSI 限制，timeline 不适用），且 **present 信号量按 swapchain 图像分配**（[Khronos 指南：Swapchain Semaphore Reuse](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html)，VUID-vkQueueSubmit-pSignalSemaphores-00067；将来可选 VK_EXT_swapchain_maintenance1 的 present fence）。
 - **全程 Synchronization2**（vkCmdPipelineBarrier2 / vkQueueSubmit2），不新增旧版同步 API。
 - **Dynamic Rendering**：不创建 RenderPass/Framebuffer（S2.2 图形管线照此）。
 - **Descriptor Set 更新只在安全点**（本帧槽位 Fence 等待之后，即 beginFrame 开头）——S1.4 起生效。
