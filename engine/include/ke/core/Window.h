@@ -1,8 +1,9 @@
 #pragma once
 
-// ── Win32 窗口（S1.1）───────────────────────────────────────────
-// 手写窗口层：事件经回调上抛（resize/keys/mouse/wheel/close），
-// 原生句柄供 Vulkan surface 创建（S1.3）使用。
+// ── Win32 window (S1.1) ─────────────────────────────────────────
+// Hand-written window layer: events surface through callbacks
+// (resize/keys/mouse/wheel/close); the native handle is exposed for
+// Vulkan surface creation (S1.3).
 
 #include "ke/Common.h"
 
@@ -14,7 +15,7 @@ KE_NS_BEGIN
 namespace core
 {
 
-    /// 原生窗口句柄（Windows 上即 HWND）。
+    /// Native window handle (HWND on Windows).
     using WindowHandle = void*;
 
     struct WindowDesc
@@ -28,13 +29,14 @@ namespace core
     class Window
     {
     public:
-        // 事件回调（App/Engine 挂接；resize 在最小化时 w/h 为 0，自行忽略）
+        // Event callbacks (attached by app/engine). Resize fires with w/h == 0
+        // when minimized; ignore that case.
         std::function<void(u32 w, u32 h)> onResize;
         std::function<void()> onClose;
-        std::function<void(int vk, bool down)> onKey;              // vk = Win32 虚拟键码
+        std::function<void(int vk, bool down)> onKey;              // vk = Win32 virtual key code
         std::function<void(int button, bool down, int x, int y)> onMouseButton; // button: 0=L 1=M 2=R
         std::function<void(int x, int y)> onMouseMove;
-        std::function<void(float delta)> onWheel;                  // 正 = 向上滚
+        std::function<void(float delta)> onWheel;                  // positive = scroll up
 
         Window() = default;
         ~Window();
@@ -46,13 +48,13 @@ namespace core
         void destroy();
         bool isOpen() const { return m_hwnd != nullptr; }
 
-        /// 泵消息（非阻塞）。返回 false 表示应退出（收到关闭）。
+        /// Pump messages (non-blocking). Returns false when the app should exit.
         bool pumpEvents();
 
-        /// 外部请求关闭（如 ESC）。
+        /// Request close from outside (e.g. ESC).
         void requestClose();
 
-        /// 客户区尺寸（像素）。
+        /// Client-area size in pixels.
         u32 width() const { return m_width; }
         u32 height() const { return m_height; }
 
@@ -62,7 +64,8 @@ namespace core
     private:
         void handleResize(u32 w, u32 h);
         void handleClose();
-        /// Win32 消息处理（类型去 Windows 化以避免头文件污染；.cpp 内转回）。
+        /// Win32 message handler (signature de-Win32'd to keep this header clean;
+        /// cast back to native types in the .cpp).
         i64 handleMessage(void* hwnd, unsigned msg, usize wparam, isize lparam);
 
         void* m_hwnd = nullptr;

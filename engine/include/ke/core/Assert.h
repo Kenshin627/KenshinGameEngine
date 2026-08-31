@@ -1,8 +1,8 @@
 #pragma once
 
-// ── 断言 ─────────────────────────────────────────────────────────
-// KE_ASSERT：仅 Debug 生效（NDEBUG 下编译为空），失败时打日志并断点。
-// KE_VERIFY：任何配置都求值表达式，Debug 下附带断言（用于"必须执行副作用"的检查）。
+// ── Assertions ──────────────────────────────────────────────────
+// KE_ASSERT: debug-only (compiles to nothing under NDEBUG); logs and breaks on failure.
+// KE_VERIFY: expression is always evaluated; asserts in debug (for side-effectful checks).
 
 #include "ke/core/Log.h"
 

@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ── KEngineApp 应用项目 ──────────────────────────────────────────
-# demo 可执行：随阶段推进长成完整 demo 场景（--frames/--screenshot/--cam）。
+# ── KEngineApp application project ──────────────────────────────
+# The demo executable: grows into the full demo scene over the stages
+# (--frames/--screenshot/--cam).
 
 project(KEngineApp VERSION 0.1.0 LANGUAGES CXX)
 

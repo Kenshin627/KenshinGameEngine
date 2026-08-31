@@ -1,4 +1,4 @@
-// 冒烟测试：基础算术 / 版本串 / 日志格式化 / 计时器（S0.2 验收）。
+// Smoke tests: basic arithmetic / version strings / log formatting / timer (S0.2 acceptance).
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -26,14 +26,14 @@ TEST_CASE("version banner is populated", "[smoke][version]")
 
 TEST_CASE("log formats and falls back safely", "[smoke][log]")
 {
-    // 未 init：不得崩溃，写默认 logger
+    // Before init: must not crash, falls back to the default logger
     KE_INFO("pre-init message {}", 0);
 
     ke::log::init();
     KE_INFO("formatted message {}", 42);
     KE_WARN("warn with {} {}", "two", 2);
 
-    // 文件应在 CWD/log/ke.log 生成
+    // The log file should exist at CWD/log/ke.log
     REQUIRE(std::filesystem::exists("log/ke.log"));
 
     ke::log::shutdown();

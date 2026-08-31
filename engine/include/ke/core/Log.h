@@ -1,8 +1,8 @@
 #pragma once
 
-// ── 日志（spdlog 薄封装）────────────────────────────────────────
-// 彩色控制台 + 滚动文件（log/ke.log，5MB × 3 轮转）。
-// 用法：ke::log::init() 一次，之后 KE_INFO/KE_WARN/KE_ERROR(fmt, args...)。
+// ── Logging (thin wrapper over spdlog) ──────────────────────────
+// Colored console + rotating file (log/ke.log, 5MB x 3).
+// Usage: call ke::log::init() once, then KE_INFO/KE_WARN/KE_ERROR(fmt, args...).
 
 #include "ke/Common.h"
 
@@ -11,14 +11,14 @@
 KE_NS_BEGIN
 namespace log
 {
-    /// 初始化日志（幂等）：控制台 + log/ke.log。
-    /// @param logDir 日志目录，默认 "log"。
+    /// Initialize logging (idempotent): console + log/ke.log.
+    /// @param logDir log directory, defaults to "log".
     void init(const char* logDir = "log");
 
-    /// 释放日志资源（程序退出前调用；不调用也能安全收尾）。
+    /// Release log resources (optional; safe to skip).
     void shutdown();
 
-    /// 当前 logger（永不为 null；未 init 时返回 spdlog 默认 logger）。
+    /// Current logger (never null; falls back to spdlog's default before init).
     spdlog::logger* logger();
 }
 KE_NS_END

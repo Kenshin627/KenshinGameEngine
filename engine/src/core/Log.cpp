@@ -19,11 +19,11 @@ namespace log
     void init(const char* logDir)
     {
         if (s_logger)
-            return; // 幂等
+            return; // idempotent
 
         namespace fs = std::filesystem;
         std::error_code ec;
-        fs::create_directories(logDir, ec); // 已存在不视为错误
+        fs::create_directories(logDir, ec); // already-exists is not an error
 
         auto console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         console->set_pattern(kPattern);

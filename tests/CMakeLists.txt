@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
-# ── 测试项目 ─────────────────────────────────────────────────────
-# smoke：基础冒烟（S0.2）
-# 后续：geometry（builder 结构断言，S3）、cpu_reference_*（GPU 差分参考，S4）
+# ── Tests project ───────────────────────────────────────────────
+# smoke: basic smoke tests (S0.2)
+# Later: geometry (builder structural assertions, S3), cpu_reference_* (GPU diff references, S4)
 
 project(KEngineTests VERSION 0.1.0 LANGUAGES CXX)
 

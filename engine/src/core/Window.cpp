@@ -39,7 +39,7 @@ namespace core
         }
     } // namespace
 
-    // ── 生命周期 ────────────────────────────────────────────────
+    // ── Lifetime ────────────────────────────────────────────────
 
     Window::~Window()
     {
@@ -80,7 +80,7 @@ namespace core
             s_classRegistered = true;
         }
 
-        // 客户区尺寸 → 窗口尺寸
+        // Desired client size -> outer window size
         RECT rect {0, 0, static_cast<LONG>(desc.width), static_cast<LONG>(desc.height)};
         const DWORD style = WS_OVERLAPPEDWINDOW & ~(desc.resizable ? 0 : (WS_THICKFRAME | WS_MAXIMIZEBOX));
         AdjustWindowRect(&rect, style, FALSE);
@@ -140,13 +140,14 @@ namespace core
         return GetModuleHandleW(nullptr);
     }
 
-    // ── 消息处理 ────────────────────────────────────────────────
+    // ── Message handling ────────────────────────────────────────
 
     i64 Window::handleMessage(void* hwndRaw, unsigned msg, usize wparamRaw, isize lparamRaw)
     {
         const HWND hwnd = static_cast<HWND>(hwndRaw);
         const WPARAM wparam = static_cast<WPARAM>(wparamRaw);
         const LPARAM lparam = static_cast<LPARAM>(lparamRaw);
+
         switch (msg)
         {
         case WM_SIZE:

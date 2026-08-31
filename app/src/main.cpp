@@ -1,8 +1,9 @@
-// KEngineDemo 入口（S1.1：窗口与输入）。
-// 用法：
-//   KEngineDemo                 正常窗口循环（ESC 退出）
-//   KEngineDemo --frames N      N 帧（泵事件）后自动退出
-//   KEngineDemo --selftest-window  自测：创建→程序化 resize→关闭，日志断言事件链
+// KEngineDemo entry (S1.1: window + input).
+// Usage:
+//   KEngineDemo                    normal windowed loop (ESC quits)
+//   KEngineDemo --frames N         auto-exit after N pumped frames
+//   KEngineDemo --selftest-window  selftest: create -> programmatic resize -> close,
+//                                  asserts the event chain via log output
 
 #include "ke/Version.h"
 #include "ke/core/Input.h"
@@ -20,7 +21,7 @@ namespace
 {
     struct Args
     {
-        int  frames = -1;      // -1 = 一直跑到用户关闭
+        int  frames = -1;      // -1 = run until the user closes
         bool selftest = false;
     };
 
@@ -47,8 +48,8 @@ namespace
         }
         KE_INFO("selftest: step1 window-created ok");
 
-        // 程序化 resize → 期望 WM_SIZE 事件链在 pumpEvents 时回调
-        // （SetWindowPos 收外框尺寸，先用 AdjustWindowRect 换算出 1024x768 客户区对应外框）
+        // Programmatic resize -> WM_SIZE should surface via pumpEvents.
+        // (SetWindowPos takes the outer rect; convert a 1024x768 client rect first.)
         const HWND hwnd = static_cast<HWND>(window.nativeHandle());
         RECT clientRect {0, 0, 1024, 768};
         AdjustWindowRect(&clientRect, WS_OVERLAPPEDWINDOW, FALSE);
@@ -66,7 +67,7 @@ namespace
             std::exit(2);
         }
 
-        // 注入按键（合成消息）→ Input 状态
+        // Inject a key event (synthesized message) -> Input state
         SendMessageW(hwnd, WM_KEYDOWN, 'A', 0);
         SendMessageW(hwnd, WM_KEYUP, 'A', 0);
         if (ke::core::Input::get().keyReleased('A'))

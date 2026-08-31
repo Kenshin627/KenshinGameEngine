@@ -1,7 +1,8 @@
 #pragma once
 
-// ── KEngine 公共基础 ────────────────────────────────────────────
-// 命名空间宏与基础标量类型别名（参照 renderEngine::Common.h 的角色）。
+// ── KEngine common basics ───────────────────────────────────────
+// Namespace macros and scalar type aliases (same role as
+// renderEngine::Common.h in the reference project).
 
 #include <cstddef>
 #include <cstdint>

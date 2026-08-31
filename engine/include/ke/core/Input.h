@@ -1,8 +1,8 @@
 #pragma once
 
-// ── 输入状态（S1.1）─────────────────────────────────────────────
-// Window 原始事件 → Input 状态（按住/按下/松开 + 鼠标增量 + 滚轮）。
-// 每帧末调用 nextFrame() 清除逐帧状态。
+// ── Input state (S1.1) ──────────────────────────────────────────
+// Raw Window events -> Input state (down/pressed/released + mouse deltas + wheel).
+// Call nextFrame() at the end of each frame to clear per-frame state.
 
 #include "ke/Common.h"
 
@@ -16,10 +16,10 @@ namespace core
     public:
         static Input& get();
 
-        /// 查询（本帧有效）
-        bool keyDown(int vk) const;      // 持续按住
-        bool keyPressed(int vk) const;   // 本帧刚按下
-        bool keyReleased(int vk) const;  // 本帧刚松开
+        // Queries (valid for the current frame)
+        bool keyDown(int vk) const;      // held down
+        bool keyPressed(int vk) const;   // went down this frame
+        bool keyReleased(int vk) const;  // went up this frame
 
         int mouseX() const { return m_mouseX; }
         int mouseY() const { return m_mouseY; }
@@ -29,12 +29,12 @@ namespace core
         bool mouseDown(int button) const;      // button: 0=L 1=M 2=R
         bool mousePressed(int button) const;
 
-        float wheelDelta() const { return m_wheel; } // 本帧滚轮格数（正=向上）
+        float wheelDelta() const { return m_wheel; } // wheel notches this frame (positive = up)
 
-        /// 帧末调用：清逐帧状态（按下/松开/增量/滚轮）。
+        /// End of frame: clear per-frame state (pressed/released/deltas/wheel).
         void nextFrame();
 
-        // ---- Window 内部调用 ----
+        // ---- called by Window ----
         void onKey(int vk, bool down);
         void onMouseMove(int x, int y);
         void onMouseButton(int button, bool down);

@@ -1,15 +1,15 @@
 #pragma once
 
-// ── 高精度计时器（QueryPerformanceCounter）─────────────────────
+// ── High-resolution timer (QueryPerformanceCounter) ────────────
 
 #include "ke/Common.h"
 
 KE_NS_BEGIN
 
-/// 绝对时间（秒，单调递增，进程内一致）。
+/// Absolute time in seconds (monotonic, process-wide consistent).
 double getAbsoluteSeconds();
 
-/// 区间计时器：构造即开始，reset 归零，elapsed 取秒。
+/// Interval timer: starts on construction, reset() to zero, elapsed*() to read.
 class Timer
 {
 public:
