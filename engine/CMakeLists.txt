@@ -19,6 +19,8 @@ if(NOT KENSHIN_GIT_SHA)
 endif()
 
 add_library(kenshin_engine STATIC
+    src/assets/ObjLoader.cpp
+    src/assets/ProceduralMesh.cpp
     # vendored ImGui backends, compiled here so vk calls resolve through volk
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_win32.cpp

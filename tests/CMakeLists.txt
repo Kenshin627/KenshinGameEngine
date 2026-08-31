@@ -9,6 +9,7 @@ project(KENSHINTests VERSION 0.1.0 LANGUAGES CXX)
 find_package(Catch2 CONFIG REQUIRED)
 
 add_executable(kenshin_tests
+    src/assets_tests.cpp
     src/smoke.cpp
 )
 
@@ -19,3 +20,6 @@ if(MSVC)
 endif()
 
 add_test(NAME kenshin_tests COMMAND kenshin_tests)
+set_tests_properties(kenshin_tests PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}   # resolve tests/assets relative paths
+)
