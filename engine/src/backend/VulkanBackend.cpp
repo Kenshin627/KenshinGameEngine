@@ -76,8 +76,12 @@ namespace backend
         caps.presentSupported = m_impl->presentSupported;
         caps.graphicsFamily = m_impl->context.graphicsFamily;
         caps.computeFamily  = m_impl->context.computeFamily;
+        caps.transferFamily = m_impl->context.transferFamily;
         caps.graphicsAndComputeSameFamily =
             m_impl->context.graphicsFamily == m_impl->context.computeFamily;
+        caps.dedicatedTransferFamily =
+            caps.transferFamily != caps.graphicsFamily &&
+            caps.transferFamily != caps.computeFamily;
 
         static const char* kGpuTypeNames[] = { "unknown", "integrated", "discrete", "virtual", "cpu" };
         KENSHIN_INFO("[vulkan] GPU: {} (api {}.{}, {}, {}MB device-local)",
@@ -89,12 +93,14 @@ namespace backend
         KENSHIN_INFO("[vulkan] feature timelineSemaphore = {}{}",
                      caps.supportsTimelineSemaphore ? "supported" : "NOT supported",
                      caps.enabledTimelineSemaphore ? " (enabled)" : "");
-        KENSHIN_INFO("[vulkan] queues: graphics={} compute={}{}{}",
+        KENSHIN_INFO("[vulkan] queues: graphics={} compute={}{} transfer={} ({}), {}",
                      caps.graphicsFamily, caps.computeFamily,
                      caps.graphicsAndComputeSameFamily ? " (same family)" : "",
+                     caps.transferFamily,
+                     caps.dedicatedTransferFamily ? "dedicated DMA" : "shared",
                      params.nativeWindowHandle
-                         ? (caps.presentSupported ? ", present=ok" : ", present=NOT supported")
-                         : ", present=unchecked (no window)");
+                         ? (caps.presentSupported ? "present=ok" : "present=NOT supported")
+                         : "present=unchecked (no window)");
         return true;
     }
 

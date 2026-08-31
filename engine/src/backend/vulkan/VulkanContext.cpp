@@ -277,25 +277,45 @@ namespace backend
                 (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT))
             {
                 graphicsFamily = computeFamily = i;
-                return;
-            }
-        }
-        for (u32 i = 0; i < familyCount; ++i)
-        {
-            if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
-            {
-                graphicsFamily = i;
                 break;
             }
         }
-        for (u32 i = 0; i < familyCount; ++i)
+        if (graphicsFamily == 0xFFFFFFFFu)
         {
-            if (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT)
+            for (u32 i = 0; i < familyCount; ++i)
             {
-                computeFamily = i;
-                break;
+                if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+                {
+                    graphicsFamily = i;
+                    break;
+                }
+            }
+            for (u32 i = 0; i < familyCount; ++i)
+            {
+                if (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT)
+                {
+                    computeFamily = i;
+                    break;
+                }
             }
         }
+
+        // Dedicated async transfer family (typical on NVIDIA: extra families
+        // with TRANSFER only) > compute-only family > graphics family.
+        u32 dedicated = 0xFFFFFFFFu, asyncCompute = 0xFFFFFFFFu;
+        for (u32 i = 0; i < familyCount; ++i)
+        {
+            const auto flags = families[i].queueFlags;
+            if (!(flags & VK_QUEUE_TRANSFER_BIT))
+                continue;
+            if (!(flags & VK_QUEUE_GRAPHICS_BIT) && !(flags & VK_QUEUE_COMPUTE_BIT))
+                dedicated = (dedicated == 0xFFFFFFFFu) ? i : dedicated;
+            else if (!(flags & VK_QUEUE_GRAPHICS_BIT))
+                asyncCompute = (asyncCompute == 0xFFFFFFFFu) ? i : asyncCompute;
+        }
+        transferFamily = dedicated != 0xFFFFFFFFu ? dedicated
+                      : asyncCompute != 0xFFFFFFFFu ? asyncCompute
+                      : graphicsFamily;
     }
 
     bool VulkanContext::checkPresentSupport(void* hwnd)

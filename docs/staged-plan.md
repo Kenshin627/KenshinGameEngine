@@ -207,6 +207,8 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 ---
 
 > **Vulkan 基线 = 1.4**（用户 2026-08-31 定；两块本机 GPU 均支持 1.4.x）：shaderBufferInt64Atomics 自 1.2 起核心仍需显式开启；**1.3 起 dynamic rendering 免 render pass/framebuffer 样板、synchronization2 屏障 API**，**1.4 起 push descriptor 免描述符池**——S1.3 起的管线代码按这些现代基线写。
+>
+> **队列布局**（S1.2 已启用）：graphics+compute 同族（NVIDIA family 0）+ **专用 transfer/DMA 族（family 1）**。使用策略：S4.1 的一次性 GPU Scene 上传走 transfer 队列（含 ownership release/acquire 屏障到 graphics）；每帧小上传走 graphics 队列内联；**M6 流式加载的异步页上传是专用队列的核心用武之地**（与渲染重叠）。
 
 ### 阶段 S1.4 —— Slang 着色器管理
 

@@ -22,6 +22,7 @@ namespace backend
         VkDevice device = VK_NULL_HANDLE;
         VkQueue graphicsQueue = VK_NULL_HANDLE;
         VkQueue computeQueue = VK_NULL_HANDLE;
+        VkQueue transferQueue = VK_NULL_HANDLE; // aliases graphicsQueue when same family
         VmaAllocator allocator = VK_NULL_HANDLE;
 
         // Features actually enabled at device creation

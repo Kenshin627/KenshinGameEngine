@@ -26,9 +26,12 @@ namespace backend
         bool supportsBufferInt64Atomics = false;
         bool supportsTimelineSemaphore  = false;
 
-        // Queue family selection
+        // Queue family selection. transferFamily prefers a dedicated DMA
+        // family (TRANSFER without GRAPHICS/COMPUTE) for async streaming
+        // uploads (M6); falls back to compute-only, then graphics.
         u32 graphicsFamily = 0xFFFFFFFFu;
         u32 computeFamily  = 0xFFFFFFFFu;
+        u32 transferFamily = 0xFFFFFFFFu;
 
         /// @param enableValidation  add VK_LAYER_KHRONOS_validation + debug messenger
         /// @param needSurface       add instance-level surface extensions (Win32)

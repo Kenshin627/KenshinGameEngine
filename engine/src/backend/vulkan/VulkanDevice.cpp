@@ -69,16 +69,22 @@ namespace backend
         const float priority = 1.0f;
         std::vector<VkDeviceQueueCreateInfo> queueInfos;
         const bool sameFamily = context.graphicsFamily == context.computeFamily;
-        const u32 usedFamilies[2] = { context.graphicsFamily, context.computeFamily };
-        const u32 familyCount = sameFamily ? 1 : 2;
-        for (u32 i = 0; i < familyCount; ++i)
+        const u32 candidateFamilies[3] = {
+            context.graphicsFamily, context.computeFamily, context.transferFamily,
+        };
+        for (const u32 family : candidateFamilies)
         {
-            queueInfos.push_back(VkDeviceQueueCreateInfo {
-                .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                .queueFamilyIndex = usedFamilies[i],
-                .queueCount = 1,
-                .pQueuePriorities = &priority,
-            });
+            bool alreadyCreated = false;
+            for (const auto& info : queueInfos)
+                if (info.queueFamilyIndex == family)
+                    alreadyCreated = true;
+            if (!alreadyCreated)
+                queueInfos.push_back(VkDeviceQueueCreateInfo {
+                    .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                    .queueFamilyIndex = family,
+                    .queueCount = 1,
+                    .pQueuePriorities = &priority,
+                });
         }
 
         const VkDeviceCreateInfo createInfo {
@@ -99,6 +105,7 @@ namespace backend
 
         vkGetDeviceQueue(device, context.graphicsFamily, 0, &graphicsQueue);
         vkGetDeviceQueue(device, context.computeFamily, 0, &computeQueue);
+        vkGetDeviceQueue(device, context.transferFamily, 0, &transferQueue);
 
         VmaVulkanFunctions vmaFns;
         fillVmaVulkanFunctions(vmaFns);
@@ -119,9 +126,15 @@ namespace backend
             return false;
         }
 
-        KENSHIN_INFO("[vulkan] device created (graphics family {}, compute family {}{})",
+        const bool dedicatedTransfer =
+            context.transferFamily != context.graphicsFamily &&
+            context.transferFamily != context.computeFamily;
+        KENSHIN_INFO("[vulkan] device created (graphics family {}, compute family {}{}, "
+                     "transfer family {}{})",
                      context.graphicsFamily, context.computeFamily,
-                     sameFamily ? ", same family" : "");
+                     sameFamily ? ", same family" : "",
+                     context.transferFamily,
+                     dedicatedTransfer ? " (dedicated DMA)" : " (shared with graphics)");
         return true;
     }
 

@@ -46,7 +46,9 @@ namespace backend
 
         u32 graphicsFamily = 0xFFFFFFFFu;
         u32 computeFamily  = 0xFFFFFFFFu;
+        u32 transferFamily = 0xFFFFFFFFu;
         bool graphicsAndComputeSameFamily = false;
+        bool dedicatedTransferFamily = false;
     };
 
     struct BackendInitParams
