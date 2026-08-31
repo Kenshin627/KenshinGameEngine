@@ -245,9 +245,13 @@ namespace backend
             return false;
         }
 
-        // Query Vulkan 1.2 feature support on the selected device
+        // Query feature support on the selected device (1.2 + 1.3 chains)
+        VkPhysicalDeviceVulkan13Features features13 {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        };
         VkPhysicalDeviceVulkan12Features features12 {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+            .pNext = &features13,
         };
         VkPhysicalDeviceFeatures2 features2 {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -256,6 +260,8 @@ namespace backend
         vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
         supportsBufferInt64Atomics = features12.shaderBufferInt64Atomics != VK_FALSE;
         supportsTimelineSemaphore  = features12.timelineSemaphore != VK_FALSE;
+        supportsSynchronization2   = features13.synchronization2 != VK_FALSE;
+        supportsDynamicRendering   = features13.dynamicRendering != VK_FALSE;
 
         KENSHIN_INFO("[vulkan] GPU selected: {} (api {}.{})",
                      props.deviceName,

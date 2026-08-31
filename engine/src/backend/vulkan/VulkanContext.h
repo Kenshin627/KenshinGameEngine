@@ -25,6 +25,8 @@ namespace backend
         // Feature support (queried from the selected physical device)
         bool supportsBufferInt64Atomics = false;
         bool supportsTimelineSemaphore  = false;
+        bool supportsSynchronization2   = false;
+        bool supportsDynamicRendering   = false;
 
         // True when surface extensions were enabled at instance creation.
         bool surfaceEnabled = false;

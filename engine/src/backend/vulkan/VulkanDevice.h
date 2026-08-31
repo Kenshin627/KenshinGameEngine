@@ -31,6 +31,8 @@ namespace backend
         // Features actually enabled at device creation
         bool enabledBufferInt64Atomics = false;
         bool enabledTimelineSemaphore  = false;
+        bool enabledSynchronization2   = false;
+        bool enabledDynamicRendering   = false;
 
         /// @param context  initialized VulkanContext (physical device + families)
         bool init(const struct VulkanContext& context);

@@ -34,8 +34,7 @@ namespace backend
             const VkSemaphoreCreateInfo semInfo {
                 .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
             };
-            if (vkCreateSemaphore(device.device, &semInfo, nullptr, &slot.imageAvailable) != VK_SUCCESS ||
-                vkCreateSemaphore(device.device, &semInfo, nullptr, &slot.renderFinished) != VK_SUCCESS)
+            if (vkCreateSemaphore(device.device, &semInfo, nullptr, &slot.imageAvailable) != VK_SUCCESS)
                 return false;
 
             const VkFenceCreateInfo fenceInfo {
@@ -58,11 +57,6 @@ namespace backend
             {
                 vkDestroyFence(device.device, slot.inFlight, nullptr);
                 slot.inFlight = VK_NULL_HANDLE;
-            }
-            if (slot.renderFinished != VK_NULL_HANDLE)
-            {
-                vkDestroySemaphore(device.device, slot.renderFinished, nullptr);
-                slot.renderFinished = VK_NULL_HANDLE;
             }
             if (slot.imageAvailable != VK_NULL_HANDLE)
             {

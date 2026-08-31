@@ -23,8 +23,7 @@ namespace backend
     {
         VkCommandPool commandPool = VK_NULL_HANDLE;
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
-        VkSemaphore imageAvailable = VK_NULL_HANDLE;
-        VkSemaphore renderFinished = VK_NULL_HANDLE;
+        VkSemaphore imageAvailable = VK_NULL_HANDLE; // signaled by acquire, consumed by submit
         VkFence inFlight = VK_NULL_HANDLE;
         GpuImage offscreen;
 

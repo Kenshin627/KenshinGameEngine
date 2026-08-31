@@ -48,6 +48,17 @@ GPU 侧每个 pass（剔除、光栅化）都写一个**CPU 参考实现**（同
 
 ### 0.5 全局约定（防经典 bug，一次定死）
 
+**Vulkan 工程约定**（用户 2026-08-31 定，对 S1.4 起所有阶段有约束力）：
+
+- **Frames in Flight = 2~3**，每帧槽位资源（命令缓冲区、同步对象、Descriptor Set、离屏目标）完全独立——已按此实现（2 槽位）。
+- **跨队列依赖优先 Timeline Semaphore**（S4.1 transfer→graphics 上传、M6 流式加载即用）；swapchain 的 acquire/present 保留 Binary Semaphore（WSI 限制，timeline 不适用）。
+- **全程 Synchronization2**（vkCmdPipelineBarrier2 / vkQueueSubmit2），不新增旧版同步 API。
+- **Dynamic Rendering**：不创建 RenderPass/Framebuffer（S2.2 图形管线照此）。
+- **Descriptor Set 更新只在安全点**（本帧槽位 Fence 等待之后，即 beginFrame 开头）——S1.4 起生效。
+- **资源流式加载走独立队列/线程**，通过时间线信号量与主渲染循环解耦，不阻塞主循环（S4.1/M6）。
+- **关注 Frame Pacing（帧间隔方差）**：S1.5 统计面板必须含帧间隔 avg/stddev/max，不只平均 FPS。
+- **开发阶段 Validation Layer 全程开启**（默认 ON，`--no-validation` 关闭）；生产构建再引入编译期开关关闭。
+
 - **坐标系**：右手系、Y-up、单位=米；**正面 = 逆时针（CCW）绕序**；SW 光栅绕序剔除、投影矩阵、OBJ 加载（OBJ 默认 CCW）全按此约定，CPU/GPU 参考实现共用 `kenshin/math/` 同一套公式与常量。
 - **深度**：Vulkan [0,1]，**反向 Z 不用**（v1 直接 z 线性/非线性均可，但 VisBuffer 的 depth 量化公式 CPU/GPU 必须同一份代码导出的常量）。
 - **demo 场景定义**（S3.4/S4.6 的截图验证依赖它有层次）：同一网格（环面结）摆 **近（1m）/中（8m）/远（60m）三组实例** + 一个 cube 参照物，固定 `--cam` 参数集（近景/远景两张）；LOD 层级视图必须呈现"近深远浅"的渐变才算过。
@@ -228,7 +239,7 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 **改动**：`src/scene/{Camera,CameraController}.cpp`、`src/DebugOverlay.cpp`（ImGui 宿主）；app 每帧更新。
 
 **验证**：V2——`--screenshot` 出现 ImGui 面板（文字与曲线可见）；相机受输入影响（脚本注入固定键盘事件序列后，视图矩阵日志与 CPU 预期一致）。
-**通过标准**：面板正常渲染、不闪烁（双缓冲描述符正确）；相机矩阵正交性检查通过。
+**通过标准**：面板正常渲染、不闪烁（双缓冲描述符正确）；相机矩阵正交性检查通过；**帧间隔统计含 avg/stddev/max（frame pacing，不只平均 FPS）**。
 
 ---
 

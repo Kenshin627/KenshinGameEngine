@@ -25,6 +25,12 @@ namespace backend
         std::vector<VkImage> images;
         std::vector<VkImageView> imageViews;
 
+        /// One present-wait semaphore per swapchain image: a semaphore stays
+        /// "in use by the swapchain" until its present completes, so reusing
+        /// it is only safe when the SAME image is presented again (canonical
+        /// fix for the present/submit semaphore race the validation layer reports).
+        std::vector<VkSemaphore> presentSemaphores;
+
         /// Index of the last acquired image (valid after acquire() == SUCCESS/SUBOPTIMAL).
         u32 imageIndex = 0;
 

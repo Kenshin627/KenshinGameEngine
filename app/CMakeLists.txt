@@ -15,3 +15,19 @@ target_link_libraries(KENSHINDemo PRIVATE kenshin::engine)
 if(MSVC)
     target_compile_options(KENSHINDemo PRIVATE /W4 /permissive- /utf-8 /MP)
 endif()
+
+# Dev: ship the Vulkan validation layer next to the executable. The layer comes
+# from the vcpkg manifest (vulkan-validationlayers); the app points
+# VK_LAYER_PATH at its own directory at startup so the loader discovers it.
+set(KE_VKG_LAYER_DIR ${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/bin)
+if(EXISTS ${KE_VKG_LAYER_DIR}/VkLayer_khronos_validation.json)
+    add_custom_command(TARGET KENSHINDemo POST_BUILD
+        # mimalloc.dll: the vcpkg-built layer links against it
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${KE_VKG_LAYER_DIR}/VkLayer_khronos_validation.dll
+            ${KE_VKG_LAYER_DIR}/VkLayer_khronos_validation.json
+            ${KE_VKG_LAYER_DIR}/mimalloc.dll
+            ${KE_VKG_LAYER_DIR}/mimalloc-redirect.dll
+            $<TARGET_FILE_DIR:KENSHINDemo>
+        COMMENT "Copying Vulkan validation layer next to KENSHINDemo")
+endif()

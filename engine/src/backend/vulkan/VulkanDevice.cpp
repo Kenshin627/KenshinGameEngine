@@ -59,9 +59,17 @@ namespace backend
         // Enable only what the physical device reports as supported.
         enabledBufferInt64Atomics = context.supportsBufferInt64Atomics;
         enabledTimelineSemaphore  = context.supportsTimelineSemaphore;
+        enabledSynchronization2   = context.supportsSynchronization2;
+        enabledDynamicRendering   = context.supportsDynamicRendering;
 
+        VkPhysicalDeviceVulkan13Features features13 {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+            .synchronization2 = enabledSynchronization2 ? VK_TRUE : VK_FALSE,
+            .dynamicRendering = enabledDynamicRendering ? VK_TRUE : VK_FALSE,
+        };
         const VkPhysicalDeviceVulkan12Features features12 {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+            .pNext = &features13,
             .shaderBufferInt64Atomics = enabledBufferInt64Atomics ? VK_TRUE : VK_FALSE,
             .timelineSemaphore = enabledTimelineSemaphore ? VK_TRUE : VK_FALSE,
         };
@@ -139,6 +147,9 @@ namespace backend
         const bool dedicatedTransfer =
             context.transferFamily != context.graphicsFamily &&
             context.transferFamily != context.computeFamily;
+        KENSHIN_INFO("[vulkan] features13: synchronization2={}, dynamicRendering={}",
+                     enabledSynchronization2 ? "enabled" : "OFF",
+                     enabledDynamicRendering ? "enabled" : "OFF");
         KENSHIN_INFO("[vulkan] device created (graphics family {}, compute family {}{}, "
                      "transfer family {}{})",
                      context.graphicsFamily, context.computeFamily,

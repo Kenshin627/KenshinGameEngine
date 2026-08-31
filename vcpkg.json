@@ -9,6 +9,7 @@
     "volk",
     "vulkan-memory-allocator",
     "imgui",
-    "meshoptimizer"
+    "meshoptimizer",
+    "vulkan-validationlayers"
   ]
 }

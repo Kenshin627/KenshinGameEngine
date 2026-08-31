@@ -2,7 +2,7 @@
 // Usage:
 //   KENSHINDemo                                  windowed loop (ESC quits)
 //   KENSHINDemo --frames N                       auto-exit after N frames
-//   KENSHINDemo --validation                     enable Vulkan validation layer
+//   KENSHINDemo --no-validation                 disable the validation layer (dev default: ON)
 //   KENSHINDemo --size WxH                       client size (default 1600x900)
 //   KENSHINDemo --cam yaw,pitch,dist[,x,y,z]     camera params (consumed from S1.5 on)
 //   KENSHINDemo --screenshot path.bmp            capture the last rendered frame
@@ -33,7 +33,7 @@ namespace
         int  width = 1600;
         int  height = 900;
         bool selftest = false;
-        bool validation = false;
+        bool validation = true;   // dev default ON; --no-validation to disable
         std::string cam;                             // parsed by Camera (S1.5)
         std::string screenshot;
     };
@@ -47,6 +47,8 @@ namespace
                 args.selftest = true;
             else if (std::strcmp(argv[i], "--validation") == 0)
                 args.validation = true;
+            else if (std::strcmp(argv[i], "--no-validation") == 0)
+                args.validation = false;
             else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
                 args.frames = std::atoi(argv[++i]);
             else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc)
@@ -151,7 +153,21 @@ int main(int argc, char** argv)
     window.onResize = [](kenshin::u32 w, kenshin::u32 h) { KENSHIN_INFO("resize {}x{}", w, h); };
     window.onClose  = []() { KENSHIN_INFO("closing (user)"); };
 
-    // Vulkan device init (S1.2): capability report + int64 atomics gate
+    // Vulkan device init (S1.2): capability report + int64 atomics gate.
+    // Dev default: validation ON. The layer ships next to the exe (vcpkg);
+    // point the loader at it before instance creation.
+    if (args.validation)
+    {
+        wchar_t exePath[MAX_PATH] {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        const auto exeDir = std::filesystem::path(exePath).parent_path();
+        if (std::filesystem::exists(exeDir / "VkLayer_khronos_validation.json"))
+        {
+            SetEnvironmentVariableW(L"VK_LAYER_PATH", exeDir.c_str());
+            KENSHIN_INFO("validation layer path -> {}", exeDir.string());
+        }
+    }
+
     auto backend = kenshin::backend::createVulkanBackend();
     kenshin::backend::BackendInitParams backendParams;
     backendParams.nativeWindowHandle = window.nativeHandle();

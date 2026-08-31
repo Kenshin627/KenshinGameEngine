@@ -308,7 +308,7 @@ namespace backend
         };
         const VkSemaphoreSubmitInfo signalSubmit {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-            .semaphore = slot.renderFinished,
+            .semaphore = impl.swapchain.presentSemaphores[impl.swapchain.imageIndex],
             .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
         };
         const VkSubmitInfo2 submit {
@@ -326,10 +326,11 @@ namespace backend
             return;
         }
 
+        const VkSemaphore presentWait = impl.swapchain.presentSemaphores[impl.swapchain.imageIndex];
         const VkPresentInfoKHR present {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &slot.renderFinished,
+            .pWaitSemaphores = &presentWait,
             .swapchainCount = 1,
             .pSwapchains = &impl.swapchain.swapchain,
             .pImageIndices = &impl.swapchain.imageIndex,
@@ -404,12 +405,16 @@ namespace backend
         vkCmdCopyImageToBuffer(cmd, slot.offscreen.image,
                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
         vkEndCommandBuffer(cmd);
-        const VkSubmitInfo submit {
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &cmd,
+        const VkCommandBufferSubmitInfo cmdSubmit {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+            .commandBuffer = cmd,
         };
-        vkQueueSubmit(impl.device.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+        const VkSubmitInfo2 submit {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+            .commandBufferInfoCount = 1,
+            .pCommandBufferInfos = &cmdSubmit,
+        };
+        vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
         vkQueueWaitIdle(impl.device.graphicsQueue);
         vkFreeCommandBuffers(impl.device.device, impl.frameSync.slots[0].commandPool, 1, &cmd);
 

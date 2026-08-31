@@ -137,7 +137,7 @@ namespace backend
             .imageColorSpace = chosen.colorSpace,
             .imageExtent = newExtent,
             .imageArrayLayers = 1,
-            .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, // blit target (S1.3)
+            .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, // blit target (S1.3) + ImGui/graphics (S1.5+)
             .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .preTransform = caps.currentTransform,
             .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
@@ -179,6 +179,14 @@ namespace backend
 
         format = chosen.format;
         this->extent = newExtent;
+
+        presentSemaphores.resize(actualCount);
+        const VkSemaphoreCreateInfo semInfo {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        };
+        for (u32 i = 0; i < actualCount; ++i)
+            if (vkCreateSemaphore(device, &semInfo, nullptr, &presentSemaphores[i]) != VK_SUCCESS)
+                return false;
         return true;
     }
 
@@ -188,6 +196,10 @@ namespace backend
             if (view != VK_NULL_HANDLE)
                 vkDestroyImageView(device, view, nullptr);
         imageViews.clear();
+        for (auto sem : presentSemaphores)
+            if (sem != VK_NULL_HANDLE)
+                vkDestroySemaphore(device, sem, nullptr);
+        presentSemaphores.clear();
         images.clear();
         if (swapchain != VK_NULL_HANDLE)
         {
