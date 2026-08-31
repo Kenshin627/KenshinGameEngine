@@ -9,13 +9,10 @@ namespace scene
 
     void OrbitCameraController::applyPose(Camera& camera) const
     {
-        // Orbit state (yaw/pitch/distance/target) lives in the controller;
-        // derived position is written into the camera pose each update.
-        const f32 yaw = glm::radians(camera.yawDeg);
-        const f32 pitch = glm::radians(camera.pitchDeg);
-        const f32 cp = std::cos(pitch);
-        camera.position =
-            target + distance * glm::vec3(cp * std::sin(yaw), std::sin(pitch), cp * std::cos(yaw));
+        // Orbit state (yaw/pitch/distance/target) lives in the controller.
+        // The camera sits `distance` units BEHIND the target along -forward,
+        // so view() (which looks along forward()) looks straight at it.
+        camera.position = target - distance * camera.forward();
     }
 
     void OrbitCameraController::update(Camera& camera, const ControllerInput& input)

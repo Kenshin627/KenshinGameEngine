@@ -20,7 +20,7 @@
 
 **Phase 2 · 基线渲染路径 → M0 验收**
 - [ ] S2.1 MeshData / OBJ 加载 / 程序化网格
-- [ ] S2.2 基线前向渲染路径
+- [x] S2.2 基线前向渲染路径 ✅ 2026-09-01
 - [ ] S2.3 光照 + swapchain 重建 + 千帧长跑
 
 **Phase 3 · 离线 Builder（meshopt+clusterlod）→ M1a/M1 验收**

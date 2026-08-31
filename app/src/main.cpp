@@ -14,8 +14,12 @@
 #include "kenshin/core/Input.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Window.h"
+#include "kenshin/assets/ObjLoader.h"
+#include "kenshin/assets/ProceduralMesh.h"
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/scene/Camera.h"
+
+#include <glm/glm.hpp>
 #include "kenshin/scene/CameraController.h"
 #include "kenshin/core/FrameStats.h"
 #include "kenshin/core/Timer.h"
@@ -53,6 +57,7 @@ namespace
         bool selftestShader = false;
         bool validation = true;   // dev default ON; --no-validation to disable
         std::string cam;                             // parsed by Camera (S1.5)
+        std::string mesh = "cube";                   // cube | sphere | knot | <path.obj>
         std::string screenshot;
         std::string screenshotUi;                    // full window incl. ImGui
     };
@@ -76,6 +81,8 @@ namespace
                 sscanf_s(argv[++i], "%dx%d", &args.width, &args.height);
             else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc)
                 args.cam = argv[++i];
+            else if (std::strcmp(argv[i], "--mesh") == 0 && i + 1 < argc)
+                args.mesh = argv[++i];
             else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
                 args.screenshot = argv[++i];
             else if (std::strcmp(argv[i], "--screenshot-ui") == 0 && i + 1 < argc)
@@ -149,6 +156,63 @@ namespace
 } // namespace
 
 
+
+namespace
+{
+    /// Load the demo mesh (--mesh cube|sphere|knot|<path.obj>).
+    bool loadDemoMesh(const std::string& name, kenshin::assets::MeshData& out,
+                      std::string& log)
+    {
+        if (name == "cube")
+        {
+            // Procedural cube (8 verts, CCW) with per-face normals.
+            out.positions = {
+                -0.5f, -0.5f, -0.5f,  0.5f, -0.5f, -0.5f,  0.5f, 0.5f, -0.5f, -0.5f, 0.5f, -0.5f,
+                -0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f, 0.5f,  0.5f, -0.5f, 0.5f,  0.5f,
+            };
+            out.normals.assign(24 * 3, 0.0f);
+            out.uvs.assign(24 * 2, 0.0f);
+            const int quads[6][4] = {
+                {0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7},
+            };
+            const float normals[6][3] = {
+                {0, 0, -1}, {0, 0, 1}, {0, -1, 0}, {1, 0, 0}, {0, 1, 0}, {-1, 0, 0},
+            };
+            kenshin::u32 vertex = 8;
+            for (int q = 0; q < 6; ++q)
+            {
+                for (int c = 0; c < 4; ++c)
+                {
+                    const int src = quads[q][c];
+                    for (int k = 0; k < 3; ++k)
+                        out.positions.push_back(out.positions[src * 3 + k]);
+                    for (int k = 0; k < 3; ++k)
+                        out.normals.push_back(normals[q][k]);
+                    out.uvs.push_back(0.0f);
+                    out.uvs.push_back(0.0f);
+                    ++vertex;
+                }
+                // Two CCW triangles from the fan (v0, v1, v2) and (v0, v2, v3).
+                const kenshin::u32 base = vertex - 4;
+                out.indices.insert(out.indices.end(), {base, base + 1, base + 2,
+                                                       base, base + 2, base + 3});
+            }
+            return true;
+        }
+        if (name == "sphere")
+        {
+            out = kenshin::assets::createUvSphere(64, 32, 1.0f);
+            return true;
+        }
+        if (name == "knot")
+        {
+            out = kenshin::assets::createTorusKnot(2, 3, 256, 32, 1.0f, 0.32f);
+            return true;
+        }
+        return kenshin::assets::loadObj(name, out, log);
+    }
+} // namespace
 
 namespace
 {
@@ -362,11 +426,6 @@ namespace
     }
 } // namespace
 
-
-namespace
-{
-} // namespace
-
 int main(int argc, char** argv)
 {
     const Args args = parseArgs(argc, argv);
@@ -478,6 +537,52 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // ---- baseline mesh path (S2.2) --------------------------------------
+    kenshin::assets::MeshData demoMesh;
+    {
+        std::string meshLog;
+        if (!loadDemoMesh(args.mesh, demoMesh, meshLog))
+        {
+            KENSHIN_ERROR("mesh load failed: {}", meshLog);
+            backend->shutdown();
+            ImGui::DestroyContext();
+            kenshin::log::shutdown();
+            return 1;
+        }
+    }
+
+    kenshin::manager::ShaderManager shaders;
+    kenshin::u32 meshHandle = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
+    glm::vec3 meshKd(0.8f, 0.7f, 0.35f);
+    if (shaders.init(findShaderRoot()))
+    {
+        std::vector<kenshin::u32> vsSpirv, fsSpirv;
+        std::string shaderLog;
+        if (shaders.compileFile("baseline.slang", vsSpirv, shaderLog, "vsMain") &&
+            shaders.compileFile("baseline.slang", fsSpirv, shaderLog, "fsMain"))
+        {
+            backend->stageBaselineShaders(vsSpirv.data(), vsSpirv.size() * 4,
+                                          fsSpirv.data(), fsSpirv.size() * 4);
+            kenshin::backend::IRenderBackend::MeshUpload upload;
+            upload.positions = demoMesh.positions.data();
+            upload.normals = demoMesh.normals.data();
+            upload.uvs = demoMesh.uvs.data();
+            upload.vertexCount = demoMesh.vertexCount();
+            upload.indices = demoMesh.indices.data();
+            upload.indexCount = static_cast<kenshin::u32>(demoMesh.indices.size());
+            meshHandle = backend->createMeshBuffer(upload);
+            KENSHIN_INFO("[baseline] mesh '{}' uploaded: {} verts / {} tris (handle {})",
+                         args.mesh, demoMesh.vertexCount(), demoMesh.triangleCount(),
+                         meshHandle);
+            meshKd = glm::vec3(demoMesh.material.kd);
+        }
+        else
+        {
+            KENSHIN_WARN("[baseline] shader compile failed; viewport shows only the "
+                         "clear color. Log: {}", shaderLog);
+        }
+    }
+
     UiState ui;
     ui.viewportSize = ImVec2(static_cast<float>(window.width()),
                              static_cast<float>(window.height()));
@@ -551,6 +656,27 @@ int main(int argc, char** argv)
         {
             KENSHIN_INFO("[camera] view basis orthonormal: OK");
             cameraChecked = true;
+        }
+
+        // Baseline draw (S2.2): the mesh renders into the viewport target
+        // between beginFrame and endFrame.
+        if (meshHandle != kenshin::backend::IRenderBackend::kInvalidMeshHandle &&
+            ui.viewportSize.x > 1.0f && ui.viewportSize.y > 1.0f)
+        {
+            const kenshin::f32 aspect = ui.viewportSize.x / ui.viewportSize.y;
+            // Slang push-constant matrices read the 64 bytes row-major;
+            // GLM stores column-major, so upload the transpose.
+            const glm::mat4 viewProj = glm::transpose(camera.projection(aspect) * camera.view());
+            kenshin::backend::IRenderBackend::MeshDraw draw;
+            draw.mesh = meshHandle;
+            std::memcpy(draw.viewProj, &viewProj, sizeof(draw.viewProj));
+            const kenshin::f32 kdArr[4] = {meshKd.r, meshKd.g, meshKd.b, 1.0f};
+            std::memcpy(draw.kd, kdArr, sizeof(draw.kd));
+            // Light from the camera direction so visible faces are lit.
+            const glm::vec3 fwd = camera.forward();
+            const kenshin::f32 light[4] = {-fwd.x, -fwd.y, -fwd.z, 0.0f};
+            std::memcpy(draw.lightDir, light, sizeof(draw.lightDir));
+            backend->drawMesh(draw);
         }
 
         // Full-frame capture must be flagged before endFrame records it.

@@ -23,10 +23,11 @@ namespace manager
         bool init(const std::string& shaderRoot);
         void shutdown();
 
-        /// Compile a .slang file (absolute path, or relative to shaderRoot).
+        /// Compile a .slang file (absolute path, or relative to shaderRoot)
+        /// for the entry point `entryPoint` ("main" by default).
         /// On failure fills `log` with the compiler diagnostics and returns false.
         bool compileFile(const std::string& path, std::vector<u32>& spirvOut,
-                         std::string& log);
+                         std::string& log, const char* entryPoint = "main");
 
         /// Compile inline source (error-path tests, snippets).
         bool compileSource(const std::string& source, const std::string& name,

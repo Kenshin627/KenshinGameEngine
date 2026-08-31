@@ -131,6 +131,38 @@ namespace backend
         /// Unlike readbackFrame this is NOT deterministic (UI content).
         virtual void requestFullFrameCapture() = 0;
         virtual bool readbackFullFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) = 0;
+
+        // ---- baseline mesh path (S2.2) -----------------------------------
+        /// Handle to an uploaded mesh (device-local vertex + index buffers).
+        /// Vertices are SOA: three separate bindings (positions 3f, normals
+        /// 3f, uvs 2f) matching kenshin::assets::MeshData.
+        static constexpr u32 kInvalidMeshHandle = 0xFFFFFFFFu;
+        struct MeshUpload
+        {
+            const f32* positions = nullptr; // xyz per vertex
+            const f32* normals = nullptr;   // xyz per vertex
+            const f32* uvs = nullptr;       // uv per vertex
+            u32 vertexCount = 0;
+            const u32* indices = nullptr;
+            u32 indexCount = 0;
+        };
+        struct MeshDraw
+        {
+            u32 mesh = kInvalidMeshHandle;
+            f32 viewProj[16];     // column-major mat4 (glm layout)
+            f32 kd[4];            // material diffuse RGBA
+            f32 lightDir[4] = {0.4f, 0.7f, -0.5f, 0.0f}; // TO light, world
+        };
+        /// Upload a mesh (staging copy, one-time). Returns handle or kInvalidMeshHandle.
+        virtual u32 createMeshBuffer(const MeshUpload& upload) = 0;
+        virtual void destroyMeshBuffer(u32 mesh) = 0;
+        /// Stage VS/FS SPIR-V for the internal baseline pipeline (created
+        /// lazily on first draw).
+        virtual bool stageBaselineShaders(const u32* vsSpirv, usize vsBytes,
+                                          const u32* fsSpirv, usize fsBytes) = 0;
+        /// Record an opaque draw into the CURRENT frame's viewport target.
+        /// Must be called between beginFrame() and endFrame(); depth-tested.
+        virtual void drawMesh(const MeshDraw& draw) = 0;
     };
 
     /// Factory implemented by the Vulkan backend (src/backend/).

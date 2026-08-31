@@ -20,6 +20,21 @@ KENSHIN_NS_BEGIN
 namespace backend
 {
 
+    // SOA mesh GPU buffers (backend-internal; opaque to the public header).
+    struct VulkanBackend::MeshResourceOpaque
+    {
+        VkBuffer positions = VK_NULL_HANDLE;
+        VmaAllocation positionsAlloc = VK_NULL_HANDLE;
+        VkBuffer normals = VK_NULL_HANDLE;
+        VmaAllocation normalsAlloc = VK_NULL_HANDLE;
+        VkBuffer uvs = VK_NULL_HANDLE;
+        VmaAllocation uvsAlloc = VK_NULL_HANDLE;
+        VkBuffer indices = VK_NULL_HANDLE;
+        VmaAllocation indicesAlloc = VK_NULL_HANDLE;
+        u32 vertexCount = 0;
+        u32 indexCount = 0;
+    };
+
     struct VulkanBackend::Impl
     {
         VulkanContext context;
@@ -44,7 +59,34 @@ namespace backend
         VkBuffer captureStaging = VK_NULL_HANDLE;
         VmaAllocation captureAlloc = VK_NULL_HANDLE;
         u32 captureWidth = 0, captureHeight = 0;
+
+        // Baseline mesh path (S2.2)
+        using MeshResource = VulkanBackend::MeshResourceOpaque;
+        std::vector<MeshResource> meshes; // slot = handle - 1
+
+        VkImage depthImage = VK_NULL_HANDLE;
+        VmaAllocation depthAlloc = VK_NULL_HANDLE;
+        VkImageView depthView = VK_NULL_HANDLE;
+        u32 depthWidth = 0, depthHeight = 0;
+
+        VkPipelineLayout baselineLayout = VK_NULL_HANDLE;
+        VkPipeline baselinePipeline = VK_NULL_HANDLE;
+        std::vector<u32> baselineVs, baselineFs; // SPIR-V staged by init call
     };
+
+    void VulkanBackend::destroyMeshResourceInternal(VulkanBackend::MeshResourceOpaque& raw)
+    {
+        Impl& impl = *m_impl;
+        if (raw.positions != VK_NULL_HANDLE)
+            vmaDestroyBuffer(impl.device.allocator, raw.positions, raw.positionsAlloc);
+        if (raw.normals != VK_NULL_HANDLE)
+            vmaDestroyBuffer(impl.device.allocator, raw.normals, raw.normalsAlloc);
+        if (raw.uvs != VK_NULL_HANDLE)
+            vmaDestroyBuffer(impl.device.allocator, raw.uvs, raw.uvsAlloc);
+        if (raw.indices != VK_NULL_HANDLE)
+            vmaDestroyBuffer(impl.device.allocator, raw.indices, raw.indicesAlloc);
+        raw = {};
+    }
 
     VulkanBackend::VulkanBackend()
         : m_impl(std::make_unique<Impl>())
@@ -152,8 +194,9 @@ namespace backend
 
     void VulkanBackend::shutdown()
     {
-        if (!m_impl)
+        if (!m_impl || m_shutdownDone)
             return;
+        m_shutdownDone = true;
         if (m_impl->imguiInited)
         {
             ImGui_ImplVulkan_Shutdown();
@@ -173,7 +216,23 @@ namespace backend
                              m_impl->captureStaging, m_impl->captureAlloc);
             m_impl->captureStaging = VK_NULL_HANDLE;
         }
+        // Frame resources first: their command buffers still reference the
+        // mesh/depth objects below (validation: objects stay "in use" until
+        // the referencing command buffer is freed with its pool).
         m_impl->frameSync.shutdown(m_impl->device);
+        for (auto& mesh : m_impl->meshes)
+            destroyMeshResourceInternal(mesh);
+        m_impl->meshes.clear();
+        if (m_impl->baselinePipeline != VK_NULL_HANDLE)
+            vkDestroyPipeline(m_impl->device.device, m_impl->baselinePipeline, nullptr);
+        if (m_impl->baselineLayout != VK_NULL_HANDLE)
+            vkDestroyPipelineLayout(m_impl->device.device, m_impl->baselineLayout, nullptr);
+        if (m_impl->depthImage != VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(m_impl->device.device, m_impl->depthView, nullptr);
+            vmaDestroyImage(m_impl->device.allocator, m_impl->depthImage,
+                            m_impl->depthAlloc);
+        }
         m_impl->swapchain.shutdown(m_impl->context.instance, m_impl->device.device);
         m_impl->device.shutdown();
         m_impl->context.shutdown();
@@ -278,13 +337,33 @@ namespace backend
         vkCmdClearColorImage(slot.commandBuffer, slot.offscreen.image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
 
-        // offscreen: TRANSFER_DST -> SHADER_READ_ONLY (sampled by the ImGui
-        // viewport panel later in this same command buffer).
+        // offscreen: TRANSFER_DST -> COLOR_ATTACHMENT (passes between
+        // begin/end render here; endFrame moves it to SHADER_READ_ONLY).
         recordBarrier(slot.commandBuffer,
                       imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                                   VK_ACCESS_2_SHADER_READ_BIT));
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+
+        // Depth companion target: reset to DEPTH_ATTACHMENT each frame.
+        ensureViewportDepth(info.width, info.height);
+        if (impl.depthImage != VK_NULL_HANDLE)
+        {
+            recordBarrier(slot.commandBuffer,
+                          VkImageMemoryBarrier2 {
+                              .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                              .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                              .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                              .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                              .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                              .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                              .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                              .image = impl.depthImage,
+                              .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
+                          });
+        }
 
         if (impl.imguiInited)
         {
@@ -308,6 +387,13 @@ namespace backend
 
         FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
         const VkImage dstImage = impl.swapchain.images[impl.swapchain.imageIndex];
+
+        // offscreen: COLOR_ATTACHMENT -> SHADER_READ_ONLY for the ImGui sample.
+        recordBarrier(slot.commandBuffer,
+                      imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                   VK_ACCESS_2_SHADER_READ_BIT));
 
         ImDrawData* drawData = nullptr;
         if (impl.imguiInited)
@@ -938,6 +1024,430 @@ namespace backend
                         &impl.captureStaging, &impl.captureAlloc, nullptr);
         impl.captureWidth = width;
         impl.captureHeight = height;
+    }
+
+
+    // ── baseline mesh path (S2.2) ─────────────────────────────────
+
+    namespace
+    {
+        bool uploadDeviceBuffer(VmaAllocator allocator, VkDevice device,
+                                VkQueue queue, VkCommandPool pool,
+                                const void* data, VkDeviceSize bytes,
+                                VkBufferUsageFlags usage,
+                                VkBuffer& outBuffer, VmaAllocation& outAlloc)
+        {
+            const VkBufferCreateInfo bufferInfo {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .size = bytes,
+                .usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            };
+            const VmaAllocationCreateInfo allocInfo {
+                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            };
+            if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo,
+                                &outBuffer, &outAlloc, nullptr) != VK_SUCCESS)
+                return false;
+
+            const VkBufferCreateInfo stagingInfo {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .size = bytes,
+                .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            };
+            const VmaAllocationCreateInfo stagingAllocInfo {
+                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                         VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                .usage = VMA_MEMORY_USAGE_AUTO,
+                .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+            };
+            VkBuffer staging = VK_NULL_HANDLE;
+            VmaAllocation stagingAlloc = VK_NULL_HANDLE;
+            VmaAllocationInfo stagingInfoOut {};
+            if (vmaCreateBuffer(allocator, &stagingInfo, &stagingAllocInfo,
+                                &staging, &stagingAlloc, &stagingInfoOut) != VK_SUCCESS)
+            {
+                vmaDestroyBuffer(allocator, outBuffer, outAlloc);
+                outBuffer = VK_NULL_HANDLE;
+                outAlloc = VK_NULL_HANDLE;
+                return false;
+            }
+            std::memcpy(stagingInfoOut.pMappedData, data, static_cast<usize>(bytes));
+
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            const VkCommandBufferAllocateInfo allocCmd {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                .commandPool = pool,
+                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                .commandBufferCount = 1,
+            };
+            vkAllocateCommandBuffers(device, &allocCmd, &cmd);
+            const VkCommandBufferBeginInfo beginInfo {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            };
+            vkBeginCommandBuffer(cmd, &beginInfo);
+            const VkBufferCopy region { .size = bytes };
+            vkCmdCopyBuffer(cmd, staging, outBuffer, 1, &region);
+            vkEndCommandBuffer(cmd);
+            const VkCommandBufferSubmitInfo cmdSubmit {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                .commandBuffer = cmd,
+            };
+            const VkSubmitInfo2 submit {
+                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                .commandBufferInfoCount = 1,
+                .pCommandBufferInfos = &cmdSubmit,
+            };
+            vkQueueSubmit2(queue, 1, &submit, VK_NULL_HANDLE);
+            vkQueueWaitIdle(queue);
+            vkFreeCommandBuffers(device, pool, 1, &cmd);
+            vmaDestroyBuffer(allocator, staging, stagingAlloc);
+            return true;
+        }
+    } // namespace
+
+    u32 VulkanBackend::createMeshBuffer(const MeshUpload& upload)
+    {
+        Impl& impl = *m_impl;
+        if (!upload.positions || !upload.indices || upload.vertexCount == 0 ||
+            upload.indexCount == 0)
+            return kInvalidMeshHandle;
+
+        Impl::MeshResource mesh;
+        const auto uploadF32 = [&](const f32* data, usize floatCount,
+                                   VkBufferUsageFlags usage,
+                                   VkBuffer& buffer, VmaAllocation& alloc) {
+            return uploadDeviceBuffer(impl.device.allocator, impl.device.device,
+                                      impl.device.graphicsQueue,
+                                      impl.frameSync.slots[0].commandPool,
+                                      data, VkDeviceSize(floatCount) * sizeof(f32),
+                                      usage, buffer, alloc);
+        };
+        const bool ok =
+            uploadF32(upload.positions, usize(upload.vertexCount) * 3,
+                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                      mesh.positions, mesh.positionsAlloc) &&
+            (!upload.normals ||
+             uploadF32(upload.normals, usize(upload.vertexCount) * 3,
+                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                       mesh.normals, mesh.normalsAlloc)) &&
+            (!upload.uvs ||
+             uploadF32(upload.uvs, usize(upload.vertexCount) * 2,
+                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                       mesh.uvs, mesh.uvsAlloc)) &&
+            uploadDeviceBuffer(impl.device.allocator, impl.device.device,
+                               impl.device.graphicsQueue,
+                               impl.frameSync.slots[0].commandPool,
+                               upload.indices,
+                               VkDeviceSize(upload.indexCount) * sizeof(u32),
+                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                               mesh.indices, mesh.indicesAlloc);
+        if (!ok)
+        {
+            destroyMeshResourceInternal(mesh);
+            KENSHIN_ERROR("[baseline] mesh buffer upload failed");
+            return kInvalidMeshHandle;
+        }
+        mesh.vertexCount = upload.vertexCount;
+        mesh.indexCount = upload.indexCount;
+        impl.meshes.push_back(mesh);
+        return static_cast<u32>(impl.meshes.size());
+    }
+
+    void VulkanBackend::destroyMeshBuffer(u32 mesh)
+    {
+        Impl& impl = *m_impl;
+        if (mesh == kInvalidMeshHandle || mesh == 0 || mesh > impl.meshes.size())
+            return;
+        destroyMeshResourceInternal(impl.meshes[mesh - 1]);
+    }
+
+    void VulkanBackend::ensureViewportDepth(u32 width, u32 height)
+    {
+        Impl& impl = *m_impl;
+        if (impl.depthImage != VK_NULL_HANDLE && impl.depthWidth == width &&
+            impl.depthHeight == height)
+            return;
+        if (impl.depthImage != VK_NULL_HANDLE)
+        {
+            vkDeviceWaitIdle(impl.device.device);
+            vkDestroyImageView(impl.device.device, impl.depthView, nullptr);
+            vmaDestroyImage(impl.device.allocator, impl.depthImage, impl.depthAlloc);
+            impl.depthImage = VK_NULL_HANDLE;
+            impl.depthView = VK_NULL_HANDLE;
+        }
+        const VkImageCreateInfo imageInfo {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_D32_SFLOAT,
+            .extent = {width, height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        const VmaAllocationCreateInfo allocInfo {
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+            .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        };
+        if (vmaCreateImage(impl.device.allocator, &imageInfo, &allocInfo,
+                           &impl.depthImage, &impl.depthAlloc, nullptr) != VK_SUCCESS)
+        {
+            KENSHIN_ERROR("[baseline] depth image creation failed");
+            return;
+        }
+        const VkImageViewCreateInfo viewInfo {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = impl.depthImage,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_D32_SFLOAT,
+            .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
+        };
+        vkCreateImageView(impl.device.device, &viewInfo, nullptr, &impl.depthView);
+        impl.depthWidth = width;
+        impl.depthHeight = height;
+    }
+
+    void VulkanBackend::ensureBaselinePipeline()
+    {
+        Impl& impl = *m_impl;
+        if (impl.baselinePipeline != VK_NULL_HANDLE ||
+            impl.baselineVs.empty() || impl.baselineFs.empty())
+            return;
+
+        const VkPushConstantRange pushRange {
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            .offset = 0,
+            .size = 96, // mat4 viewProj (64) + kd (16) + lightDir (16)
+        };
+        const VkPipelineLayoutCreateInfo layoutInfo {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushRange,
+        };
+        vkCreatePipelineLayout(impl.device.device, &layoutInfo, nullptr,
+                               &impl.baselineLayout);
+
+        const VkShaderModuleCreateInfo vsInfo {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = impl.baselineVs.size() * sizeof(u32),
+            .pCode = impl.baselineVs.data(),
+        };
+        VkShaderModule vs = VK_NULL_HANDLE;
+        vkCreateShaderModule(impl.device.device, &vsInfo, nullptr, &vs);
+        const VkShaderModuleCreateInfo fsInfo {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = impl.baselineFs.size() * sizeof(u32),
+            .pCode = impl.baselineFs.data(),
+        };
+        VkShaderModule fs = VK_NULL_HANDLE;
+        vkCreateShaderModule(impl.device.device, &fsInfo, nullptr, &fs);
+
+        const VkPipelineShaderStageCreateInfo stages[2] = {
+            VkPipelineShaderStageCreateInfo {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_VERTEX_BIT,
+                .module = vs,
+                .pName = "main", // Slang emits OpEntryPoint "main" regardless of function name
+            },
+            VkPipelineShaderStageCreateInfo {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+                .module = fs,
+                .pName = "main",
+            },
+        };
+
+        // SOA vertex input: three bindings (positions / normals / uvs).
+        const VkVertexInputBindingDescription bindings[3] = {
+            {0, 12, VK_VERTEX_INPUT_RATE_VERTEX},
+            {1, 12, VK_VERTEX_INPUT_RATE_VERTEX},
+            {2, 8, VK_VERTEX_INPUT_RATE_VERTEX},
+        };
+        const VkVertexInputAttributeDescription attributes[3] = {
+            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+            {1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0},
+            {2, 2, VK_FORMAT_R32G32_SFLOAT, 0},
+        };
+        const VkFormat colorFormat = impl.swapchain.format;
+        const VkPipelineRenderingCreateInfoKHR renderingInfo {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+            .colorAttachmentCount = 1,
+            .pColorAttachmentFormats = &colorFormat,
+            .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT,
+        };
+        const VkDynamicState dynamicStates[2] = {
+            VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        const VkPipelineDynamicStateCreateInfo dynamicState {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+            .dynamicStateCount = 2,
+            .pDynamicStates = dynamicStates,
+        };
+
+        // State structs need named locals (designated initializers of
+        // temporaries can't be address-taken).
+        const VkPipelineVertexInputStateCreateInfo vertexInput {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+            .vertexBindingDescriptionCount = 3,
+            .pVertexBindingDescriptions = bindings,
+            .vertexAttributeDescriptionCount = 3,
+            .pVertexAttributeDescriptions = attributes,
+        };
+        const VkPipelineInputAssemblyStateCreateInfo inputAssembly {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        };
+        const VkPipelineViewportStateCreateInfo viewportState {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+            .viewportCount = 1,
+            .scissorCount = 1,
+        };
+        const VkPipelineRasterizationStateCreateInfo rasterization {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+            .polygonMode = VK_POLYGON_MODE_FILL,
+            .cullMode = VK_CULL_MODE_BACK_BIT,
+            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            .lineWidth = 1.0f,
+        };
+        const VkPipelineMultisampleStateCreateInfo multisample {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+            .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        };
+        // Depth [0,1], near=0 (perspectiveRH_ZO): smaller is closer.
+        const VkPipelineDepthStencilStateCreateInfo depthStencil {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .depthTestEnable = VK_TRUE,
+            .depthWriteEnable = VK_TRUE,
+            .depthCompareOp = VK_COMPARE_OP_LESS,
+            .minDepthBounds = 0.0f,
+            .maxDepthBounds = 1.0f,
+        };
+        const VkPipelineColorBlendAttachmentState blendAttachment {
+            .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+        };
+        const VkPipelineColorBlendStateCreateInfo colorBlend {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+            .attachmentCount = 1,
+            .pAttachments = &blendAttachment,
+        };
+
+        const VkGraphicsPipelineCreateInfo info {
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = &renderingInfo,
+            .stageCount = 2,
+            .pStages = stages,
+            .pVertexInputState = &vertexInput,
+            .pInputAssemblyState = &inputAssembly,
+            .pViewportState = &viewportState,
+            .pRasterizationState = &rasterization,
+            .pMultisampleState = &multisample,
+            .pDepthStencilState = &depthStencil,
+            .pColorBlendState = &colorBlend,
+            .pDynamicState = &dynamicState,
+            .layout = impl.baselineLayout,
+        };
+        if (vkCreateGraphicsPipelines(impl.device.device, VK_NULL_HANDLE, 1, &info,
+                                      nullptr, &impl.baselinePipeline) != VK_SUCCESS)
+        {
+            KENSHIN_ERROR("[baseline] pipeline creation failed");
+            impl.baselinePipeline = VK_NULL_HANDLE;
+        }
+        vkDestroyShaderModule(impl.device.device, vs, nullptr);
+        vkDestroyShaderModule(impl.device.device, fs, nullptr);
+    }
+
+    bool VulkanBackend::stageBaselineShaders(const u32* vsSpirv, usize vsBytes,
+                                             const u32* fsSpirv, usize fsBytes)
+    {
+        m_impl->baselineVs.assign(vsSpirv, vsSpirv + vsBytes / sizeof(u32));
+        m_impl->baselineFs.assign(fsSpirv, fsSpirv + fsBytes / sizeof(u32));
+        return true;
+    }
+
+    void VulkanBackend::drawMesh(const MeshDraw& draw)
+    {
+        Impl& impl = *m_impl;
+        if (!impl.frameActive || draw.mesh == kInvalidMeshHandle ||
+            draw.mesh == 0 || draw.mesh > impl.meshes.size())
+            return;
+        ensureBaselinePipeline();
+        if (impl.baselinePipeline == VK_NULL_HANDLE || impl.depthView == VK_NULL_HANDLE)
+            return;
+
+        FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+        const Impl::MeshResource& mesh = impl.meshes[draw.mesh - 1];
+
+        // Push constants: viewProj + kd + lightDir.
+        struct Push
+        {
+            f32 viewProj[16];
+            f32 kd[4];
+            f32 lightDir[4];
+        } pushData {};
+        std::memcpy(pushData.viewProj, draw.viewProj, sizeof(pushData.viewProj));
+        std::memcpy(pushData.kd, draw.kd, sizeof(pushData.kd));
+        std::memcpy(pushData.lightDir, draw.lightDir, sizeof(pushData.lightDir));
+
+        // Rendering pass scoped to this draw: color LOAD (clear already done),
+        // depth CLEAR (each frame's first draw resets it).
+        const VkRenderingAttachmentInfo colorAttachment {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = slot.offscreen.view,
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        };
+        const VkClearValue depthClear { .depthStencil = {1.0f, 0} };
+        const VkRenderingAttachmentInfo depthAttachment {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = impl.depthView,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .clearValue = depthClear,
+        };
+        const VkRenderingInfo renderingInfo {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea = {0, 0, slot.offscreen.width, slot.offscreen.height},
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &colorAttachment,
+            .pDepthAttachment = &depthAttachment,
+        };
+        vkCmdBeginRendering(slot.commandBuffer, &renderingInfo);
+
+        const VkViewport viewport {
+            .x = 0.0f,
+            .y = 0.0f,
+            .width = static_cast<f32>(slot.offscreen.width),
+            .height = static_cast<f32>(slot.offscreen.height),
+            .minDepth = 0.0f,
+            .maxDepth = 1.0f,
+        };
+        const VkRect2D scissor {
+            {0, 0}, {slot.offscreen.width, slot.offscreen.height}
+        };
+        vkCmdSetViewport(slot.commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(slot.commandBuffer, 0, 1, &scissor);
+
+        vkCmdBindPipeline(slot.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          impl.baselinePipeline);
+        const VkBuffer vertexBuffers[3] = {mesh.positions, mesh.normals, mesh.uvs};
+        const VkDeviceSize vertexOffsets[3] = {0, 0, 0};
+        vkCmdBindVertexBuffers(slot.commandBuffer, 0, 3, vertexBuffers, vertexOffsets);
+        vkCmdBindIndexBuffer(slot.commandBuffer, mesh.indices, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdPushConstants(slot.commandBuffer, impl.baselineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(pushData), &pushData);
+        vkCmdDrawIndexed(slot.commandBuffer, mesh.indexCount, 1, 0, 0, 0);
+        vkCmdEndRendering(slot.commandBuffer);
     }
 
 } // namespace backend

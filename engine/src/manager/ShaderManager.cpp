@@ -82,7 +82,7 @@ namespace manager
     }
 
     bool ShaderManager::compileFile(const std::string& path, std::vector<u32>& spirvOut,
-                                    std::string& log)
+                                    std::string& log, const char* entryPoint)
     {
         auto* session = static_cast<slang::ISession*>(m_session);
         if (!session)
@@ -117,19 +117,19 @@ namespace manager
             return false;
         }
 
-        slang::IEntryPoint* entryPoint = nullptr;
-        if (const SlangResult result = module->findEntryPointByName("main", &entryPoint);
-            result != SLANG_OK || !entryPoint)
+        slang::IEntryPoint* entryPointObj = nullptr;
+        if (const SlangResult result = module->findEntryPointByName(entryPoint, &entryPointObj);
+            result != SLANG_OK || !entryPointObj)
         {
             log = blobText(diagnostics);
             if (log.empty())
-                log = "entry point 'main' not found";
+                log = std::string("entry point '") + entryPoint + "' not found";
             if (diagnostics) diagnostics->release();
             module->release();
             return false;
         }
 
-        slang::IComponentType* components[2] = { module, entryPoint };
+        slang::IComponentType* components[2] = { module, entryPointObj };
         slang::IComponentType* program = nullptr;
         slang::IBlob* linkDiag = nullptr;
         if (const SlangResult result =
@@ -139,7 +139,7 @@ namespace manager
             log = blobText(linkDiag);
             if (linkDiag) linkDiag->release();
             if (diagnostics) diagnostics->release();
-            entryPoint->release();
+            entryPointObj->release();
             module->release();
             return false;
         }
@@ -153,7 +153,7 @@ namespace manager
             if (linkDiag2) linkDiag2->release();
             program->release();
             if (diagnostics) diagnostics->release();
-            entryPoint->release();
+            entryPointObj->release();
             module->release();
             return false;
         }
@@ -181,7 +181,7 @@ namespace manager
         if (code) code->release();
         linked->release();
         program->release();
-        entryPoint->release();
+        entryPointObj->release();
         module->release();
         if (diagnostics) diagnostics->release();
         return result == SLANG_OK;
