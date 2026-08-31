@@ -55,6 +55,7 @@ namespace geometry
             const ClusterGroup& src = builtGroups[g];
             DagGroup& dst = dag.groups[g];
             dst.lodLevel = src.depth;
+            dst.simplifyError = src.simplifiedError;
             for (int k = 0; k < 4; ++k)
                 dst.boundsSphere[k] = src.simplifiedCenter[k];
             for (usize ci = 0; ci < src.clusters.size(); ++ci)

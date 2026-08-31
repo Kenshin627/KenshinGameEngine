@@ -36,7 +36,9 @@ namespace geometry
         struct GroupDisk
         {
             i32 lodLevel;
-            f32 maxError;
+            f32 maxError;      // monotonic subtree error (GPU rule data)
+            f32 simplifyError; // clusterlod semantics: error of coarsening FROM
+                               // this group; FLT_MAX on terminal groups
             f32 bounds[4]; // xyz + radius
             u32 memberOffset;
             u32 memberCount;
@@ -97,6 +99,7 @@ namespace geometry
             groups[g] = GroupDisk {
                 .lodLevel = src.lodLevel,
                 .maxError = src.maxError,
+                .simplifyError = src.simplifyError,
                 .bounds = {src.boundsSphere.x, src.boundsSphere.y,
                            src.boundsSphere.z, src.boundsSphere.w},
                 .memberOffset = static_cast<u32>(memberIndices.size()),
@@ -239,6 +242,7 @@ namespace geometry
             DagGroup& dst = dag.groups[g];
             dst.lodLevel = groups[g].lodLevel;
             dst.maxError = groups[g].maxError;
+            dst.simplifyError = groups[g].simplifyError;
             dst.boundsSphere = glm::vec4(groups[g].bounds[0], groups[g].bounds[1],
                                          groups[g].bounds[2], groups[g].bounds[3]);
             dst.clusters.assign(memberIndices.begin() + groups[g].memberOffset,

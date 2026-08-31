@@ -449,7 +449,7 @@ M3 两遍 HZB 遮挡剔除 → M4 大三角形 HW 光栅路径 + async compute �
 - [x] S3.1 meshopt+clusterlod 集成冒烟 ✅ 2026-09-01
 - [ ] S3.2 DAG 装配（元数据层）
 - [x] S3.3 .kgeo 与 CLI（M1a 验收）✅ 2026-09-01
-- [ ] S3.4 LOD 可视化验证（M1 验收）
+- [x] S3.4 LOD 可视化验证（M1 验收）✅ 2026-09-01
 
 **Phase 4 · 虚拟几何运行时（M2 验收）**
 - [ ] S4.1 GPU Scene

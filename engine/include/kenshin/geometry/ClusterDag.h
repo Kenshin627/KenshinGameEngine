@@ -51,6 +51,9 @@ namespace geometry
         i32 lodLevel = 0;             // 0 = original geometry
         glm::vec4 boundsSphere = {};  // union of member bounds (decision space)
         f32 maxError = 0.0f;          // monotonic decision error for the group
+        /// clusterlod semantics: error of coarsening FROM this group
+        /// (FLT_MAX on terminal groups - nothing coarser exists).
+        f32 simplifyError = 0.0f;
         std::vector<u32> clusters;    // member cluster indices
         std::vector<u32> parents;     // groups whose clusters refined into us
     };

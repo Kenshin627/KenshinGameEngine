@@ -38,26 +38,12 @@ namespace geometry
             log = "empty mesh";
             return false;
         }
-        // Interleave attributes (position + normal + uv) for attribute-aware
-        // simplification: clusterlod takes one packed attribute stream.
+        // v1 (staged plan): position-only simplification so clusterlod's
+        // error is a pure world-space geometric distance - exactly what the
+        // pixel-threshold LOD rule needs. Attribute-aware simplification
+        // returns unitless mixed errors (position + normals + uvs) that
+        // cannot be projected to pixels; revisit with calibrated weights.
         const usize vertexCount = mesh.vertexCount();
-        std::vector<f32> attributes(vertexCount * 8);
-        for (usize v = 0; v < vertexCount; ++v)
-        {
-            for (int k = 0; k < 3; ++k)
-                attributes[v * 8 + k] = mesh.positions[v * 3 + k];
-            for (int k = 0; k < 3; ++k)
-                attributes[v * 8 + 3 + k] =
-                    mesh.normals.size() == mesh.positions.size()
-                        ? mesh.normals[v * 3 + k] : 0.0f;
-            attributes[v * 8 + 6] =
-                mesh.uvs.size() / 2 == vertexCount ? mesh.uvs[v * 2] : 0.0f;
-            attributes[v * 8 + 7] =
-                mesh.uvs.size() / 2 == vertexCount ? mesh.uvs[v * 2 + 1] : 0.0f;
-        }
-        // Attribute weights: position dominates, normal/uv contribute less.
-        const f32 attributeWeights[8] = {0.60f, 0.60f, 0.60f,
-                                         0.20f, 0.20f, 0.20f, 0.10f, 0.10f};
 
         clodMesh input = {};
         input.indices = mesh.indices.data();
@@ -65,12 +51,18 @@ namespace geometry
         input.vertex_count = vertexCount;
         input.vertex_positions = mesh.positions.data();
         input.vertex_positions_stride = sizeof(f32) * 3;
-        input.vertex_attributes = attributes.data();
-        input.vertex_attributes_stride = sizeof(f32) * 8;
-        input.attribute_weights = attributeWeights;
-        input.attribute_count = 8;
+        input.vertex_attributes = nullptr;
+        input.vertex_attributes_stride = 0;
+        input.attribute_weights = nullptr;
+        input.attribute_count = 0;
 
         clodConfig config = clodDefaultConfig(maxTriangles);
+        // Conservative v1: permissive/sloppy modes collapse aggressively and
+        // return large errors (first-level error saturates the whole DAG via
+        // the max() merge); regular QEM keeps errors proportional and useful
+        // for the pixel-threshold rule. Revisit when calibrating attributes.
+        config.simplify_permissive = false;
+        config.simplify_fallback_sloppy = false;
 
         std::vector<ClusterGroup> groups;
         Collector collector {&groups, &stats};

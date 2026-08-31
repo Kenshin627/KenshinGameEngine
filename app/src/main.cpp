@@ -15,6 +15,8 @@
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Window.h"
 #include "kenshin/assets/ObjLoader.h"
+#include "kenshin/geometry/KGeoFile.h"
+#include "kenshin/geometry/LodCut.h"
 #include "kenshin/assets/ProceduralMesh.h"
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/scene/Camera.h"
@@ -57,6 +59,8 @@ namespace
         bool selftestShader = false;
         bool validation = true;   // dev default ON; --no-validation to disable
         int resizeAt = -1;                           // frame index to program-resize (S2.3)
+        std::string kgeo;                            // .kgeo virtual-geometry preview (S3.4)
+        float lodThreshold = 1.0f;                   // initial LOD pixel-error threshold
         std::string cam;                             // parsed by Camera (S1.5)
         std::string mesh = "cube";                   // cube | sphere | knot | <path.obj>
         std::string screenshot;
@@ -86,6 +90,10 @@ namespace
                 args.cam = argv[++i];
             else if (std::strcmp(argv[i], "--mesh") == 0 && i + 1 < argc)
                 args.mesh = argv[++i];
+            else if (std::strcmp(argv[i], "--kgeo") == 0 && i + 1 < argc)
+                args.kgeo = argv[++i];
+            else if (std::strcmp(argv[i], "--lod-threshold") == 0 && i + 1 < argc)
+                args.lodThreshold = std::atof(argv[++i]);
             else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
                 args.screenshot = argv[++i];
             else if (std::strcmp(argv[i], "--screenshot-ui") == 0 && i + 1 < argc)
@@ -219,6 +227,72 @@ namespace
 
 namespace
 {
+    // ---- .kgeo LOD preview (S3.4) -----------------------------------------
+    struct KgeoPreview
+    {
+        kenshin::geometry::ClusterDag dag;
+        kenshin::u32 meshHandle = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
+        std::vector<kenshin::u32> cut;
+        kenshin::geometry::CutStats lastStats;
+        float pixelThreshold = 1.0f;
+        bool lodColors = true;   // false = shaded
+        bool needRebuild = true;
+        int framesSinceChange = 0;
+        std::vector<float> history; // triangle count over threshold changes
+    };
+
+    bool loadKgeoPreview(const std::string& path, KgeoPreview& preview,
+                         kenshin::backend::IRenderBackend* backend, std::string& log)
+    {
+        if (!kenshin::geometry::readKGeo(path, preview.dag, log))
+            return false;
+        preview.needRebuild = true;
+        (void)backend;
+        return true;
+    }
+
+    /// Rebuild the drawable mesh from the current cut (baseline path):
+    /// concatenate the cut clusters' local vertices/indices into one buffer.
+    void rebuildCutMesh(KgeoPreview& preview,
+                        kenshin::backend::IRenderBackend* backend)
+    {
+        const auto& dag = preview.dag;
+        kenshin::assets::MeshData mesh;
+        for (kenshin::u32 c : preview.cut)
+        {
+            const auto& cluster = dag.clusters[c];
+            const kenshin::u32 base = mesh.vertexCount();
+            for (kenshin::u32 v = 0; v < cluster.vertexCount; ++v)
+            {
+                const kenshin::u32 src = cluster.vertexOffset + v;
+                for (int k = 0; k < 3; ++k)
+                    mesh.positions.push_back(dag.positions[src * 3 + k]);
+                for (int k = 0; k < 3; ++k)
+                    mesh.normals.push_back(dag.normals[src * 3 + k]);
+                mesh.uvs.push_back(dag.uvs[src * 2]);
+                mesh.uvs.push_back(dag.uvs[src * 2 + 1]);
+            }
+            for (kenshin::u32 i = 0; i < cluster.indexCount; ++i)
+                mesh.indices.push_back(base + dag.indices[cluster.indexOffset + i]);
+        }
+        if (preview.meshHandle != kenshin::backend::IRenderBackend::kInvalidMeshHandle)
+            backend->destroyMeshBuffer(preview.meshHandle);
+        preview.meshHandle = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
+        if (mesh.indices.empty())
+            return;
+        kenshin::backend::IRenderBackend::MeshUpload upload;
+        upload.positions = mesh.positions.data();
+        upload.normals = mesh.normals.data();
+        upload.uvs = mesh.uvs.data();
+        upload.vertexCount = mesh.vertexCount();
+        upload.indices = mesh.indices.data();
+        upload.indexCount = static_cast<kenshin::u32>(mesh.indices.size());
+        preview.meshHandle = backend->createMeshBuffer(upload);
+    }
+} // namespace
+
+namespace
+{
     struct UiState
     {
         ImVec2 viewportSize {1280.0f, 720.0f};
@@ -231,7 +305,8 @@ namespace
                 kenshin::scene::Camera& camera,
                 kenshin::scene::ICameraController*& controller,
                 kenshin::scene::OrbitCameraController& orbit,
-                kenshin::scene::FirstPersonCameraController& firstPerson)
+                kenshin::scene::FirstPersonCameraController& firstPerson,
+                KgeoPreview* uiKgeo)
     {
         // Full-window dockspace host: every panel (viewport included) can be
         // dragged out, docked, split; layout persists across sessions.
@@ -297,6 +372,30 @@ namespace
                     camera.isOrthonormal() ? "yes" : "NO");
         ImGui::Text("(LMB drag rotates, wheel zooms, WASD/QE)");
         ImGui::End();
+
+        if (uiKgeo)
+        {
+            ImGui::Begin("LOD Preview");
+            ImGui::SliderFloat("pixel error", &uiKgeo->pixelThreshold, 0.05f, 32.0f,
+                               "%.2f px", ImGuiSliderFlags_Logarithmic);
+            ImGui::Checkbox("level coloring (shading off)", &uiKgeo->lodColors);
+            const auto& st = uiKgeo->lastStats;
+            ImGui::Text("cut: %u clusters / %u tris", st.clusterCount,
+                        st.triangleCount);
+            ImGui::Text("levels %d..%d", st.minLevel, st.maxLevel);
+            ImGui::Text("source: %u tris", uiKgeo->dag.sourceTriangleCount);
+            if (!uiKgeo->history.empty() &&
+                ImGui::BeginChild("history", ImVec2(0, 80), true))
+            {
+                ImGui::PlotLines("##tris", uiKgeo->history.data(),
+                                 static_cast<int>(uiKgeo->history.size()), 0,
+                                 nullptr, 0.0f,
+                                 static_cast<float>(uiKgeo->dag.sourceTriangleCount),
+                                 ImVec2(0, 60));
+                ImGui::EndChild();
+            }
+            ImGui::End();
+        }
     }
 } // namespace
 
@@ -586,6 +685,28 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---- .kgeo LOD preview (S3.4) ---------------------------------------
+    KgeoPreview kgeoPreview;
+    bool kgeoMode = false;
+    if (!args.kgeo.empty())
+    {
+        std::string kgeoLog;
+        if (loadKgeoPreview(args.kgeo, kgeoPreview, backend.get(), kgeoLog))
+        {
+            kgeoMode = true;
+            kgeoPreview.pixelThreshold = args.lodThreshold;
+            KENSHIN_INFO("[kgeo] loaded: {} clusters / {} groups / {} levels",
+                         kgeoPreview.dag.clusters.size(),
+                         kgeoPreview.dag.groups.size(),
+                         [&] { kenshin::i32 m = 0;
+                               for (auto& g : kgeoPreview.dag.groups)
+                                   m = std::max(m, g.lodLevel);
+                               return m + 1; }());
+        }
+        else
+            KENSHIN_WARN("[kgeo] load failed: {} (continuing with --mesh)", kgeoLog);
+    }
+
     UiState ui;
     ui.viewportSize = ImVec2(static_cast<float>(window.width()),
                              static_cast<float>(window.height()));
@@ -650,7 +771,7 @@ int main(int argc, char** argv)
         }
 
         drawUi(ui, backend->viewportImGuiTexture(), stats, camera, controller,
-               orbit, firstPerson);
+               orbit, firstPerson, kgeoMode ? &kgeoPreview : nullptr);
 
         // Controller input (only while the viewport item is active).
         kenshin::scene::ControllerInput controllerInput;
@@ -678,9 +799,46 @@ int main(int argc, char** argv)
             cameraChecked = true;
         }
 
+        // .kgeo LOD preview: re-select the cut when the threshold moves,
+        // rebuild the concatenated mesh, then draw through the same path.
+        if (kgeoMode)
+        {
+            std::vector<kenshin::u32> cut;
+            const kenshin::f32 camPos[3] = {camera.position.x, camera.position.y,
+                                            camera.position.z};
+            kenshin::geometry::selectLodCut(kgeoPreview.dag, kgeoPreview.pixelThreshold,
+                                            static_cast<kenshin::u32>(ui.viewportSize.y),
+                                            camera.fovYDeg, camPos, cut);
+            if (cut != kgeoPreview.cut)
+            {
+                kgeoPreview.cut = std::move(cut);
+                kgeoPreview.needRebuild = true;
+                kgeoPreview.lastStats =
+                    kenshin::geometry::summarizeCut(kgeoPreview.dag, kgeoPreview.cut);
+                kgeoPreview.history.push_back(
+                    static_cast<float>(kgeoPreview.lastStats.triangleCount));
+                if (kgeoPreview.history.size() > 240)
+                    kgeoPreview.history.erase(kgeoPreview.history.begin());
+                KENSHIN_INFO("[kgeo] cut: {} clusters / {} tris (levels {}..{}) "
+                             "at {:.2f}px",
+                             kgeoPreview.lastStats.clusterCount,
+                             kgeoPreview.lastStats.triangleCount,
+                             kgeoPreview.lastStats.minLevel,
+                             kgeoPreview.lastStats.maxLevel,
+                             kgeoPreview.pixelThreshold);
+            }
+            if (kgeoPreview.needRebuild)
+            {
+                rebuildCutMesh(kgeoPreview, backend.get());
+                kgeoPreview.needRebuild = false;
+            }
+        }
+
         // Baseline draw (S2.2): the mesh renders into the viewport target
         // between beginFrame and endFrame.
-        if (meshHandle != kenshin::backend::IRenderBackend::kInvalidMeshHandle &&
+        const kenshin::u32 activeMesh =
+            kgeoMode ? kgeoPreview.meshHandle : meshHandle;
+        if (activeMesh != kenshin::backend::IRenderBackend::kInvalidMeshHandle &&
             ui.viewportSize.x > 1.0f && ui.viewportSize.y > 1.0f)
         {
             const kenshin::f32 aspect = ui.viewportSize.x / ui.viewportSize.y;
@@ -688,9 +846,13 @@ int main(int argc, char** argv)
             // GLM stores column-major, so upload the transpose.
             const glm::mat4 viewProj = glm::transpose(camera.projection(aspect) * camera.view());
             kenshin::backend::IRenderBackend::MeshDraw draw;
-            draw.mesh = meshHandle;
+            draw.mesh = activeMesh;
             std::memcpy(draw.viewProj, &viewProj, sizeof(draw.viewProj));
-            const kenshin::f32 kdArr[4] = {meshKd.r, meshKd.g, meshKd.b, 1.0f};
+            kenshin::f32 kdArr[4] = {meshKd.r, meshKd.g, meshKd.b, 1.0f};
+            if (kgeoMode)
+            {
+                kdArr[0] = 0.75f; kdArr[1] = 0.75f; kdArr[2] = 0.78f; kdArr[3] = 1.0f;
+            }
             std::memcpy(draw.kd, kdArr, sizeof(draw.kd));
             // Studio light from upper-left-front; camera position feeds the
             // Blinn-Phong specular half-vector.
