@@ -112,13 +112,15 @@ namespace assets
             curve(t + 0.01f, p2);
             const glm::vec3 tangent = glm::normalize(p2 - p1);
 
-            glm::vec3 n1, n2;
-            curve(t + glm::pi<f32>() * 2.0f, n1); // same point one loop later
-            curve(t + glm::pi<f32>() * 2.0f + 0.01f, n2);
-            const glm::vec3 n2MinusN1 = n2 - n1;
-            glm::vec3 normal = glm::normalize(tangent * -1.0f + n2MinusN1);
-            const glm::vec3 binormal = glm::normalize(glm::cross(tangent, normal));
-            normal = glm::cross(binormal, tangent);
+            // Radial frame: the knot wraps the Y axis, so the direction away
+            // from that axis is a continuous, seam-free reference. (The
+            // three.js-style n2-n1 trick degenerates here: the curve is
+            // 2*pi-periodic, so n2-n1 is the tangent itself and the frame
+            // collapses to NaN binormals -> torn tube.)
+            const glm::vec3 radial =
+                glm::normalize(glm::vec3(p1.x, 0.0f, p1.z));
+            const glm::vec3 binormal = glm::normalize(glm::cross(tangent, radial));
+            const glm::vec3 normal = glm::cross(binormal, tangent);
 
             for (int j = 0; j <= ringSegs; ++j)
             {
