@@ -21,6 +21,7 @@ endif()
 add_library(kenshin_engine STATIC
     src/assets/ObjLoader.cpp
     src/assets/ProceduralMesh.cpp
+    src/geometry/ClusterLodBuilder.cpp
     # vendored ImGui backends, compiled here so vk calls resolve through volk
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_win32.cpp
@@ -90,7 +91,13 @@ target_compile_definitions(kenshin_engine PRIVATE
 target_include_directories(kenshin_engine SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/ThirdParty/slang/include
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends
+    ${CMAKE_SOURCE_DIR}/ThirdParty
 )
+# Vendored meshoptimizer (master): vcpkg 1.1.1 lacks SimplifyPreserveFolds
+# and other new flags clusterlod.h depends on.
+file(GLOB KENSHIN_MEMOPT_SOURCES ${CMAKE_SOURCE_DIR}/ThirdParty/meshoptimizer/*.cpp)
+target_sources(kenshin_engine PRIVATE ${KENSHIN_MEMOPT_SOURCES})
+set_source_files_properties(${KENSHIN_MEMOPT_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_win32.cpp

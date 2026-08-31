@@ -24,7 +24,7 @@
 - [ ] S2.3 光照 + swapchain 重建 + 千帧长跑
 
 **Phase 3 · 离线 Builder（meshopt+clusterlod）→ M1a/M1 验收**
-- [ ] S3.1 meshopt+clusterlod 集成冒烟
+- [x] S3.1 meshopt+clusterlod 集成冒烟 ✅ 2026-09-01
 - [ ] S3.2 DAG 装配（父子边/bounds/单调误差传播）
 - [ ] S3.3 .kgeo 序列化 + kgeo_builder CLI（M1a）
 - [ ] S3.4 LOD 切割面可视化验证（M1，无裂缝检查）
