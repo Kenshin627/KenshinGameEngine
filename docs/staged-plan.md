@@ -420,7 +420,7 @@ M3 两遍 HZB 遮挡剔除 → M4 大三角形 HW 光栅路径 + async compute �
 
 **Phase 1 · 窗口与 Vulkan 底座**
 - [x] S1.1 Win32 窗口与输入 ✅ 2026-08-31
-- [ ] S1.2 Vulkan 设备初始化
+- [x] S1.2 Vulkan 设备初始化 ✅ 2026-08-31
 - [ ] S1.3 交换链与帧循环与截图管线
 - [ ] S1.4 Slang 着色器管理（uint64 原子冒烟）
 - [ ] S1.5 ImGui 与相机
