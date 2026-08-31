@@ -71,9 +71,9 @@ namespace backend
 
         u32 loaderVersion = 0;
         vkEnumerateInstanceVersion(&loaderVersion);
-        if (loaderVersion < VK_API_VERSION_1_2)
+        if (loaderVersion < VK_API_VERSION_1_4)
         {
-            KENSHIN_ERROR("[vulkan] loader only supports {}.{} (need 1.2)",
+            KENSHIN_ERROR("[vulkan] loader only supports {}.{} (need 1.4)",
                           VK_API_VERSION_MAJOR(loaderVersion), VK_API_VERSION_MINOR(loaderVersion));
             return false;
         }
@@ -142,7 +142,7 @@ namespace backend
             .applicationVersion = VK_MAKE_VERSION(0, 1, 0),
             .pEngineName = "KENSHIN",
             .engineVersion = VK_MAKE_VERSION(0, 1, 0),
-            .apiVersion = VK_API_VERSION_1_2,
+            .apiVersion = VK_API_VERSION_1_4,
         };
         const VkInstanceCreateInfo createInfo {
             .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -176,7 +176,10 @@ namespace backend
                 KENSHIN_WARN("[vulkan] debug messenger creation failed (non-fatal)");
         }
 
-        KENSHIN_INFO("[vulkan] instance 1.2 ok, validation={}", validationOn ? "on" : "off");
+        KENSHIN_INFO("[vulkan] instance {}.{} ok, validation={}",
+                     VK_API_VERSION_MAJOR(VK_API_VERSION_1_4),
+                     VK_API_VERSION_MINOR(VK_API_VERSION_1_4),
+                     validationOn ? "on" : "off");
         return true;
     }
 

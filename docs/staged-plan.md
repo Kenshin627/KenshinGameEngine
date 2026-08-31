@@ -68,7 +68,7 @@ GPU 侧每个 pass（剔除、光栅化）都写一个**CPU 参考实现**（同
 | 阶段 | 内容 | 验证手段 |
 |:--|:--|:--|
 | S1.1 | Win32 窗口 + 输入事件 | V3 日志 |
-| S1.2 | Vulkan 1.2 设备初始化（volk+VMA+特性报告） | V3 设备报告（含 shaderBufferInt64Atomics 检查，失败即停） |
+| S1.2 | Vulkan 1.4 设备初始化（volk+VMA+特性报告） | V3 设备报告（含 shaderBufferInt64Atomics 检查，失败即停） |
 | S1.3 | 交换链 + 帧循环 + 清屏呈现 + **截图管线** | V2 截图（确定性：同参数逐字节一致） |
 | S1.4 | Slang 着色器管理（.slang→SPIR-V 运行时编译） | V1+V3（**uint64 原子 compute 冒烟** + 错误日志带行号） |
 | S1.5 | ImGui + 相机 + 帧统计面板 | V2 截图 + 相机矩阵断言 |
@@ -178,9 +178,9 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 
 ---
 
-### 阶段 S1.2 —— Vulkan 1.2 设备初始化
+### 阶段 S1.2 —— Vulkan 1.4 设备初始化
 
-**目标**：volk 加载 → instance（校验层按需开启+debug messenger）→ 物理设备选择（独显优先，打印名称/API 版本）→ 逻辑设备（Vulkan 1.2，开启 `shaderBufferInt64Atomics`、`timelineSemaphore`，校验不支持则记录并允许继续）→ 图形+计算队列 → VMA 初始化。
+**目标**：volk 加载 → instance（校验层按需开启+debug messenger）→ 物理设备选择（独显优先，打印名称/API 版本）→ 逻辑设备（Vulkan 1.4，开启 `shaderBufferInt64Atomics`、`timelineSemaphore`，校验不支持则记录并允许继续）→ 图形+计算队列 → VMA 初始化。
 
 **改动**：`include/kenshin/backend/RenderBackend.h`（首批抽象类型与枚举）+ `src/backend/vulkan/{VulkanContext,VulkanDevice}.cpp`（volk/VMA/设备/队列，参照 renderEngine "backend 是唯一裸 GPU API 调用处"的纪律）；app 启动时创建并打印**设备能力报告**，随后销毁退出。
 
@@ -205,6 +205,8 @@ ctest --preset windows-msvc-release    # 空测试集，通过
 **通过标准**：三次连续运行截图逐字节一致（确定性渲染）。
 
 ---
+
+> **Vulkan 基线 = 1.4**（用户 2026-08-31 定；两块本机 GPU 均支持 1.4.x）：shaderBufferInt64Atomics 自 1.2 起核心仍需显式开启；**1.3 起 dynamic rendering 免 render pass/framebuffer 样板、synchronization2 屏障 API**，**1.4 起 push descriptor 免描述符池**——S1.3 起的管线代码按这些现代基线写。
 
 ### 阶段 S1.4 —— Slang 着色器管理
 

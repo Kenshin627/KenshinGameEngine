@@ -49,6 +49,8 @@ namespace backend
             fns.vkBindBufferMemory2KHR                  = (PFN_vkBindBufferMemory2)vkBindBufferMemory2;
             fns.vkBindImageMemory2KHR                   = (PFN_vkBindImageMemory2)vkBindImageMemory2;
             fns.vkGetPhysicalDeviceMemoryProperties2KHR = (PFN_vkGetPhysicalDeviceMemoryProperties2)vkGetPhysicalDeviceMemoryProperties2;
+            fns.vkGetDeviceBufferMemoryRequirements      = (PFN_vkGetDeviceBufferMemoryRequirements)vkGetDeviceBufferMemoryRequirements;
+            fns.vkGetDeviceImageMemoryRequirements       = (PFN_vkGetDeviceImageMemoryRequirements)vkGetDeviceImageMemoryRequirements;
         }
     } // namespace
 
@@ -106,7 +108,7 @@ namespace backend
             .device = device,
             .pVulkanFunctions = &vmaFns,
             .instance = context.instance,
-            .vulkanApiVersion = VK_API_VERSION_1_2,
+            .vulkanApiVersion = VK_API_VERSION_1_4,
         };
         if (const VkResult result = vmaCreateAllocator(&allocatorInfo, &allocator);
             result != VK_SUCCESS)
