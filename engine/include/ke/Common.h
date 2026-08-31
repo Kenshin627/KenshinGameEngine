@@ -26,5 +26,6 @@ using f32 = float;
 using f64 = double;
 
 using usize = size_t;
+using isize = std::ptrdiff_t;
 
 KE_NS_END

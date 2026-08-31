@@ -20,8 +20,10 @@ endif()
 
 add_library(ke_engine STATIC
     src/Version.cpp
+    src/core/Input.cpp
     src/core/Log.cpp
     src/core/Timer.cpp
+    src/core/Window.cpp
 )
 add_library(ke::engine ALIAS ke_engine)
 
