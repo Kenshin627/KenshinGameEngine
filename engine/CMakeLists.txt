@@ -19,6 +19,9 @@ if(NOT KENSHIN_GIT_SHA)
 endif()
 
 add_library(kenshin_engine STATIC
+    # vendored ImGui backends, compiled here so vk calls resolve through volk
+    ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
+    ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_win32.cpp
     src/Version.cpp
     src/backend/VulkanBackend.cpp
     src/backend/vulkan/FrameSync.cpp
@@ -31,6 +34,8 @@ add_library(kenshin_engine STATIC
     src/core/Timer.cpp
     src/core/Window.cpp
     src/manager/ShaderManager.cpp
+    src/scene/Camera.cpp
+    src/scene/CameraController.cpp
     src/util/BmpWriter.cpp
 )
 add_library(kenshin::engine ALIAS kenshin_engine)
@@ -66,7 +71,8 @@ endif()
 # Public deps (their headers appear in our public headers -> PUBLIC)
 find_package(spdlog CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
-target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm)
+find_package(imgui CONFIG REQUIRED)
+target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm imgui::imgui)
 
 # Vulkan backend deps (kept PRIVATE: raw API types never leave the backend)
 find_package(volk CONFIG REQUIRED)
@@ -81,6 +87,14 @@ target_compile_definitions(kenshin_engine PRIVATE
 # Slang (vendored binary release; SPIR-V runtime compilation)
 target_include_directories(kenshin_engine SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/ThirdParty/slang/include
+    ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends
+)
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
+    ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_win32.cpp
+    PROPERTIES COMPILE_OPTIONS "/W0")
+target_compile_definitions(kenshin_engine PRIVATE
+    IMGUI_IMPL_VULKAN_USE_VOLK   # vk entry points via volk's loaded pointers
 )
 target_link_libraries(kenshin_engine PRIVATE
     ${CMAKE_SOURCE_DIR}/ThirdParty/slang/lib/slang.lib

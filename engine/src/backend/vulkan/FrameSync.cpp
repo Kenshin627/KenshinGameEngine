@@ -74,6 +74,18 @@ namespace backend
     bool FrameSync::ensureOffscreens(const VulkanDevice& device, u32 width, u32 height,
                                      VkFormat format, VkImageUsageFlags usage)
     {
+        // Does anything need (re)creation?
+        bool anyStale = false;
+        for (u32 i = 0; i < kMaxFramesInFlight; ++i)
+            if (!slots[i].offscreen.matches(width, height, format))
+                anyStale = true;
+        if (!anyStale)
+            return true;
+
+        // The other in-flight slot's command buffer may still reference the
+        // old targets; a resize is rare, so a full idle wait is fine here.
+        vkDeviceWaitIdle(device.device);
+
         for (u32 i = 0; i < kMaxFramesInFlight; ++i)
         {
             FrameSlot& slot = slots[i];

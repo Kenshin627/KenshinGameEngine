@@ -26,6 +26,10 @@ namespace backend
         VkSemaphore imageAvailable = VK_NULL_HANDLE; // signaled by acquire, consumed by submit
         VkFence inFlight = VK_NULL_HANDLE;
         GpuImage offscreen;
+        // ImGui descriptor set sampling `offscreen` (VkImage it was created for
+        // tracked so a resize recreates the set). Opaque in this header.
+        void* imguiTexture = nullptr;
+        VkImage imguiTextureImage = VK_NULL_HANDLE;
 
         bool initialized() const { return commandPool != VK_NULL_HANDLE; }
     };

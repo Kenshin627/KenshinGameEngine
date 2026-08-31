@@ -6,6 +6,12 @@
 #include "vulkan/VulkanDevice.h"
 #include "kenshin/core/Log.h"
 
+#pragma warning(push, 0)
+#include <imgui.h>
+#include <imgui_impl_vulkan.h>
+#include <imgui_impl_win32.h>
+#pragma warning(pop)
+
 #include <cstdio>
 #include <cstring>
 
@@ -26,6 +32,18 @@ namespace backend
         bool frameActive = false;
         u32 activeWidth = 0;
         u32 activeHeight = 0;
+
+        // ImGui integration (S1.5)
+        VkDescriptorPool imguiPool = VK_NULL_HANDLE;
+        bool imguiInited = false;
+        f32 bgColor[4] = {0.055f, 0.055f, 0.075f, 1.0f};
+
+        // Full-frame capture (UI included; dev/visual checks only)
+        bool captureFull = false;
+        bool fullCaptured = false;
+        VkBuffer captureStaging = VK_NULL_HANDLE;
+        VmaAllocation captureAlloc = VK_NULL_HANDLE;
+        u32 captureWidth = 0, captureHeight = 0;
     };
 
     VulkanBackend::VulkanBackend()
@@ -136,8 +154,25 @@ namespace backend
     {
         if (!m_impl)
             return;
+        if (m_impl->imguiInited)
+        {
+            ImGui_ImplVulkan_Shutdown();
+            ImGui_ImplWin32_Shutdown();
+            m_impl->imguiInited = false;
+        }
         if (m_impl->device.device != VK_NULL_HANDLE)
             vkDeviceWaitIdle(m_impl->device.device);
+        if (m_impl->imguiPool != VK_NULL_HANDLE)
+        {
+            vkDestroyDescriptorPool(m_impl->device.device, m_impl->imguiPool, nullptr);
+            m_impl->imguiPool = VK_NULL_HANDLE;
+        }
+        if (m_impl->captureStaging != VK_NULL_HANDLE)
+        {
+            vmaDestroyBuffer(m_impl->device.allocator,
+                             m_impl->captureStaging, m_impl->captureAlloc);
+            m_impl->captureStaging = VK_NULL_HANDLE;
+        }
         m_impl->frameSync.shutdown(m_impl->device);
         m_impl->swapchain.shutdown(m_impl->context.instance, m_impl->device.device);
         m_impl->device.shutdown();
@@ -200,8 +235,10 @@ namespace backend
         // (Re)create per-frame offscreen targets on size/format change.
         if (!impl.frameSync.ensureOffscreens(
                 impl.device, info.width, info.height, impl.swapchain.format,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT))
             return false;
+        ensureViewportTextures();
 
         // Acquire; rebuild once on out-of-date (e.g. window resize).
         VkResult acquireResult =
@@ -241,6 +278,21 @@ namespace backend
         vkCmdClearColorImage(slot.commandBuffer, slot.offscreen.image,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
 
+        // offscreen: TRANSFER_DST -> SHADER_READ_ONLY (sampled by the ImGui
+        // viewport panel later in this same command buffer).
+        recordBarrier(slot.commandBuffer,
+                      imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                   VK_ACCESS_2_SHADER_READ_BIT));
+
+        if (impl.imguiInited)
+        {
+            ImGui_ImplVulkan_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGui::NewFrame();
+        }
+
         impl.frameActive = true;
         impl.activeWidth = info.width;
         impl.activeHeight = info.height;
@@ -257,38 +309,80 @@ namespace backend
         FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
         const VkImage dstImage = impl.swapchain.images[impl.swapchain.imageIndex];
 
-        // offscreen: TRANSFER_DST -> TRANSFER_SRC
-        recordBarrier(slot.commandBuffer,
-                      imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                   VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT));
-        // swapchain image: UNDEFINED -> TRANSFER_DST
+        ImDrawData* drawData = nullptr;
+        if (impl.imguiInited)
+        {
+            ImGui::Render();
+            drawData = ImGui::GetDrawData();
+        }
+
+        // swapchain image: UNDEFINED -> COLOR_ATTACHMENT (ImGui draws the
+        // whole window through dynamic rendering).
         recordBarrier(slot.commandBuffer,
                       imageBarrier(dstImage, VK_IMAGE_LAYOUT_UNDEFINED,
-                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                   VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT));
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
 
-        const VkImageBlit blit {
-            .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-            .srcOffsets = {{0, 0, 0},
-                           {static_cast<i32>(slot.offscreen.width),
-                            static_cast<i32>(slot.offscreen.height), 1}},
-            .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
-            .dstOffsets = {{0, 0, 0},
-                           {static_cast<i32>(impl.swapchain.extent.width),
-                            static_cast<i32>(impl.swapchain.extent.height), 1}},
+        const VkClearValue uiClear {};
+        const VkRenderingAttachmentInfo colorAttachment {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = impl.swapchain.imageViews[impl.swapchain.imageIndex],
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue = uiClear,
         };
-        vkCmdBlitImage(slot.commandBuffer,
-                       slot.offscreen.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       dstImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                       1, &blit, VK_FILTER_LINEAR);
+        const VkRenderingInfo renderingInfo {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea = {0, 0, impl.swapchain.extent.width, impl.swapchain.extent.height},
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &colorAttachment,
+        };
+        vkCmdBeginRendering(slot.commandBuffer, &renderingInfo);
+        if (drawData && drawData->CmdListsCount > 0)
+            ImGui_ImplVulkan_RenderDrawData(drawData, slot.commandBuffer);
+        vkCmdEndRendering(slot.commandBuffer);
 
-        // swapchain image: TRANSFER_DST -> PRESENT
-        recordBarrier(slot.commandBuffer,
-                      imageBarrier(dstImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                   VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                                   VK_ACCESS_2_MEMORY_READ_BIT));
+        // swapchain image: COLOR_ATTACHMENT -> PRESENT (via a capture copy
+        // when a full-frame screenshot was requested).
+        if (impl.captureFull)
+        {
+            ensureCaptureStaging(impl.swapchain.extent.width, impl.swapchain.extent.height);
+            recordBarrier(slot.commandBuffer,
+                          imageBarrier(dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                       VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                       VK_ACCESS_2_TRANSFER_READ_BIT));
+            const VkBufferImageCopy captureRegion {
+                .bufferOffset = 0,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {impl.swapchain.extent.width, impl.swapchain.extent.height, 1},
+            };
+            vkCmdCopyImageToBuffer(slot.commandBuffer, dstImage,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   impl.captureStaging, 1, &captureRegion);
+            recordBarrier(slot.commandBuffer,
+                          imageBarrier(dstImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                       VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                       VK_ACCESS_2_MEMORY_READ_BIT));
+            impl.captureFull = false;
+            impl.fullCaptured = true;
+        }
+        else
+        {
+            recordBarrier(slot.commandBuffer,
+                          imageBarrier(dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                       VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                       VK_ACCESS_2_MEMORY_READ_BIT));
+        }
 
         if (vkEndCommandBuffer(slot.commandBuffer) != VK_SUCCESS)
         {
@@ -393,6 +487,12 @@ namespace backend
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
         vkBeginCommandBuffer(cmd, &beginInfo);
+        recordBarrier(cmd,
+                      imageBarrier(slot.offscreen.image,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                   VK_ACCESS_2_TRANSFER_READ_BIT));
         const VkBufferImageCopy region {
             .bufferOffset = 0,
             .bufferRowLength = 0,   // tightly packed
@@ -660,6 +760,184 @@ namespace backend
         vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
         vkDestroyShaderModule(device, module, nullptr);
         return ok;
+    }
+
+
+    // ── ImGui integration (S1.5) ──────────────────────────────────
+
+    void VulkanBackend::ensureViewportTextures()
+    {
+        if (!m_impl->imguiInited)
+            return;
+        for (u32 i = 0; i < kMaxFramesInFlight; ++i)
+        {
+            FrameSlot& slot = m_impl->frameSync.slots[i];
+            if (slot.offscreen.image == VK_NULL_HANDLE ||
+                slot.imguiTextureImage == slot.offscreen.image)
+                continue;
+            if (slot.imguiTexture)
+            {
+                ImGui_ImplVulkan_RemoveTexture(
+                    static_cast<VkDescriptorSet>(slot.imguiTexture));
+                slot.imguiTexture = nullptr;
+            }
+            slot.imguiTexture = ImGui_ImplVulkan_AddTexture(
+                slot.offscreen.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            slot.imguiTextureImage = slot.offscreen.image;
+        }
+    }
+
+    bool VulkanBackend::initImGuiBackend(void* hwnd, u32 width, u32 height)
+    {
+        Impl& impl = *m_impl;
+        if (impl.imguiInited || !hwnd)
+            return impl.imguiInited;
+
+        // The swapchain must exist so its format drives the ImGui pipeline.
+        if (impl.swapchain.swapchain == VK_NULL_HANDLE &&
+            !impl.swapchain.init(impl.context.instance, impl.context.physicalDevice,
+                                 impl.device.device, impl.hwnd, width, height))
+            return false;
+
+        // NOTE: the validation layer (vcpkg build) warns that this pool lacks
+        // VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE even though it is listed below —
+        // a layer bookkeeping gap for the Vulkan 1.4 standalone image
+        // descriptor enums, not a real pool mismatch (allocation succeeds,
+        // counts are far below limits). Verified against source and pool handle.
+        const VkDescriptorPoolSize poolSizes[] = {
+            { VK_DESCRIPTOR_TYPE_SAMPLER, 16 },
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64 },
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 64 },
+        };
+        const VkDescriptorPoolCreateInfo poolInfo {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+            .maxSets = 64,
+            .poolSizeCount = 2,
+            .pPoolSizes = poolSizes,
+        };
+        if (vkCreateDescriptorPool(impl.device.device, &poolInfo, nullptr,
+                                   &impl.imguiPool) != VK_SUCCESS)
+        {
+            KENSHIN_ERROR("[imgui] descriptor pool creation failed");
+            return false;
+        }
+
+        VkFormat colorFormat = impl.swapchain.format;
+        ImGui_ImplVulkan_InitInfo initInfo {};
+        initInfo.ApiVersion = VK_API_VERSION_1_4;
+        initInfo.Instance = impl.context.instance;
+        initInfo.PhysicalDevice = impl.context.physicalDevice;
+        initInfo.Device = impl.device.device;
+        initInfo.QueueFamily = impl.device.graphicsFamily;
+        initInfo.Queue = impl.device.graphicsQueue;
+        initInfo.DescriptorPool = impl.imguiPool;
+        initInfo.MinImageCount = 2;
+        initInfo.ImageCount = 3;
+        initInfo.UseDynamicRendering = true;
+        initInfo.PipelineInfoMain.PipelineRenderingCreateInfo = VkPipelineRenderingCreateInfoKHR {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+            .colorAttachmentCount = 1,
+            .pColorAttachmentFormats = &colorFormat,
+        };
+        initInfo.CheckVkResultFn = [](VkResult err) {
+            if (err != VK_SUCCESS)
+                KENSHIN_ERROR("[imgui][vulkan] VkResult = {}", static_cast<int>(err));
+        };
+        initInfo.MinAllocationSize = 1024 * 1024;
+
+        if (!ImGui_ImplVulkan_Init(&initInfo))
+        {
+            KENSHIN_ERROR("[imgui] ImGui_ImplVulkan_Init failed");
+            vkDestroyDescriptorPool(impl.device.device, impl.imguiPool, nullptr);
+            impl.imguiPool = VK_NULL_HANDLE;
+            return false;
+        }
+        if (!ImGui_ImplWin32_Init(hwnd))
+        {
+            KENSHIN_ERROR("[imgui] ImGui_ImplWin32_Init failed");
+            ImGui_ImplVulkan_Shutdown();
+            vkDestroyDescriptorPool(impl.device.device, impl.imguiPool, nullptr);
+            impl.imguiPool = VK_NULL_HANDLE;
+            return false;
+        }
+
+        impl.imguiInited = true;
+        ensureViewportTextures();
+        KENSHIN_INFO("[imgui] backend ready (dynamic rendering, docking UI)");
+        return true;
+    }
+
+    void* VulkanBackend::viewportImGuiTexture()
+    {
+        FrameSlot& slot = m_impl->frameSync.slots[m_impl->frameSync.frameIndex];
+        return slot.imguiTexture;
+    }
+
+
+    void VulkanBackend::requestFullFrameCapture()
+    {
+        m_impl->captureFull = true;
+    }
+
+    bool VulkanBackend::readbackFullFrame(std::vector<u8>& rgbaOut, u32& width, u32& height)
+    {
+        Impl& impl = *m_impl;
+        if (!impl.fullCaptured || impl.captureStaging == VK_NULL_HANDLE)
+            return false;
+        vkWaitForFences(impl.device.device, 1,
+                        &impl.frameSync.slots[impl.frameSync.lastCompleted].inFlight,
+                        VK_TRUE, UINT64_MAX);
+
+        width = impl.captureWidth;
+        height = impl.captureHeight;
+        void* mapped = nullptr;
+        if (vmaMapMemory(impl.device.allocator, impl.captureAlloc, &mapped) != VK_SUCCESS)
+            return false;
+
+        rgbaOut.resize(static_cast<usize>(width) * height * 4);
+        const u8* src = static_cast<const u8*>(mapped);
+        const bool bgra = impl.swapchain.format == VK_FORMAT_B8G8R8A8_UNORM;
+        if (bgra)
+        {
+            for (usize i = 0; i < rgbaOut.size(); i += 4)
+            {
+                rgbaOut[i + 0] = src[i + 2];
+                rgbaOut[i + 1] = src[i + 1];
+                rgbaOut[i + 2] = src[i + 0];
+                rgbaOut[i + 3] = src[i + 3];
+            }
+        }
+        else
+            std::memcpy(rgbaOut.data(), src, rgbaOut.size());
+        vmaUnmapMemory(impl.device.allocator, impl.captureAlloc);
+        impl.fullCaptured = false;
+        return true;
+    }
+
+    void VulkanBackend::ensureCaptureStaging(u32 width, u32 height)
+    {
+        Impl& impl = *m_impl;
+        if (impl.captureStaging != VK_NULL_HANDLE && impl.captureWidth == width &&
+            impl.captureHeight == height)
+            return;
+        if (impl.captureStaging != VK_NULL_HANDLE)
+            vmaDestroyBuffer(impl.device.allocator, impl.captureStaging, impl.captureAlloc);
+        const VkBufferCreateInfo bufferInfo {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = static_cast<VkDeviceSize>(width) * height * 4,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        const VmaAllocationCreateInfo allocInfo {
+            .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+            .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+        };
+        vmaCreateBuffer(impl.device.allocator, &bufferInfo, &allocInfo,
+                        &impl.captureStaging, &impl.captureAlloc, nullptr);
+        impl.captureWidth = width;
+        impl.captureHeight = height;
     }
 
 } // namespace backend

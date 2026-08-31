@@ -38,6 +38,11 @@ namespace core
         std::function<void(int x, int y)> onMouseMove;
         std::function<void(float delta)> onWheel;                  // positive = scroll up
 
+        /// Raw Win32 message hook (used by the ImGui Win32 backend).
+        /// Receives de-typed (hwnd, msg, wparam, lparam); return true when
+        /// the message is consumed and default handling should be skipped.
+        std::function<bool(void* hwnd, unsigned msg, usize wparam, isize lparam)> onRawMessage;
+
         Window() = default;
         ~Window();
 

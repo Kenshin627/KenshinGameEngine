@@ -148,6 +148,9 @@ namespace core
         const WPARAM wparam = static_cast<WPARAM>(wparamRaw);
         const LPARAM lparam = static_cast<LPARAM>(lparamRaw);
 
+        if (onRawMessage && onRawMessage(hwndRaw, msg, wparamRaw, lparamRaw))
+            return 0;
+
         switch (msg)
         {
         case WM_SIZE:

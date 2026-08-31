@@ -27,11 +27,20 @@ namespace backend
         bool readbackFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) override;
         bool runComputeOneshot(const Job& job,
                                std::vector<u8> outputs[Job::kMaxBuffers]) override;
+        bool initImGuiBackend(void* hwnd, u32 width, u32 height) override;
+        void* viewportImGuiTexture() override;
+        void requestFullFrameCapture() override;
+        bool readbackFullFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) override;
 
     private:
         struct Impl;
         std::unique_ptr<Impl> m_impl;
         BackendCaps m_caps;
+
+        /// (Re)create ImGui descriptor sets when offscreen targets change.
+        void ensureViewportTextures();
+        /// (Re)create the full-frame capture staging buffer on size change.
+        void ensureCaptureStaging(u32 width, u32 height);
     };
 
 } // namespace backend

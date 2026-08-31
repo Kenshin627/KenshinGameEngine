@@ -114,6 +114,23 @@ namespace backend
         /// receives its bytes.
         virtual bool runComputeOneshot(const Job& job,
                                        std::vector<u8> outputs[Job::kMaxBuffers]) = 0;
+
+        // ---- ImGui integration (S1.5) ------------------------------------
+        /// Initialize the ImGui Vulkan + Win32 backends. The caller must have
+        /// created the ImGui context. The application then draws widgets
+        /// between beginFrame() and endFrame().
+        virtual bool initImGuiBackend(void* hwnd, u32 width, u32 height) = 0;
+
+        /// Texture id (opaque descriptor-set handle) of the CURRENT frame
+        /// slot's viewport target for ImGui::Image. Valid between
+        /// beginFrame() and endFrame().
+        virtual void* viewportImGuiTexture() = 0;
+
+        /// Request a capture of the NEXT endFrame's final swapchain image
+        /// (UI included). Read it back with readbackFullFrame().
+        /// Unlike readbackFrame this is NOT deterministic (UI content).
+        virtual void requestFullFrameCapture() = 0;
+        virtual bool readbackFullFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) = 0;
     };
 
     /// Factory implemented by the Vulkan backend (src/backend/).

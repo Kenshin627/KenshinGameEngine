@@ -137,7 +137,7 @@ namespace backend
             .imageColorSpace = chosen.colorSpace,
             .imageExtent = newExtent,
             .imageArrayLayers = 1,
-            .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, // blit target (S1.3) + ImGui/graphics (S1.5+)
+            .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, // ImGui draw (S1.5) + full-frame capture
             .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .preTransform = caps.currentTransform,
             .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,

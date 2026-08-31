@@ -15,11 +15,26 @@
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Window.h"
 #include "kenshin/manager/ShaderManager.h"
+#include "kenshin/scene/Camera.h"
+#include "kenshin/scene/CameraController.h"
+#include "kenshin/core/FrameStats.h"
+#include "kenshin/core/Timer.h"
 #include "kenshin/util/BmpWriter.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+
+#pragma warning(push, 0)
+#include <imgui.h>
+#include <imgui_impl_win32.h> // after Windows.h: backend expects HWND declared
+#pragma warning(pop)
+
+// imgui_impl_win32.h intentionally wraps the WndProcHandler declaration in
+// '#if 0' (to avoid dragging <windows.h> into the header). Per its comment,
+// forward declare it here — Windows.h is already included above.
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg,
+                                                             WPARAM wParam, LPARAM lParam);
 
 #include <cstdio>
 #include <cstring>
@@ -39,6 +54,7 @@ namespace
         bool validation = true;   // dev default ON; --no-validation to disable
         std::string cam;                             // parsed by Camera (S1.5)
         std::string screenshot;
+        std::string screenshotUi;                    // full window incl. ImGui
     };
 
     Args parseArgs(int argc, char** argv)
@@ -62,6 +78,8 @@ namespace
                 args.cam = argv[++i];
             else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
                 args.screenshot = argv[++i];
+            else if (std::strcmp(argv[i], "--screenshot-ui") == 0 && i + 1 < argc)
+                args.screenshotUi = argv[++i];
         }
         if (args.width <= 0 || args.height <= 0)
         {
@@ -130,6 +148,90 @@ namespace
     }
 } // namespace
 
+
+
+namespace
+{
+    struct UiState
+    {
+        ImVec2 viewportSize {1280.0f, 720.0f};
+        bool viewportHovered = false;
+        int controllerIndex = 0; // 0 orbit, 1 first person
+    };
+
+    void drawUi(UiState& ui, void* viewportTexture,
+                kenshin::core::FrameStats<240>& stats,
+                kenshin::scene::Camera& camera,
+                kenshin::scene::ICameraController*& controller,
+                kenshin::scene::OrbitCameraController& orbit,
+                kenshin::scene::FirstPersonCameraController& firstPerson)
+    {
+        // Full-window dockspace host: every panel (viewport included) can be
+        // dragged out, docked, split; layout persists across sessions.
+        ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
+                                     ImGuiDockNodeFlags_PassthruCentralNode);
+
+        // ---- Viewport panel --------------------------------------------
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::SetNextWindowPos(ImVec2(60.0f, 60.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(640.0f, 480.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Viewport");
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        if (avail.x >= 1.0f && avail.y >= 1.0f)
+            ui.viewportSize = avail;
+        if (viewportTexture && avail.x >= 1.0f && avail.y >= 1.0f)
+            ImGui::Image(ImTextureRef(viewportTexture), avail);
+        ui.viewportHovered = ImGui::IsItemHovered();
+        ImGui::End();
+        ImGui::PopStyleVar();
+
+        // ---- Frame pacing stats ----------------------------------------
+        ImGui::SetNextWindowPos(ImVec2(740.0f, 60.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(340.0f, 220.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Frame Stats");
+        ImGui::Text("FPS %.1f", stats.fps());
+        ImGui::Text("avg  %.3f ms", stats.averageMs());
+        ImGui::Text("std  %.3f ms", stats.stddevMs());
+        ImGui::Text("max  %.3f ms", stats.maxMs());
+        ImGui::Text("samples %zu", stats.count());
+        ImGui::Separator();
+        static float intervals[240] = {};
+        kenshin::usize count = 0;
+        stats.copyTo(intervals, count);
+        if (count > 1)
+            ImGui::PlotLines("##intervals", intervals, static_cast<int>(count), 0,
+                             nullptr, 0.0f, 50.0f, ImVec2(0, 60));
+        ImGui::End();
+
+        // ---- Camera panel ----------------------------------------------
+        ImGui::SetNextWindowPos(ImVec2(60.0f, 580.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(380.0f, 300.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Camera");
+        const char* items[] = { orbit.name(), firstPerson.name() };
+        if (ImGui::Combo("controller", &ui.controllerIndex, items, 2))
+            controller = ui.controllerIndex == 0
+                       ? static_cast<kenshin::scene::ICameraController*>(&orbit)
+                       : static_cast<kenshin::scene::ICameraController*>(&firstPerson);
+        ImGui::SliderFloat("yaw", &camera.yawDeg, -180.0f, 180.0f, "%.1f deg");
+        ImGui::SliderFloat("pitch", &camera.pitchDeg, -89.0f, 89.0f, "%.1f deg");
+        ImGui::SliderFloat("fov", &camera.fovYDeg, 20.0f, 120.0f, "%.0f deg");
+        if (ui.controllerIndex == 0)
+        {
+            ImGui::SliderFloat("distance", &orbit.distance, 0.1f, 200.0f, "%.2f m");
+            ImGui::DragFloat3("target", &orbit.target.x, 0.05f);
+        }
+        else
+        {
+            ImGui::SliderFloat("speed", &firstPerson.moveSpeed, 0.5f, 50.0f, "%.1f m/s");
+        }
+        const glm::vec3 pos = camera.position;
+        ImGui::Text("pos (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
+        ImGui::Text("view orthonormal: %s",
+                    camera.isOrthonormal() ? "yes" : "NO");
+        ImGui::Text("(LMB drag rotates, wheel zooms, WASD/QE)");
+        ImGui::End();
+    }
+} // namespace
 
 namespace
 {
@@ -260,6 +362,11 @@ namespace
     }
 } // namespace
 
+
+namespace
+{
+} // namespace
+
 int main(int argc, char** argv)
 {
     const Args args = parseArgs(argc, argv);
@@ -281,8 +388,25 @@ int main(int argc, char** argv)
         return code;
     }
 
+    kenshin::scene::Camera camera;
+    kenshin::scene::OrbitCameraController orbit;
+    kenshin::scene::FirstPersonCameraController firstPerson;
+    kenshin::scene::ICameraController* controller = &orbit;
     if (!args.cam.empty())
-        KENSHIN_INFO("camera params '{}' (consumed from S1.5 on)", args.cam);
+    {
+        float yaw = 35.0f, pitch = 20.0f, dist = 8.0f, tx = 0.0f, ty = 0.5f, tz = 0.0f;
+        if (sscanf_s(args.cam.c_str(), "%f,%f,%f,%f,%f,%f",
+                     &yaw, &pitch, &dist, &tx, &ty, &tz) >= 3)
+        {
+            camera.yawDeg = yaw;
+            camera.pitchDeg = pitch;
+            orbit.distance = dist;
+            orbit.target = {tx, ty, tz};
+            KENSHIN_INFO("camera params applied (orbit yaw={} pitch={} dist={})", yaw, pitch, dist);
+        }
+        else
+            KENSHIN_WARN("could not parse --cam '{}' (want yaw,pitch,dist[,tx,ty,tz])", args.cam);
+    }
 
     kenshin::core::Window window;
     if (!window.create({"KENSHIN Demo", static_cast<kenshin::u32>(args.width),
@@ -323,6 +447,44 @@ int main(int argc, char** argv)
     }
     KENSHIN_INFO("[vulkan] gate shaderBufferInt64Atomics: OK");
 
+    // ImGui: docking workspace over the whole window; the viewport render is a
+    // dockable panel (draggable out, dockable anywhere).
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    // Persist the layout next to the exe (default is the CWD, which is
+    // whatever directory the app was launched from).
+    {
+        wchar_t exePath[MAX_PATH] {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        static std::string iniPath =
+            (std::filesystem::path(exePath).parent_path() / "imgui.ini").string();
+        io.IniFilename = iniPath.c_str();
+    }
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    ImGui::StyleColorsDark();
+    window.onRawMessage = [](void* hwnd, unsigned msg, kenshin::usize wparam, kenshin::isize lparam) {
+        return ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), msg,
+                                              static_cast<WPARAM>(wparam),
+                                              static_cast<LPARAM>(lparam)) != 0;
+    };
+    if (!backend->initImGuiBackend(window.nativeHandle(), window.width(), window.height()))
+    {
+        KENSHIN_ERROR("ImGui backend init failed");
+        backend->shutdown();
+        ImGui::DestroyContext();
+        kenshin::log::shutdown();
+        return 1;
+    }
+
+    UiState ui;
+    ui.viewportSize = ImVec2(static_cast<float>(window.width()),
+                             static_cast<float>(window.height()));
+    kenshin::core::FrameStats<240> stats;
+    kenshin::Timer frameTimer;
+    bool cameraChecked = false;
+
     int frame = 0;
     while (window.pumpEvents())
     {
@@ -333,6 +495,9 @@ int main(int argc, char** argv)
             window.requestClose();
         }
         input.nextFrame();
+
+        const kenshin::f32 dt = static_cast<kenshin::f32>(frameTimer.elapsedSeconds());
+        frameTimer.reset();
 
         const bool isLastFrame = args.frames >= 0 && frame + 1 >= args.frames;
 
@@ -347,8 +512,8 @@ int main(int argc, char** argv)
         }
 
         kenshin::backend::FrameBeginInfo beginInfo;
-        beginInfo.width = window.width();
-        beginInfo.height = window.height();
+        beginInfo.width = static_cast<kenshin::u32>(ui.viewportSize.x);
+        beginInfo.height = static_cast<kenshin::u32>(ui.viewportSize.y);
         beginInfo.clearColor[0] = color[0];
         beginInfo.clearColor[1] = color[1];
         beginInfo.clearColor[2] = color[2];
@@ -358,10 +523,47 @@ int main(int argc, char** argv)
             KENSHIN_ERROR("beginFrame failed");
             break;
         }
-        backend->endFrame();
 
-        // Capture on the last frame (or when the user is closing).
-        const bool exiting = isLastFrame || window.isOpen() == false;
+        drawUi(ui, backend->viewportImGuiTexture(), stats, camera, controller,
+               orbit, firstPerson);
+
+        // Controller input (only while the viewport item is active).
+        kenshin::scene::ControllerInput controllerInput;
+        controllerInput.deltaTime = dt > 0.0f ? dt : 1.0f / 120.0f;
+        controllerInput.rotateActive =
+            ui.viewportHovered && ImGui::IsMouseDragging(ImGuiMouseButton_Left);
+        if (ui.viewportHovered)
+        {
+            controllerInput.mouseDeltaX = io.MouseDelta.x;
+            controllerInput.mouseDeltaY = io.MouseDelta.y;
+            controllerInput.wheel = io.MouseWheel;
+        }
+        controllerInput.moveF = ImGui::IsKeyDown(ImGuiKey_W);
+        controllerInput.moveB = ImGui::IsKeyDown(ImGuiKey_S);
+        controllerInput.moveL = ImGui::IsKeyDown(ImGuiKey_A);
+        controllerInput.moveR = ImGui::IsKeyDown(ImGuiKey_D);
+        controllerInput.moveUp = ImGui::IsKeyDown(ImGuiKey_E);
+        controllerInput.moveDown = ImGui::IsKeyDown(ImGuiKey_Q);
+        controllerInput.fast = io.KeyShift;
+        controller->update(camera, controllerInput);
+
+        if (!cameraChecked && camera.isOrthonormal())
+        {
+            KENSHIN_INFO("[camera] view basis orthonormal: OK");
+            cameraChecked = true;
+        }
+
+        // Full-frame capture must be flagged before endFrame records it.
+        const bool exiting = isLastFrame || !window.isOpen();
+        if (!args.screenshotUi.empty() && exiting)
+            backend->requestFullFrameCapture();
+
+        backend->endFrame();
+        stats.push(dt * 1000.0f);
+        if (frame > 0 && frame % 60 == 0)
+            KENSHIN_INFO("[pacing] avg={:.3f}ms std={:.3f}ms max={:.3f}ms fps={:.1f}",
+                         stats.averageMs(), stats.stddevMs(), stats.maxMs(), stats.fps());
+
         if (!args.screenshot.empty() && exiting)
         {
             std::vector<kenshin::u8> rgba;
@@ -375,6 +577,19 @@ int main(int argc, char** argv)
             else
                 KENSHIN_ERROR("screenshot FAILED");
         }
+        if (!args.screenshotUi.empty() && exiting)
+        {
+            std::vector<kenshin::u8> rgba;
+            kenshin::u32 w = 0, h = 0;
+            if (const auto parent = std::filesystem::path(args.screenshotUi).parent_path();
+                !parent.empty())
+                std::filesystem::create_directories(parent);
+            if (backend->readbackFullFrame(rgba, w, h) &&
+                kenshin::util::writeBmp24(args.screenshotUi, rgba, w, h))
+                KENSHIN_INFO("ui screenshot written: {} ({}x{})", args.screenshotUi, w, h);
+            else
+                KENSHIN_ERROR("ui screenshot FAILED");
+        }
 
         ++frame;
         if (isLastFrame)
@@ -386,6 +601,7 @@ int main(int argc, char** argv)
 
     KENSHIN_INFO("main loop exited after {} frames", frame);
     backend->shutdown();
+    ImGui::DestroyContext();
     kenshin::log::shutdown();
     return 0;
 }

@@ -16,7 +16,7 @@
 - [x] S1.2 Vulkan 1.4 设备初始化（volk+VMA+特性报告，shaderBufferInt64Atomics 即停检查）✅ 2026-08-31
 - [x] S1.3 交换链 + 帧循环 + 截图管线 ✅ 2026-08-31
 - [x] S1.4 Slang 着色器管理（.slang→SPIR-V，uint64 原子冒烟）✅ 2026-09-01
-- [ ] S1.5 ImGui + 相机 + 帧统计面板
+- [x] S1.5 ImGui + 相机 + 帧统计面板 ✅ 2026-09-01
 
 **Phase 2 · 基线渲染路径 → M0 验收**
 - [ ] S2.1 MeshData / OBJ 加载 / 程序化网格

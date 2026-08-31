@@ -8,7 +8,13 @@
     "catch2",
     "volk",
     "vulkan-memory-allocator",
-    "imgui",
+    {
+      "name": "imgui",
+      "features": [
+        "docking-experimental",
+        "win32-binding"
+      ]
+    },
     "meshoptimizer",
     "vulkan-validationlayers"
   ]
