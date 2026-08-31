@@ -27,7 +27,7 @@
 
 1. `cmake --build --preset <release>` 编译通过（/W4，新增代码零警告）；
 2. 该阶段验证全部通过（V1/V2/V3 按需）；
-3. 阶段产物 git commit 一次（信息格式 `S3.2: DAG 装配（元数据层）+ 单测`）。
+3. 阶段产物 git commit 一次（信息格式 `[feat]: S3.2 DAG assembly (metadata layer) + unit tests`，全英文）。
 
 ### 0.3 差分测试原则（本项目的特色防线）
 
