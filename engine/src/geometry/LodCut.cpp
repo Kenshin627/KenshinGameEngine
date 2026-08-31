@@ -60,13 +60,16 @@ namespace geometry
             const DagCluster& cluster = dag.clusters[c];
             const DagGroup& group = dag.groups[cluster.group];
 
+            // Per-CLUSTER threshold (own bounds distance) for BOTH
+            // conditions - mixing different groups' distance-scaled
+            // thresholds breaks the crossing logic and leaves holes on
+            // paths where no level fires.
             const f32 worldThreshold = thresholdOf[cluster.group];
             if (!(group.simplifyError > worldThreshold))
                 continue;
             bool parentsAcceptable = true;
             for (u32 parentGroup : group.parents)
-                if (dag.groups[parentGroup].simplifyError >
-                    thresholdOf[parentGroup])
+                if (dag.groups[parentGroup].simplifyError > worldThreshold)
                 {
                     parentsAcceptable = false;
                     break;
