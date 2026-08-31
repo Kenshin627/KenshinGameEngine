@@ -26,7 +26,7 @@
 **Phase 3 · 离线 Builder（meshopt+clusterlod）→ M1a/M1 验收**
 - [x] S3.1 meshopt+clusterlod 集成冒烟 ✅ 2026-09-01
 - [ ] S3.2 DAG 装配（父子边/bounds/单调误差传播）
-- [ ] S3.3 .kgeo 序列化 + kgeo_builder CLI（M1a）
+- [x] S3.3 .kgeo 序列化 + kgeo_builder CLI ✅ 2026-09-01（M1a）
 - [ ] S3.4 LOD 切割面可视化验证（M1，无裂缝检查）
 
 **Phase 4 · 虚拟几何运行时 → M2 验收**
@@ -40,7 +40,7 @@
 ## 里程碑验收
 
 - [x] **M0**（Phase 2 后）：窗口+Vulkan+ImGui+相机+基线网格渲染稳定 ✅ 2026-09-01
-- [ ] **M1a**（S3.3 后）：builder 全链路 + 单测全绿
+- [x] **M1a**（S3.3 后）：builder 全链路 + 单测全绿 ✅ 2026-09-01
 - [ ] **M1**（S3.4 后）：LOD 各层级渲染无裂缝
 - [ ] **M2**（S4.6 后）：端到端虚拟几何画面，三角形数由分辨率决定
 

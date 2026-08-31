@@ -22,6 +22,7 @@ add_library(kenshin_engine STATIC
     src/assets/ObjLoader.cpp
     src/assets/ProceduralMesh.cpp
     src/geometry/ClusterDag.cpp
+    src/geometry/KGeoFile.cpp
     src/geometry/ClusterLodBuilder.cpp
     # vendored ImGui backends, compiled here so vk calls resolve through volk
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp

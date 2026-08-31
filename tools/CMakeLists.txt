@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
 
 # ── Tools project ───────────────────────────────────────────────
-# S3.3: kgeo_builder CLI (input.obj -> output.kgeo) will be added here.
+project(KenshinTools VERSION 0.1.0 LANGUAGES CXX)
+
+add_executable(kgeo_builder kgeo_builder/main.cpp)
+target_link_libraries(kgeo_builder PRIVATE kenshin::engine)
+if(MSVC)
+    target_compile_options(kgeo_builder PRIVATE /W4 /permissive- /utf-8 /MP)
+endif()
