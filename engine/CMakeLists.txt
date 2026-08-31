@@ -30,6 +30,7 @@ add_library(kenshin_engine STATIC
     src/core/Log.cpp
     src/core/Timer.cpp
     src/core/Window.cpp
+    src/manager/ShaderManager.cpp
     src/util/BmpWriter.cpp
 )
 add_library(kenshin::engine ALIAS kenshin_engine)
@@ -75,4 +76,12 @@ target_link_libraries(kenshin_engine PRIVATE
 target_compile_definitions(kenshin_engine PRIVATE
     VK_NO_PROTOTYPES           # volk supplies all vk entry points
     VK_USE_PLATFORM_WIN32_KHR  # Win32 surface for present support check
+)
+
+# Slang (vendored binary release; SPIR-V runtime compilation)
+target_include_directories(kenshin_engine SYSTEM PRIVATE
+    ${CMAKE_SOURCE_DIR}/ThirdParty/slang/include
+)
+target_link_libraries(kenshin_engine PRIVATE
+    ${CMAKE_SOURCE_DIR}/ThirdParty/slang/lib/slang.lib
 )

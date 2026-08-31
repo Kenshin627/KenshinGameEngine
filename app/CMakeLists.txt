@@ -31,3 +31,14 @@ if(EXISTS ${KE_VKG_LAYER_DIR}/VkLayer_khronos_validation.json)
             $<TARGET_FILE_DIR:KENSHINDemo>
         COMMENT "Copying Vulkan validation layer next to KENSHINDemo")
 endif()
+
+# Slang runtime DLLs (vendored binary release)
+set(KE_SLANG_BIN ${CMAKE_SOURCE_DIR}/ThirdParty/slang/bin)
+if(EXISTS ${KE_SLANG_BIN}/slang.dll)
+    add_custom_command(TARGET KENSHINDemo POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${KE_SLANG_BIN}/slang.dll
+            ${KE_SLANG_BIN}/slang-compiler.dll
+            $<TARGET_FILE_DIR:KENSHINDemo>
+        COMMENT "Copying Slang runtime DLLs next to KENSHINDemo")
+endif()

@@ -25,6 +25,8 @@ namespace backend
         bool beginFrame(const FrameBeginInfo& info) override;
         void endFrame() override;
         bool readbackFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) override;
+        bool runComputeOneshot(const Job& job,
+                               std::vector<u8> outputs[Job::kMaxBuffers]) override;
 
     private:
         struct Impl;

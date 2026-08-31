@@ -89,6 +89,31 @@ namespace backend
         /// Blocking readback of the most recently ended frame's offscreen
         /// target. Output: RGBA8, rows top-down. Returns false on failure.
         virtual bool readbackFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) = 0;
+
+        // ---- one-shot compute (S1.4) -------------------------------------
+        /// A self-contained compute job: uploads buffers, dispatches once,
+        /// waits for completion and copies marked buffers back to the host.
+        /// Bindings map to SSBO set=0, binding=i. Used for shader smoke tests
+        /// and offline utilities; per-frame in-frame compute arrives in Phase 4.
+        struct Job
+        {
+            static constexpr u32 kMaxBuffers = 4;
+            struct Buffer
+            {
+                const void* initData = nullptr; // host data copied in (may be null)
+                usize size = 0;                 // bytes, 0 = slot unused
+                bool readBack = false;
+            };
+            const u32* spirv = nullptr;
+            usize spirvBytes = 0;
+            const char* entryPoint = "main";
+            u32 groupCountX = 1;
+            Buffer buffers[kMaxBuffers] = {};
+        };
+        /// Returns false on failure. For each buffer with readBack, outputs[i]
+        /// receives its bytes.
+        virtual bool runComputeOneshot(const Job& job,
+                                       std::vector<u8> outputs[Job::kMaxBuffers]) = 0;
     };
 
     /// Factory implemented by the Vulkan backend (src/backend/).

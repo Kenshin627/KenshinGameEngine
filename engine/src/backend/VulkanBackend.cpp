@@ -116,19 +116,18 @@ namespace backend
                          ? (caps.presentSupported ? "present=ok" : "present=NOT supported")
                          : "present=unchecked (no window)");
 
-        // ---- presentation resources --------------------------------------
-        if (params.nativeWindowHandle)
+        // Frame resources (command pools etc.) are device-level and needed by
+        // windowless compute paths too.
+        if (!m_impl->frameSync.init(m_impl->device))
         {
-            if (!m_impl->presentSupported)
-            {
-                KENSHIN_ERROR("[vulkan] graphics family does not support present");
-                return false;
-            }
-            if (!m_impl->frameSync.init(m_impl->device))
-            {
-                KENSHIN_ERROR("[vulkan] frame resources init failed");
-                return false;
-            }
+            KENSHIN_ERROR("[vulkan] frame resources init failed");
+            return false;
+        }
+
+        if (params.nativeWindowHandle && !m_impl->presentSupported)
+        {
+            KENSHIN_ERROR("[vulkan] graphics family does not support present");
+            return false;
         }
         return true;
     }
@@ -438,6 +437,229 @@ namespace backend
         vmaUnmapMemory(impl.device.allocator, stagingAllocHandle);
         vmaDestroyBuffer(impl.device.allocator, staging, stagingAllocHandle);
         return true;
+    }
+
+    // ── one-shot compute (S1.4) ───────────────────────────────────
+
+    bool VulkanBackend::runComputeOneshot(const Job& job,
+                                          std::vector<u8> outputs[Job::kMaxBuffers])
+    {
+        Impl& impl = *m_impl;
+        VkDevice device = impl.device.device;
+        if (!device || !job.spirv || job.spirvBytes == 0)
+            return false;
+
+        // Count used buffers.
+        u32 bufferCount = 0;
+        for (u32 i = 0; i < Job::kMaxBuffers; ++i)
+            if (job.buffers[i].size > 0)
+                bufferCount = i + 1;
+
+        // Shader module + descriptor set layout + pipeline layout + pipeline.
+        const VkShaderModuleCreateInfo moduleInfo {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = job.spirvBytes,
+            .pCode = job.spirv,
+        };
+        VkShaderModule module = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(device, &moduleInfo, nullptr, &module) != VK_SUCCESS)
+        {
+            KENSHIN_ERROR("[compute] shader module creation failed");
+            return false;
+        }
+
+        VkDescriptorSetLayoutBinding layoutBindings[Job::kMaxBuffers] = {};
+        for (u32 i = 0; i < bufferCount; ++i)
+        {
+            layoutBindings[i] = VkDescriptorSetLayoutBinding {
+                .binding = i,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            };
+        }
+        const VkDescriptorSetLayoutCreateInfo setLayoutInfo {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = bufferCount,
+            .pBindings = layoutBindings,
+        };
+        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout);
+
+        const VkPipelineLayoutCreateInfo pipelineLayoutInfo {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = bufferCount ? 1u : 0u,
+            .pSetLayouts = &setLayout,
+        };
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
+
+        const VkComputePipelineCreateInfo pipelineInfo {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = VkPipelineShaderStageCreateInfo {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = module,
+                .pName = job.entryPoint,
+            },
+            .layout = pipelineLayout,
+        };
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
+                                     nullptr, &pipeline) != VK_SUCCESS)
+        {
+            KENSHIN_ERROR("[compute] pipeline creation failed");
+            vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+            vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
+            vkDestroyShaderModule(device, module, nullptr);
+            return false;
+        }
+
+        // Host-visible, host-coherent buffers (smoke-test scale: simple over fast).
+        VkBuffer buffers[Job::kMaxBuffers] = {};
+        VmaAllocation allocations[Job::kMaxBuffers] = {};
+        void* mapped[Job::kMaxBuffers] = {};
+        bool ok = true;
+        for (u32 i = 0; i < bufferCount && ok; ++i)
+        {
+            const VkBufferCreateInfo bufferInfo {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .size = static_cast<VkDeviceSize>(job.buffers[i].size),
+                .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            };
+            const VmaAllocationCreateInfo allocInfo {
+                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                         VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+                .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            };
+            VmaAllocationInfo allocInfoOut {};
+            if (vmaCreateBuffer(impl.device.allocator, &bufferInfo, &allocInfo,
+                                &buffers[i], &allocations[i], &allocInfoOut) != VK_SUCCESS)
+            {
+                KENSHIN_ERROR("[compute] buffer creation failed (slot {})", i);
+                ok = false;
+                break;
+            }
+            mapped[i] = allocInfoOut.pMappedData;
+            if (job.buffers[i].initData)
+                std::memcpy(mapped[i], job.buffers[i].initData, job.buffers[i].size);
+        }
+
+        // Descriptor set from a transient pool.
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (ok && bufferCount > 0)
+        {
+            const VkDescriptorPoolSize poolSize {
+                .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = Job::kMaxBuffers,
+            };
+            const VkDescriptorPoolCreateInfo poolInfo {
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                .maxSets = 1,
+                .poolSizeCount = 1,
+                .pPoolSizes = &poolSize,
+            };
+            vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool);
+
+            const VkDescriptorSetAllocateInfo setInfo {
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                .descriptorPool = pool,
+                .descriptorSetCount = 1,
+                .pSetLayouts = &setLayout,
+            };
+            if (vkAllocateDescriptorSets(device, &setInfo, &set) != VK_SUCCESS)
+            {
+                KENSHIN_ERROR("[compute] descriptor set allocation failed");
+                ok = false;
+            }
+        }
+        if (ok && bufferCount > 0)
+        {
+            VkDescriptorBufferInfo bufferInfos[Job::kMaxBuffers] = {};
+            VkWriteDescriptorSet writes[Job::kMaxBuffers] = {};
+            for (u32 i = 0; i < bufferCount; ++i)
+            {
+                bufferInfos[i] = VkDescriptorBufferInfo {
+                    .buffer = buffers[i],
+                    .range = VK_WHOLE_SIZE,
+                };
+                writes[i] = VkWriteDescriptorSet {
+                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet = set,
+                    .dstBinding = i,
+                    .descriptorCount = 1,
+                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    .pBufferInfo = &bufferInfos[i],
+                };
+            }
+            vkUpdateDescriptorSets(device, bufferCount, writes, 0, nullptr);
+        }
+
+        // Record + submit the dispatch, then wait (host-coherent: submit and
+        // queueWaitIdle provide the necessary host sync boundaries).
+        if (ok)
+        {
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            const VkCommandBufferAllocateInfo allocInfo {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                .commandPool = impl.frameSync.slots[0].commandPool,
+                .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                .commandBufferCount = 1,
+            };
+            vkAllocateCommandBuffers(device, &allocInfo, &cmd);
+            const VkCommandBufferBeginInfo beginInfo {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            };
+            vkBeginCommandBuffer(cmd, &beginInfo);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+            if (bufferCount > 0)
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout,
+                                        0, 1, &set, 0, nullptr);
+            vkCmdDispatch(cmd, job.groupCountX, 1, 1);
+            vkEndCommandBuffer(cmd);
+
+            const VkCommandBufferSubmitInfo cmdSubmit {
+                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                .commandBuffer = cmd,
+            };
+            const VkSubmitInfo2 submit {
+                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                .commandBufferInfoCount = 1,
+                .pCommandBufferInfos = &cmdSubmit,
+            };
+            vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+            vkQueueWaitIdle(impl.device.graphicsQueue);
+            vkFreeCommandBuffers(device, impl.frameSync.slots[0].commandPool, 1, &cmd);
+        }
+
+        // Readback.
+        if (ok)
+        {
+            for (u32 i = 0; i < bufferCount; ++i)
+            {
+                if (!job.buffers[i].readBack || !mapped[i])
+                    continue;
+                outputs[i].resize(job.buffers[i].size);
+                std::memcpy(outputs[i].data(), mapped[i], job.buffers[i].size);
+            }
+        }
+
+        // Teardown.
+        if (pool != VK_NULL_HANDLE)
+            vkDestroyDescriptorPool(device, pool, nullptr);
+        for (u32 i = 0; i < bufferCount; ++i)
+            if (buffers[i] != VK_NULL_HANDLE)
+                vmaDestroyBuffer(impl.device.allocator, buffers[i], allocations[i]);
+        vkDestroyPipeline(device, pipeline, nullptr);
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
+        vkDestroyShaderModule(device, module, nullptr);
+        return ok;
     }
 
 } // namespace backend

@@ -7,12 +7,14 @@
 //   KENSHINDemo --cam yaw,pitch,dist[,x,y,z]     camera params (consumed from S1.5 on)
 //   KENSHINDemo --screenshot path.bmp            capture the last rendered frame
 //   KENSHINDemo --selftest-window                window event-chain selftest (no GPU)
+//   KENSHINDemo --selftest-shader                Slang compile + uint64 atomic compute selftest
 
 #include "kenshin/Version.h"
 #include "kenshin/backend/RenderBackend.h"
 #include "kenshin/core/Input.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Window.h"
+#include "kenshin/manager/ShaderManager.h"
 #include "kenshin/util/BmpWriter.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -33,6 +35,7 @@ namespace
         int  width = 1600;
         int  height = 900;
         bool selftest = false;
+        bool selftestShader = false;
         bool validation = true;   // dev default ON; --no-validation to disable
         std::string cam;                             // parsed by Camera (S1.5)
         std::string screenshot;
@@ -45,6 +48,8 @@ namespace
         {
             if (std::strcmp(argv[i], "--selftest-window") == 0)
                 args.selftest = true;
+            else if (std::strcmp(argv[i], "--selftest-shader") == 0)
+                args.selftestShader = true;
             else if (std::strcmp(argv[i], "--validation") == 0)
                 args.validation = true;
             else if (std::strcmp(argv[i], "--no-validation") == 0)
@@ -125,6 +130,136 @@ namespace
     }
 } // namespace
 
+
+namespace
+{
+    /// Locate engine/shaders: relative to the exe (build/<preset>/app/<cfg>),
+    /// falling back to the working directory.
+    std::string findShaderRoot()
+    {
+        wchar_t exePath[MAX_PATH] {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        auto dir = std::filesystem::path(exePath).parent_path();
+        const std::filesystem::path candidates[] = {
+            dir / ".." / ".." / ".." / ".." / "engine" / "shaders",
+            std::filesystem::path("engine/shaders"),
+        };
+        for (const auto& candidate : candidates)
+        {
+            std::error_code ec;
+            if (std::filesystem::exists(candidate / "test_atomic.slang", ec))
+                return std::filesystem::weakly_canonical(candidate, ec).string();
+        }
+        return "engine/shaders";
+    }
+
+    /// Point the loader at a validation layer shipped next to the exe.
+    void setupValidationLayerPath()
+    {
+        wchar_t exePath[MAX_PATH] {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        const auto exeDir = std::filesystem::path(exePath).parent_path();
+        if (std::filesystem::exists(exeDir / "VkLayer_khronos_validation.json"))
+        {
+            SetEnvironmentVariableW(L"VK_LAYER_PATH", exeDir.c_str());
+            KENSHIN_INFO("validation layer path -> {}", exeDir.string());
+        }
+    }
+
+    /// S1.4 smoke: compile test_atomic.slang, run it, verify the uint64
+    /// atomic path (the VisBuffer primitive). Exits 0 on success.
+    int selftestShader(bool validation)
+    {
+        kenshin::manager::ShaderManager shaders;
+        if (!shaders.init(findShaderRoot()))
+        {
+            KENSHIN_ERROR("selftest-shader: ShaderManager init FAILED");
+            return 2;
+        }
+        KENSHIN_INFO("selftest-shader: step1 shader manager ok");
+
+        // Error-path: a deliberately broken source must fail with diagnostics.
+        {
+            std::vector<kenshin::u32> bogusSpirv;
+            std::string errLog;
+            const std::string brokenSource =
+                "[shader(\"compute\")]\n"
+                "[numthreads(1,1,1)]\n"
+                "void main(uint tid : SV_DispatchThreadID)\n"
+                "{\n"
+                "    totally_undefined_function_12345();\n"
+                "}\n";
+            if (shaders.compileSource(brokenSource, "broken.slang", bogusSpirv, errLog))
+            {
+                KENSHIN_ERROR("selftest-shader: step2 ERROR-PATH FAILED (broken shader compiled)");
+                return 2;
+            }
+            const bool hasError = errLog.find("error") != std::string::npos;
+            KENSHIN_INFO("selftest-shader: step2 error-path ok (diagnostics: {})",
+                         errLog);
+            if (!hasError)
+            {
+                KENSHIN_ERROR("selftest-shader: step2 diagnostics lack an 'error' marker");
+                return 2;
+            }
+        }
+
+        // Compile the smoke shader.
+        std::vector<kenshin::u32> spirv;
+        std::string log;
+        if (!shaders.compileFile("test_atomic.slang", spirv, log))
+        {
+            KENSHIN_ERROR("selftest-shader: step3 compile FAILED: {}", log);
+            return 2;
+        }
+        KENSHIN_INFO("selftest-shader: step3 compile ok ({} SPIR-V words)", spirv.size());
+
+        // Device (no window) + run.
+        if (validation)
+            setupValidationLayerPath();
+        auto backend = kenshin::backend::createVulkanBackend();
+        kenshin::backend::BackendInitParams params;
+        if (!backend->initialize(params))
+        {
+            KENSHIN_ERROR("selftest-shader: backend init FAILED");
+            return 2;
+        }
+
+        const kenshin::u32 input[4] = {1, 2, 3, 4};
+        kenshin::u64 atomicInit = 0;
+        kenshin::u32 outputInit = 0;
+        kenshin::backend::IRenderBackend::Job job;
+        job.spirv = spirv.data();
+        job.spirvBytes = spirv.size() * sizeof(kenshin::u32);
+        job.entryPoint = "main";
+        job.groupCountX = 1;
+        job.buffers[0] = { input, sizeof(input), false };              // in
+        job.buffers[1] = { &atomicInit, sizeof(atomicInit), true };    // u64 atomic out
+        job.buffers[2] = { &outputInit, sizeof(outputInit), true };    // reduce out
+
+        std::vector<kenshin::u8> outs[kenshin::backend::IRenderBackend::Job::kMaxBuffers];
+        if (!backend->runComputeOneshot(job, outs))
+        {
+            KENSHIN_ERROR("selftest-shader: step4 compute FAILED");
+            backend->shutdown();
+            return 2;
+        }
+        const kenshin::u64 atomicMax = *reinterpret_cast<const kenshin::u64*>(outs[1].data());
+        const kenshin::u32 reduce = *reinterpret_cast<const kenshin::u32*>(outs[2].data());
+        backend->shutdown();
+
+        KENSHIN_INFO("selftest-shader: step4 compute ok: atomicMax(u64)={}, reduce={}",
+                     atomicMax, reduce);
+        if (atomicMax != 16 || reduce != 10)
+        {
+            KENSHIN_ERROR("selftest-shader: FAILED (expected atomicMax=16, reduce=10)");
+            return 2;
+        }
+        KENSHIN_INFO("selftest-shader: PASSED (uint64 atomic path verified)");
+        return 0;
+    }
+} // namespace
+
 int main(int argc, char** argv)
 {
     const Args args = parseArgs(argc, argv);
@@ -137,6 +272,13 @@ int main(int argc, char** argv)
         selftestWindow();
         kenshin::log::shutdown();
         return 0;
+    }
+
+    if (args.selftestShader)
+    {
+        const int code = selftestShader(args.validation);
+        kenshin::log::shutdown();
+        return code;
     }
 
     if (!args.cam.empty())
@@ -157,16 +299,7 @@ int main(int argc, char** argv)
     // Dev default: validation ON. The layer ships next to the exe (vcpkg);
     // point the loader at it before instance creation.
     if (args.validation)
-    {
-        wchar_t exePath[MAX_PATH] {};
-        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-        const auto exeDir = std::filesystem::path(exePath).parent_path();
-        if (std::filesystem::exists(exeDir / "VkLayer_khronos_validation.json"))
-        {
-            SetEnvironmentVariableW(L"VK_LAYER_PATH", exeDir.c_str());
-            KENSHIN_INFO("validation layer path -> {}", exeDir.string());
-        }
-    }
+        setupValidationLayerPath();
 
     auto backend = kenshin::backend::createVulkanBackend();
     kenshin::backend::BackendInitParams backendParams;
