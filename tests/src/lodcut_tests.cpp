@@ -40,11 +40,14 @@ TEST_CASE("lod cut threshold monotonicity", "[geometry][lodcut]")
 {
     Built built;
     REQUIRE(build(kenshin::assets::createTorusKnot(2, 3, 192, 48, 1.0f, 0.32f), built));
-    const float camPos[3] = {0.0f, 0.0f, 4.0f};
+    // Far camera: all groups see ~the same threshold, restoring strict
+    // monotonicity (near cameras mix per-group scales legitimately).
+    const float camPos[3] = {0.0f, 0.0f, 1000.0f};
 
-    // Coarser thresholds render fewer triangles.
+    // Thresholds scaled for the far camera (world error = px * scale *
+    // 1000): the knot's first-level error ~0.17 lands around 0.1px.
     kenshin::u32 prevTris = 0xFFFFFFFF;
-    for (const kenshin::f32 threshold : {0.25f, 1.0f, 4.0f, 16.0f, 64.0f})
+    for (const kenshin::f32 threshold : {0.004f, 0.016f, 0.064f, 0.25f, 1.0f})
     {
         std::vector<kenshin::u32> cut;
         kenshin::geometry::selectLodCut(built.dag, threshold, 720, 60.0f, camPos, cut);
@@ -56,7 +59,7 @@ TEST_CASE("lod cut threshold monotonicity", "[geometry][lodcut]")
     }
     // The finest threshold should render close to the full mesh.
     std::vector<kenshin::u32> fine;
-    kenshin::geometry::selectLodCut(built.dag, 0.01f, 720, 60.0f, camPos, fine);
+    kenshin::geometry::selectLodCut(built.dag, 0.0001f, 720, 60.0f, camPos, fine);
     const auto fineStats = kenshin::geometry::summarizeCut(built.dag, fine);
     REQUIRE(fineStats.triangleCount >= built.mesh.triangleCount() / 2);
     // A huge threshold degrades to the roots.

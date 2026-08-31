@@ -103,23 +103,58 @@ namespace assets
         mesh.normals.reserve(vertexTotal * 3);
         mesh.uvs.reserve(vertexTotal * 2);
 
+        // Parallel-transport frame with even seam-twist distribution:
+        // winding-consistent along the whole tube by construction. (Both
+        // earlier frames flipped orientation on segments where the tangent's
+        // azimuth around the Y axis reversed - backface culling then ate
+        // those strips: the "incomplete mesh" artifact, 42/256 segments.)
+        auto tangentAt = [&](f32 t, glm::vec3& out) {
+            glm::vec3 a, b;
+            curve(t, a);
+            curve(t + 0.01f, b);
+            out = glm::normalize(b - a);
+        };
+        glm::vec3 t0;
+        tangentAt(0.0f, t0);
+        glm::vec3 seed = glm::vec3(0.0f, 1.0f, 0.0f);
+        if (std::abs(glm::dot(seed, t0)) > 0.9f)
+            seed = glm::vec3(1.0f, 0.0f, 0.0f);
+        glm::vec3 prevBinormal =
+            glm::normalize(glm::cross(t0, glm::cross(seed, t0)));
+
+        // Measure holonomy: transport once around, compare with the start.
+        glm::vec3 transported = prevBinormal;
+        for (int i = 0; i < tubeSegs; ++i)
+        {
+            const f32 t = static_cast<f32>(i) / tubeSegs * glm::pi<f32>() * 2.0f;
+            glm::vec3 tangent;
+            tangentAt(t, tangent);
+            transported = glm::normalize(
+                transported - tangent * glm::dot(tangent, transported));
+        }
+        const f32 seamAngle = std::atan2(
+            glm::dot(glm::cross(prevBinormal, transported), t0),
+            glm::dot(prevBinormal, transported));
+        const f32 twistPerStep = -seamAngle / static_cast<f32>(tubeSegs);
+
+        glm::vec3 binormal = prevBinormal;
         for (int i = 0; i <= tubeSegs; ++i)
         {
             const f32 t = static_cast<f32>(i) / tubeSegs * glm::pi<f32>() * 2.0f;
 
-            glm::vec3 p1, p2;
+            glm::vec3 p1;
             curve(t, p1);
-            curve(t + 0.01f, p2);
-            const glm::vec3 tangent = glm::normalize(p2 - p1);
+            glm::vec3 tangent;
+            tangentAt(t, tangent);
 
-            // Radial frame: the knot wraps the Y axis, so the direction away
-            // from that axis is a continuous, seam-free reference. (The
-            // three.js-style n2-n1 trick degenerates here: the curve is
-            // 2*pi-periodic, so n2-n1 is the tangent itself and the frame
-            // collapses to NaN binormals -> torn tube.)
-            const glm::vec3 radial =
-                glm::normalize(glm::vec3(p1.x, 0.0f, p1.z));
-            const glm::vec3 binormal = glm::normalize(glm::cross(tangent, radial));
+            // Transport the previous binormal onto this tangent plane...
+            binormal = glm::normalize(binormal -
+                                      tangent * glm::dot(tangent, binormal));
+            // ...and apply the distributed seam twist so ring tubeSegs
+            // coincides exactly with ring 0.
+            const f32 a = twistPerStep * static_cast<f32>(i);
+            const glm::vec3 side = glm::normalize(glm::cross(tangent, binormal));
+            binormal = glm::normalize(binormal * std::cos(a) + side * std::sin(a));
             const glm::vec3 normal = glm::cross(binormal, tangent);
 
             for (int j = 0; j <= ringSegs; ++j)
