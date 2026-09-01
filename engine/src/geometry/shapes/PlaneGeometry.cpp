@@ -30,7 +30,7 @@ namespace geometry
             {
                 const u32 a = idx(i, j), b = idx(i + 1, j);
                 const u32 c = idx(i + 1, j + 1), d = idx(i, j + 1);
-                mesh.indices.insert(mesh.indices.end(), {a, b, c, a, c, d});
+                mesh.indices.insert(mesh.indices.end(), {a, c, b, a, d, c});
             }
         return mesh;
     }

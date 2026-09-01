@@ -48,7 +48,7 @@ namespace geometry
             {
                 const u32 a = side(h, i), b = side(h, i + 1);
                 const u32 c = side(h + 1, i + 1), d = side(h + 1, i);
-                mesh.indices.insert(mesh.indices.end(), {a, b, c, a, c, d});
+                mesh.indices.insert(mesh.indices.end(), {a, c, b, a, d, c});
             }
 
         if (openEnded)
@@ -79,9 +79,9 @@ namespace geometry
                                         {base, base + 1 + i + 1, base + 1 + i});
             }
         };
-        addCap(-hy, radiusBottom, -1.0f, false);
+        addCap(-hy, radiusBottom, -1.0f, true);
         if (radiusTop > 0.0f)
-            addCap(hy, radiusTop, 1.0f, true);
+            addCap(hy, radiusTop, 1.0f, false);
         return mesh;
     }
 

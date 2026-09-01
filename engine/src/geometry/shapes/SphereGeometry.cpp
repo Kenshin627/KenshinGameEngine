@@ -43,18 +43,18 @@ namespace geometry
             return 1u + static_cast<u32>(r - 1) * segsU + static_cast<u32>(u % segsU);
         };
         for (int u = 0; u < segsU; ++u)
-            mesh.indices.insert(mesh.indices.end(), {0u, ring(1, u + 1), ring(1, u)});
+            mesh.indices.insert(mesh.indices.end(), {0u, ring(1, u), ring(1, u + 1)});
         for (int r = 1; r < rings; ++r)
             for (int u = 0; u < segsU; ++u)
             {
                 const u32 a = ring(r, u), b = ring(r, u + 1);
                 const u32 c = ring(r + 1, u + 1), d = ring(r + 1, u);
-                mesh.indices.insert(mesh.indices.end(), {a, b, c, a, c, d});
+                mesh.indices.insert(mesh.indices.end(), {a, c, b, a, d, c});
             }
         const u32 south = mesh.vertexCount() - 1;
         for (int u = 0; u < segsU; ++u)
             mesh.indices.insert(mesh.indices.end(),
-                                {south, ring(rings, u), ring(rings, u + 1)});
+                                {south, ring(rings, u + 1), ring(rings, u)});
         return mesh;
     }
 

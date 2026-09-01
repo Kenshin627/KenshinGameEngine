@@ -31,7 +31,47 @@ namespace
         for (kenshin::u32 index : m.indices)
             REQUIRE(index < vc);
     }
+
+    // Front faces are CCW-outward: each triangle's geometric normal
+    // cross(b-a, c-a) must agree with the stored vertex normals. Catches
+    // mixed/inverted face tables (the box shipped with 3 of 6 faces
+    // inverted; sphere/cylinder/plane shipped fully inverted).
+    void checkWinding(const kenshin::assets::MeshData& m)
+    {
+        REQUIRE(m.indices.size() % 3 == 0);
+        const auto pos = [&](kenshin::u32 i) {
+            return glm::vec3(m.positions[i * 3], m.positions[i * 3 + 1],
+                             m.positions[i * 3 + 2]);
+        };
+        const auto nrm = [&](kenshin::u32 i) {
+            return glm::vec3(m.normals[i * 3], m.normals[i * 3 + 1],
+                             m.normals[i * 3 + 2]);
+        };
+        for (kenshin::usize t = 0; t + 2 < m.indices.size(); t += 3)
+        {
+            const glm::vec3 a = pos(m.indices[t]);
+            const glm::vec3 b = pos(m.indices[t + 1]);
+            const glm::vec3 c = pos(m.indices[t + 2]);
+            const glm::vec3 g = glm::cross(b - a, c - a);
+            if (glm::length(g) < 1e-9f)
+                continue; // slivers collapsing at the cone apex
+            const glm::vec3 n = nrm(m.indices[t]) + nrm(m.indices[t + 1]) +
+                                nrm(m.indices[t + 2]);
+            REQUIRE(glm::dot(g, n) > 0.0f);
+        }
+    }
 } // namespace
+
+TEST_CASE("shape winding CCW-outward everywhere", "[shapes]")
+{
+    checkWinding(kenshin::geometry::BoxGeometry::create(1.0f, 1.0f, 1.0f));
+    checkWinding(kenshin::geometry::SphereGeometry::create(16, 8, 1.0f));
+    checkWinding(kenshin::geometry::TorusGeometry::create(1.0f, 0.4f, 8, 16));
+    checkWinding(kenshin::geometry::CylinderGeometry::create(1.0f, 1.0f, 2.0f, 16));
+    checkWinding(kenshin::geometry::ConeGeometry::create(1.0f, 2.0f, 16));
+    checkWinding(kenshin::geometry::PlaneGeometry::create(2.0f, 2.0f, 2, 2));
+    checkWinding(kenshin::geometry::TorusKnotGeometry::create(2, 3, 64, 8, 1.0f));
+}
 
 TEST_CASE("box known counts and bounds", "[shapes]")
 {
