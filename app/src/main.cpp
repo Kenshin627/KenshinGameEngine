@@ -293,15 +293,12 @@ namespace
     {
         ImVec2 viewportSize {1280.0f, 720.0f};
         bool viewportHovered = false;
-        int controllerIndex = 0; // 0 orbit, 1 first person
     };
 
     void drawUi(UiState& ui, void* viewportTexture,
                 kenshin::core::FrameStats<240>& stats,
                 kenshin::scene::Camera& camera,
-                kenshin::scene::ICameraController*& controller,
-                kenshin::scene::OrbitCameraController& orbit,
-                kenshin::scene::FirstPersonCameraController& firstPerson,
+                kenshin::scene::CameraController& controller,
                 KgeoPreview* uiKgeo)
     {
         // Full-window dockspace host: every panel (viewport included) can be
@@ -345,28 +342,24 @@ namespace
         ImGui::SetNextWindowPos(ImVec2(60.0f, 580.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(380.0f, 300.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Camera");
-        const char* items[] = { orbit.name(), firstPerson.name() };
-        if (ImGui::Combo("controller", &ui.controllerIndex, items, 2))
-            controller = ui.controllerIndex == 0
-                       ? static_cast<kenshin::scene::ICameraController*>(&orbit)
-                       : static_cast<kenshin::scene::ICameraController*>(&firstPerson);
-        ImGui::SliderFloat("yaw", &camera.yawDeg, -180.0f, 180.0f, "%.1f deg");
-        ImGui::SliderFloat("pitch", &camera.pitchDeg, -89.0f, 89.0f, "%.1f deg");
-        ImGui::SliderFloat("fov", &camera.fovYDeg, 20.0f, 120.0f, "%.0f deg");
-        if (ui.controllerIndex == 0)
-        {
-            ImGui::SliderFloat("distance", &orbit.distance, 0.1f, 200.0f, "%.2f m");
-            ImGui::DragFloat3("target", &orbit.target.x, 0.05f);
-        }
-        else
-        {
-            ImGui::SliderFloat("speed", &firstPerson.moveSpeed, 0.5f, 50.0f, "%.1f m/s");
-        }
-        const glm::vec3 pos = camera.position;
+        // Sliders write through setup(): Camera state is private and the
+        // controller is its only entry point.
+        float yaw = controller.yawDeg();
+        float pitch = controller.pitchDeg();
+        float dist = controller.distance();
+        glm::vec3 target = controller.target();
+        if (ImGui::SliderFloat("yaw", &yaw, -180.0f, 180.0f, "%.1f deg"))
+            controller.setup(yaw, pitch, dist, target, 1.0f);
+        if (ImGui::SliderFloat("pitch", &pitch, -85.0f, 85.0f, "%.1f deg"))
+            controller.setup(yaw, pitch, dist, target, 1.0f);
+        if (ImGui::SliderFloat("distance", &dist, 0.1f, 200.0f, "%.2f m"))
+            controller.setup(yaw, pitch, dist, target, 1.0f);
+        if (ImGui::DragFloat3("target", &target.x, 0.05f))
+            controller.setup(yaw, pitch, dist, target, 1.0f);
+        ImGui::SliderFloat("fov", &controller.fovYDeg, 20.0f, 120.0f, "%.0f deg");
+        const glm::vec3 pos = camera.position();
         ImGui::Text("pos (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
-        ImGui::Text("view orthonormal: %s",
-                    camera.isOrthonormal() ? "yes" : "NO");
-        ImGui::Text("(LMB drag rotates, wheel zooms, WASD/QE)");
+        ImGui::Text("(LMB drag rotates, wheel zooms, WASD/QE pans)");
         ImGui::End();
 
         if (uiKgeo)
@@ -546,20 +539,15 @@ int main(int argc, char** argv)
     }
 
     kenshin::scene::Camera camera;
-    kenshin::scene::OrbitCameraController orbit;
-    kenshin::scene::FirstPersonCameraController firstPerson;
-    kenshin::scene::ICameraController* controller = &orbit;
+    kenshin::scene::CameraController controller;
     if (!args.cam.empty())
     {
         float yaw = 35.0f, pitch = 20.0f, dist = 8.0f, tx = 0.0f, ty = 0.5f, tz = 0.0f;
         if (sscanf_s(args.cam.c_str(), "%f,%f,%f,%f,%f,%f",
                      &yaw, &pitch, &dist, &tx, &ty, &tz) >= 3)
         {
-            camera.yawDeg = yaw;
-            camera.pitchDeg = pitch;
-            orbit.distance = dist;
-            orbit.target = {tx, ty, tz};
-            KENSHIN_INFO("camera params applied (orbit yaw={} pitch={} dist={})", yaw, pitch, dist);
+            controller.setup(yaw, pitch, dist, {tx, ty, tz}, 1.0f);
+            KENSHIN_INFO("camera params applied (yaw={} pitch={} dist={})", yaw, pitch, dist);
         }
         else
             KENSHIN_WARN("could not parse --cam '{}' (want yaw,pitch,dist[,tx,ty,tz])", args.cam);
@@ -816,7 +804,7 @@ int main(int argc, char** argv)
         }
 
         drawUi(ui, backend->viewportImGuiTexture(), stats, camera, controller,
-               orbit, firstPerson, kgeoMode ? &kgeoPreview : nullptr);
+               kgeoMode ? &kgeoPreview : nullptr);
 
         // Controller input (only while the viewport item is active).
         kenshin::scene::ControllerInput controllerInput;
@@ -836,9 +824,12 @@ int main(int argc, char** argv)
         controllerInput.moveUp = ImGui::IsKeyDown(ImGuiKey_E);
         controllerInput.moveDown = ImGui::IsKeyDown(ImGuiKey_Q);
         controllerInput.fast = io.KeyShift;
-        controller->update(camera, controllerInput);
+        controller.handleInput(camera, controllerInput);
+        controller.updateMatrices(
+            camera, ui.viewportSize.x / glm::max(ui.viewportSize.y, 1.0f));
 
-        if (!cameraChecked && camera.isOrthonormal())
+        if (!cameraChecked &&
+            glm::abs(glm::dot(camera.forward(), camera.up())) < 1e-4f)
         {
             KENSHIN_INFO("[camera] view basis orthonormal: OK");
             cameraChecked = true;
@@ -849,11 +840,11 @@ int main(int argc, char** argv)
         if (kgeoMode)
         {
             std::vector<kenshin::u32> cut;
-            const kenshin::f32 camPos[3] = {camera.position.x, camera.position.y,
-                                            camera.position.z};
+            const kenshin::f32 camPos[3] = {camera.position().x, camera.position().y,
+                                            camera.position().z};
             kenshin::geometry::selectLodCut(kgeoPreview.dag, kgeoPreview.pixelThreshold,
                                             static_cast<kenshin::u32>(ui.viewportSize.y),
-                                            camera.fovYDeg, camPos, cut);
+                                            controller.fovYDeg, camPos, cut);
             if (cut != kgeoPreview.cut)
             {
                 kgeoPreview.cut = std::move(cut);
@@ -907,21 +898,15 @@ int main(int argc, char** argv)
             activeMesh = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
             for (int pass = 0; pass < 2; ++pass)
             {
-                // near cube (z=+0.5 toward camera), far cube (z=-0.5)
+                // near cube toward the camera, far cube behind it; viewProj is
+                // built manually with a probe camera at (0,0,dist) looking -Z
+                // (own Y-up space, independent of the scene camera)
                 const bool nearPass = pass == 0;
-                kenshin::scene::Camera probeCam = camera;
-                probeCam.position = nearPass
-                    ? glm::vec3(0.0f, 0.0f, 3.0f)
-                    : glm::vec3(0.0f, 0.0f, 3.0f);
-                // draw both with an identity-ish view from +Z looking at origin
-                probeCam.yawDeg = -90.0f;  // forward = (sin(-90),0,-cos(-90)) = (-1,0,0)?? no
-                // simpler: build viewProj manually: camera at (0,0,dist) looking -Z
                 const float dist = 4.0f;
                 glm::vec3 eye(0.0f, 0.0f, dist);
                 glm::vec3 fwd(0.0f, 0.0f, -1.0f);
                 glm::mat4 viewM = glm::lookAtRH(eye, eye + fwd, glm::vec3(0, 1, 0));
-                glm::mat4 projM = camera.projection(
-                    ui.viewportSize.x / glm::max(ui.viewportSize.y, 1.0f));
+                glm::mat4 projM = camera.projMatrix();
                 const float zOff = nearPass ? 0.75f : -0.75f;
                 glm::mat4 modelM = glm::translate(glm::mat4(1.0f), glm::vec3(nearPass ? -0.35f : 0.35f, 0.0f, zOff));
                 glm::mat4 mvp = glm::transpose(projM * viewM * modelM);
@@ -942,7 +927,6 @@ int main(int argc, char** argv)
             ui.viewportSize.x > 1.0f && ui.viewportSize.y > 1.0f;
         if (!kgeoMode && !args.depthProbe && drawable && !scene.empty())
         {
-            const kenshin::f32 aspect = ui.viewportSize.x / ui.viewportSize.y;
             for (const auto& shape : scene)
             {
                 if (shape.handle == kenshin::backend::IRenderBackend::kInvalidMeshHandle)
@@ -951,7 +935,7 @@ int main(int argc, char** argv)
                 // GLM stores column-major, so upload the transpose.
                 const glm::mat4 model = glm::translate(glm::mat4(1.0f), shape.offset);
                 const glm::mat4 viewProj =
-                    glm::transpose(camera.projection(aspect) * camera.view() * model);
+                    glm::transpose(camera.viewProjMatrix() * model);
                 kenshin::backend::IRenderBackend::MeshDraw draw;
                 draw.mesh = shape.handle;
                 std::memcpy(draw.viewProj, &viewProj, sizeof(draw.viewProj));
@@ -961,8 +945,8 @@ int main(int argc, char** argv)
             // Blinn-Phong specular half-vector.
             const kenshin::f32 light[4] = {0.35f, 0.8f, 0.45f, 0.0f};
             std::memcpy(draw.lightDir, light, sizeof(draw.lightDir));
-                const kenshin::f32 camArr[4] = {camera.position.x, camera.position.y,
-                                                camera.position.z, 0.0f};
+                const kenshin::f32 camArr[4] = {camera.position().x, camera.position().y,
+                                                camera.position().z, 0.0f};
                 std::memcpy(draw.camPos, camArr, sizeof(draw.camPos));
                 backend->drawMesh(draw);
             }
@@ -970,9 +954,7 @@ int main(int argc, char** argv)
         else if (kgeoMode && drawable && activeMesh !=
                                            kenshin::backend::IRenderBackend::kInvalidMeshHandle)
         {
-            const kenshin::f32 aspect = ui.viewportSize.x / ui.viewportSize.y;
-            const glm::mat4 viewProj =
-                glm::transpose(camera.projection(aspect) * camera.view());
+            const glm::mat4 viewProj = glm::transpose(camera.viewProjMatrix());
             kenshin::backend::IRenderBackend::MeshDraw draw;
             draw.mesh = activeMesh;
             std::memcpy(draw.viewProj, &viewProj, sizeof(draw.viewProj));
@@ -980,8 +962,8 @@ int main(int argc, char** argv)
             std::memcpy(draw.kd, kdArr, sizeof(draw.kd));
             const kenshin::f32 light[4] = {0.35f, 0.8f, 0.45f, 0.0f};
             std::memcpy(draw.lightDir, light, sizeof(draw.lightDir));
-            const kenshin::f32 camArr[4] = {camera.position.x, camera.position.y,
-                                            camera.position.z, 0.0f};
+            const kenshin::f32 camArr[4] = {camera.position().x, camera.position().y,
+                                            camera.position().z, 0.0f};
             std::memcpy(draw.camPos, camArr, sizeof(draw.camPos));
             backend->drawMesh(draw);
         }

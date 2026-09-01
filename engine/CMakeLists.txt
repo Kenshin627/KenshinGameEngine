@@ -48,6 +48,7 @@ add_library(kenshin_engine STATIC
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpWriter.cpp
+    src/math/ray.cpp
 )
 add_library(kenshin::engine ALIAS kenshin_engine)
 
