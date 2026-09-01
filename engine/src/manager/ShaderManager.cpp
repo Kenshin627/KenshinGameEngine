@@ -4,6 +4,7 @@
 
 #pragma warning(push, 0)
 #include <slang.h>
+#include <spirv_reflect.h>
 #pragma warning(pop)
 
 #include <cstdio>
@@ -12,6 +13,56 @@
 KENSHIN_NS_BEGIN
 
 namespace manager {
+
+bool reflectDescriptorBindings(const std::vector<u32>& spirv,
+                               std::vector<ReflectedBinding>& out) {
+  out.clear();
+  if (spirv.empty()) return false;
+  SpvReflectShaderModule module{};
+  if (spvReflectCreateShaderModule(spirv.size() * sizeof(u32), spirv.data(),
+                                   &module) != SPV_REFLECT_RESULT_SUCCESS)
+    return false;
+
+  u32 count = 0;
+  if (spvReflectEnumerateDescriptorBindings(&module, &count, nullptr) !=
+      SPV_REFLECT_RESULT_SUCCESS) {
+    spvReflectDestroyShaderModule(&module);
+    return false;
+  }
+  std::vector<SpvReflectDescriptorBinding*> bindings(count);
+  if (count > 0 &&
+      spvReflectEnumerateDescriptorBindings(&module, &count, bindings.data()) !=
+          SPV_REFLECT_RESULT_SUCCESS) {
+    spvReflectDestroyShaderModule(&module);
+    return false;
+  }
+  for (const SpvReflectDescriptorBinding* b : bindings) {
+    ReflectedBinding r;
+    r.set = b->set;
+    r.binding = b->binding;
+    switch (b->descriptor_type) {
+      case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        r.type = ReflectedBinding::Type::StorageBuffer;
+        break;
+      case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        r.type = ReflectedBinding::Type::StorageImage;
+        break;
+      case SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+      case SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        r.type = ReflectedBinding::Type::SampledImage;
+        break;
+      case SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        r.type = ReflectedBinding::Type::UniformBuffer;
+        break;
+      default:
+        r.type = ReflectedBinding::Type::Unknown;
+        break;
+    }
+    out.push_back(r);
+  }
+  spvReflectDestroyShaderModule(&module);
+  return true;
+}
 
 namespace {
 std::string blobText(slang::IBlob* blob) {

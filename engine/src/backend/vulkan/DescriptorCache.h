@@ -16,8 +16,7 @@ namespace backend {
 class DescriptorCache {
  public:
   /// Pool backing the ImGui Vulkan backend (sizes match what its texture
-  /// and font descriptors allocate). P0-1 keeps the current pool config
-  /// verbatim; the SAMPLED_IMAGE poolSizeCount fix lands with P0-3.
+  /// and font descriptors allocate).
   bool initImGuiPool(VkDevice device);
   void shutdown(VkDevice device);
 

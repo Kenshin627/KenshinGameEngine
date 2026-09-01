@@ -15,11 +15,26 @@ add_executable(kenshin_tests
     src/engine_tests.cpp
     src/kgeo_tests.cpp
     src/lodcut_tests.cpp
+    src/shader_reflection_tests.cpp
     src/shapes_tests.cpp
     src/smoke.cpp
 )
 
 target_link_libraries(kenshin_tests PRIVATE kenshin::engine Catch2::Catch2WithMain)
+
+# Headless Slang compilation in tests: the shader tree lives in the source
+# dir and the Slang runtime DLLs must sit next to the test executable.
+target_compile_definitions(kenshin_tests PRIVATE
+    KENSHIN_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+set(KE_SLANG_BIN ${CMAKE_SOURCE_DIR}/ThirdParty/slang/bin)
+if(EXISTS ${KE_SLANG_BIN}/slang.dll)
+    add_custom_command(TARGET kenshin_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${KE_SLANG_BIN}/slang.dll
+            ${KE_SLANG_BIN}/slang-compiler.dll
+            $<TARGET_FILE_DIR:kenshin_tests>
+        COMMENT "Copying Slang runtime DLLs next to kenshin_tests")
+endif()
 
 if(MSVC)
     target_compile_options(kenshin_tests PRIVATE /W4 /permissive- /utf-8 /MP)

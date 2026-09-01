@@ -6,6 +6,7 @@
 #include "vulkan/UploadEngine.h"
 
 #include "kenshin/core/Log.h"
+#include "kenshin/manager/ShaderManager.h"
 #include "vulkan/FrameSync.h"
 #include "vulkan/Swapchain.h"
 #include "vulkan/VulkanContext.h"
@@ -51,6 +52,7 @@ struct VulkanBackend::Impl {
 
   Swapchain swapchain;
   FrameSync frameSync;
+  StagingRing staging;  // per-frame dynamic data slices (M2 consumer)
   bool frameActive = false;
   u32 activeWidth = 0;
   u32 activeHeight = 0;
@@ -207,6 +209,13 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
     KENSHIN_ERROR("[vulkan] frame resources init failed");
     return false;
   }
+  // 16MB per in-flight frame of mapped staging; M2's per-frame data
+  // (culling inputs / instance tables) will slice out of this.
+  if (!m_impl->staging.init(m_impl->device.allocator, 16ull * 1024 * 1024,
+                            kMaxFramesInFlight)) {
+    KENSHIN_ERROR("[vulkan] staging ring init failed");
+    return false;
+  }
 
   if (params.nativeWindowHandle && !m_impl->presentSupported) {
     KENSHIN_ERROR("[vulkan] graphics family does not support present");
@@ -229,6 +238,7 @@ void VulkanBackend::shutdown() {
   // objects they reference (pools, device) go away.
   for (u32 i = 0; i < kMaxFramesInFlight; ++i)
     m_impl->frameSync.slots[i].deletionQueue.flush();
+  m_impl->staging.shutdown(m_impl->device.allocator);
   m_impl->descriptors.shutdown(m_impl->device.device);
   if (m_impl->captureStaging != VK_NULL_HANDLE) {
     vmaDestroyBuffer(m_impl->device.allocator, m_impl->captureStaging,
@@ -305,8 +315,10 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   }
 
   // Begin this slot's recording; destroys queued on this slot's last use
-  // are now provably finished (the fence wait above).
+  // are now provably finished (the fence wait above). The staging ring's
+  // slice region restarts for this frame.
   slot.deletionQueue.flush();
+  impl.staging.beginFrame(impl.frameSync.frameIndex);
   impl.cmd.begin(slot.commandBuffer);
 
   // Clear the offscreen target (the "rendering" of S1.3).
@@ -637,19 +649,47 @@ bool VulkanBackend::runComputeOneshot(
     return false;
   }
 
-  VkDescriptorSetLayoutBinding layoutBindings[Job::kMaxBuffers] = {};
-  for (u32 i = 0; i < bufferCount; ++i) {
-    layoutBindings[i] = VkDescriptorSetLayoutBinding{
-        .binding = i,
-        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-    };
+  // Descriptor layout from shader reflection: the compiled SPIR-V is the
+  // authority on bindings (spirv-reflect via ShaderManager), replacing a
+  // hand-maintained copy. Job convention: buffers[i] feeds binding i; if
+  // reflection is unavailable or disagrees with that, fall back to it.
+  std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
+  std::vector<manager::ReflectedBinding> reflected;
+  const std::vector<u32> spirvWords(job.spirv,
+                                    job.spirv + job.spirvBytes / sizeof(u32));
+  bool reflectedOk = false;
+  if (manager::reflectDescriptorBindings(spirvWords, reflected)) {
+    u32 storageCount = 0;
+    for (const auto& r : reflected)
+      if (r.type == manager::ReflectedBinding::Type::StorageBuffer &&
+          r.set == 0)
+        ++storageCount;
+    reflectedOk = storageCount == bufferCount;
+  }
+  if (reflectedOk) {
+    for (const auto& r : reflected) {
+      if (r.type != manager::ReflectedBinding::Type::StorageBuffer) continue;
+      layoutBindings.push_back(VkDescriptorSetLayoutBinding{
+          .binding = r.binding,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      });
+    }
+  } else {
+    for (u32 i = 0; i < bufferCount; ++i) {
+      layoutBindings.push_back(VkDescriptorSetLayoutBinding{
+          .binding = i,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      });
+    }
   }
   const VkDescriptorSetLayoutCreateInfo setLayoutInfo{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-      .bindingCount = bufferCount,
-      .pBindings = layoutBindings,
+      .bindingCount = static_cast<u32>(layoutBindings.size()),
+      .pBindings = layoutBindings.data(),
   };
   VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
   KE_VK(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout));
@@ -753,7 +793,7 @@ bool VulkanBackend::runComputeOneshot(
       writes[i] = VkWriteDescriptorSet{
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet = set,
-          .dstBinding = i,
+          .dstBinding = layoutBindings[i].binding,
           .descriptorCount = 1,
           .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
           .pBufferInfo = &bufferInfos[i],
@@ -850,8 +890,8 @@ bool VulkanBackend::initImGuiBackend(void* hwnd, u32 width, u32 height) {
                            impl.device.device, impl.hwnd, width, height))
     return false;
 
-  // NOTE: the pool config (and its known SAMPLED_IMAGE poolSizeCount gap)
-  // lives in DescriptorCache; the fix lands with P0-3.
+  // NOTE: the pool config (incl. the SAMPLED_IMAGE poolSizeCount fix) lives
+  // in DescriptorCache.
   if (!impl.descriptors.initImGuiPool(impl.device.device)) return false;
 
   VkFormat colorFormat = impl.swapchain.format;

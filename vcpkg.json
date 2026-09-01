@@ -15,6 +15,7 @@
         "win32-binding"
       ]
     },
-    "vulkan-validationlayers"
+    "vulkan-validationlayers",
+    "spirv-reflect"
   ]
 }

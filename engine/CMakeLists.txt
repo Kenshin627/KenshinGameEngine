@@ -105,8 +105,14 @@ target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm imgui::imgui
 # Vulkan backend deps (kept PRIVATE: raw API types never leave the backend)
 find_package(volk CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_package(unofficial-spirv-reflect CONFIG REQUIRED)
+find_package(SPIRV-Headers CONFIG REQUIRED)
 target_link_libraries(kenshin_engine PRIVATE
-    volk::volk volk::volk_headers GPUOpen::VulkanMemoryAllocator)
+    volk::volk volk::volk_headers GPUOpen::VulkanMemoryAllocator
+    unofficial::spirv-reflect SPIRV-Headers::SPIRV-Headers)
+# Use the spirv-headers copy of spirv.h instead of the source-tree-relative
+# default inside spirv_reflect.h.
+target_compile_definitions(kenshin_engine PRIVATE SPIRV_REFLECT_USE_SYSTEM_SPIRV_H)
 target_compile_definitions(kenshin_engine PRIVATE
     VK_NO_PROTOTYPES           # volk supplies all vk entry points
     VK_USE_PLATFORM_WIN32_KHR  # Win32 surface for present support check

@@ -13,6 +13,28 @@ KENSHIN_NS_BEGIN
 
 namespace manager {
 
+/// One reflected descriptor binding (plain data; the pipeline layer maps
+/// these to backend descriptor-set layouts instead of hand-maintaining a
+/// second copy of what the shader already declares).
+struct ReflectedBinding {
+  u32 set = 0;
+  u32 binding = 0;
+  enum class Type {
+    StorageBuffer,
+    StorageImage,
+    SampledImage,
+    UniformBuffer,
+    Unknown,
+  };
+  Type type = Type::Unknown;
+};
+
+/// Reflect descriptor bindings from compiled SPIR-V (spirv-reflect).
+/// Returns false on parse failure. An empty result is valid (e.g.
+/// push-constant-only shaders like the baseline pass).
+bool reflectDescriptorBindings(const std::vector<u32>& spirv,
+                                std::vector<ReflectedBinding>& out);
+
 class ShaderManager {
  public:
   /// Create the Slang global session and a session targeting SPIR-V.
