@@ -57,5 +57,5 @@ float4 fsMain(VSOutput input) : SV_Target
 
     // Ambient + diffuse + Blinn-Phong specular.
     const float3 color = push.kd.rgb * (0.15 + 0.85 * ndl) + specular;
-    return float4(n, 1.0);
+    return float4(color, 1.0);
 }
