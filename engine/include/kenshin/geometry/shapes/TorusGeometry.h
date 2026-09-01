@@ -8,18 +8,16 @@
 
 KENSHIN_NS_BEGIN
 
-namespace geometry
-{
+namespace geometry {
 
-    class TorusGeometry
-    {
-    public:
-        /// @param radialSegs   segments around the tube cross-section
-        /// @param tubularSegs  segments around the main ring
-        static assets::MeshData create(f32 radius, f32 tube, int radialSegs,
-                                      int tubularSegs);
-    };
+class TorusGeometry {
+ public:
+  /// @param radialSegs   segments around the tube cross-section
+  /// @param tubularSegs  segments around the main ring
+  static assets::MeshData create(f32 radius, f32 tube, int radialSegs,
+                                 int tubularSegs);
+};
 
-} // namespace geometry
+}  // namespace geometry
 
 KENSHIN_NS_END

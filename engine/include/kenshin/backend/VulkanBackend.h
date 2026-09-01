@@ -6,52 +6,52 @@
 
 KENSHIN_NS_BEGIN
 
-namespace backend
-{
+namespace backend {
 
-    class VulkanBackend final : public IRenderBackend
-    {
-    public:
-        VulkanBackend();
-        ~VulkanBackend() override;
+class VulkanBackend final : public IRenderBackend {
+ public:
+  VulkanBackend();
+  ~VulkanBackend() override;
 
-        VulkanBackend(const VulkanBackend&) = delete;
-        VulkanBackend& operator=(const VulkanBackend&) = delete;
+  VulkanBackend(const VulkanBackend&) = delete;
+  VulkanBackend& operator=(const VulkanBackend&) = delete;
 
-        bool initialize(const BackendInitParams& params) override;
-        void shutdown() override;
-        const BackendCaps& caps() const override { return m_caps; }
+  bool initialize(const BackendInitParams& params) override;
+  void shutdown() override;
+  const BackendCaps& caps() const override { return m_caps; }
 
-        bool beginFrame(const FrameBeginInfo& info) override;
-        void endFrame() override;
-        bool readbackFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) override;
-        bool runComputeOneshot(const Job& job,
-                               std::vector<u8> outputs[Job::kMaxBuffers]) override;
-        bool initImGuiBackend(void* hwnd, u32 width, u32 height) override;
-        void* viewportImGuiTexture() override;
-        void requestFullFrameCapture() override;
-        bool readbackFullFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) override;
-        u32 createMeshBuffer(const MeshUpload& upload) override;
-        void destroyMeshBuffer(u32 mesh) override;
-        u32 createGraphicsPipeline(const GraphicsPipelineInfo& info) override;
-        void destroyGraphicsPipeline(u32 pipeline) override;
-        void draw(u32 pipeline, u32 mesh, const DrawData& data) override;
+  bool beginFrame(const FrameBeginInfo& info) override;
+  void endFrame() override;
+  bool readbackFrame(std::vector<u8>& rgbaOut, u32& width,
+                     u32& height) override;
+  bool runComputeOneshot(const Job& job,
+                         std::vector<u8> outputs[Job::kMaxBuffers]) override;
+  bool initImGuiBackend(void* hwnd, u32 width, u32 height) override;
+  void* viewportImGuiTexture() override;
+  void requestFullFrameCapture() override;
+  bool readbackFullFrame(std::vector<u8>& rgbaOut, u32& width,
+                         u32& height) override;
+  u32 createMeshBuffer(const MeshUpload& upload) override;
+  void destroyMeshBuffer(u32 mesh) override;
+  u32 createGraphicsPipeline(const GraphicsPipelineInfo& info) override;
+  void destroyGraphicsPipeline(u32 pipeline) override;
+  void draw(u32 pipeline, u32 mesh, const DrawData& data) override;
 
-    private:
-        struct Impl;
-        std::unique_ptr<Impl> m_impl;
-        BackendCaps m_caps;
-        bool m_shutdownDone = false;
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> m_impl;
+  BackendCaps m_caps;
+  bool m_shutdownDone = false;
 
-        /// (Re)create ImGui descriptor sets when offscreen targets change.
-        void ensureViewportTextures();
-        /// (Re)create the full-frame capture staging buffer on size change.
-        void ensureCaptureStaging(u32 width, u32 height);
-        struct MeshResourceOpaque; // defined in the .cpp
-        void destroyMeshResourceInternal(MeshResourceOpaque& raw);
-        void ensureViewportDepth(u32 width, u32 height);
-    };
+  /// (Re)create ImGui descriptor sets when offscreen targets change.
+  void ensureViewportTextures();
+  /// (Re)create the full-frame capture staging buffer on size change.
+  void ensureCaptureStaging(u32 width, u32 height);
+  struct MeshResourceOpaque;  // defined in the .cpp
+  void destroyMeshResourceInternal(MeshResourceOpaque& raw);
+  void ensureViewportDepth(u32 width, u32 height);
+};
 
-} // namespace backend
+}  // namespace backend
 
 KENSHIN_NS_END

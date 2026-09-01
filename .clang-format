@@ -1,0 +1,10 @@
+# KENSHIN code formatting: Google C++ Style Guide.
+# https://google.github.io/styleguide/cppguide.html
+# Apply with: clang-format -i <files>  (uses this file from the repo root)
+---
+BasedOnStyle: Google
+
+# Keep comment lines exactly as authored: the Google default joins
+# consecutive // lines into rewrapped paragraphs, which destroys usage
+# lists and ASCII tables in comments.
+ReflowComments: false

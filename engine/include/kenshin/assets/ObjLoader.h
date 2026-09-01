@@ -5,18 +5,17 @@
 // negative indices, missing attributes get defaults, single MTL material
 // (Ka/Kd/map_Kd). Vertex dedup on the (v,vt,vn) index triple.
 
-#include "kenshin/assets/MeshData.h"
-
 #include <string>
+
+#include "kenshin/assets/MeshData.h"
 
 KENSHIN_NS_BEGIN
 
-namespace assets
-{
+namespace assets {
 
-    /// Load an OBJ file into `out`. On failure returns false and fills `log`.
-    bool loadObj(const std::string& path, MeshData& out, std::string& log);
+/// Load an OBJ file into `out`. On failure returns false and fills `log`.
+bool loadObj(const std::string& path, MeshData& out, std::string& log);
 
-} // namespace assets
+}  // namespace assets
 
 KENSHIN_NS_END

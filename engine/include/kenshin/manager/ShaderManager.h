@@ -4,43 +4,41 @@
 // Wraps the vendored Slang runtime library. Raw Slang types stay in the .cpp
 // (same discipline as the backend: no third-party API types leak here).
 
-#include "kenshin/Common.h"
-
 #include <string>
 #include <vector>
 
+#include "kenshin/Common.h"
+
 KENSHIN_NS_BEGIN
 
-namespace manager
-{
+namespace manager {
 
-    class ShaderManager
-    {
-    public:
-        /// Create the Slang global session and a session targeting SPIR-V.
-        /// @param shaderRoot  directory used to resolve #include and relative
-        ///                    file loads (the engine's shaders/ directory).
-        bool init(const std::string& shaderRoot);
-        void shutdown();
+class ShaderManager {
+ public:
+  /// Create the Slang global session and a session targeting SPIR-V.
+  /// @param shaderRoot  directory used to resolve #include and relative
+  ///                    file loads (the engine's shaders/ directory).
+  bool init(const std::string& shaderRoot);
+  void shutdown();
 
-        /// Compile a .slang file (absolute path, or relative to shaderRoot)
-        /// for the entry point `entryPoint` ("main" by default).
-        /// On failure fills `log` with the compiler diagnostics and returns false.
-        bool compileFile(const std::string& path, std::vector<u32>& spirvOut,
-                         std::string& log, const char* entryPoint = "main");
+  /// Compile a .slang file (absolute path, or relative to shaderRoot)
+  /// for the entry point `entryPoint` ("main" by default).
+  /// On failure fills `log` with the compiler diagnostics and returns false.
+  bool compileFile(const std::string& path, std::vector<u32>& spirvOut,
+                   std::string& log, const char* entryPoint = "main");
 
-        /// Compile inline source (error-path tests, snippets).
-        bool compileSource(const std::string& source, const std::string& name,
-                           std::vector<u32>& spirvOut, std::string& log);
+  /// Compile inline source (error-path tests, snippets).
+  bool compileSource(const std::string& source, const std::string& name,
+                     std::vector<u32>& spirvOut, std::string& log);
 
-        const std::string& shaderRoot() const { return m_shaderRoot; }
+  const std::string& shaderRoot() const { return m_shaderRoot; }
 
-    private:
-        void* m_globalSession = nullptr; // ISlangGlobalSession*
-        void* m_session = nullptr;       // ISlangSession*
-        std::string m_shaderRoot;
-    };
+ private:
+  void* m_globalSession = nullptr;  // ISlangGlobalSession*
+  void* m_session = nullptr;        // ISlangSession*
+  std::string m_shaderRoot;
+};
 
-} // namespace manager
+}  // namespace manager
 
 KENSHIN_NS_END

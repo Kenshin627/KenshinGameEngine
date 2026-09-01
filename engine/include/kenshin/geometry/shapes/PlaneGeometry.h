@@ -7,16 +7,14 @@
 
 KENSHIN_NS_BEGIN
 
-namespace geometry
-{
+namespace geometry {
 
-    class PlaneGeometry
-    {
-    public:
-        static assets::MeshData create(f32 width, f32 height, int widthSegs,
-                                      int heightSegs);
-    };
+class PlaneGeometry {
+ public:
+  static assets::MeshData create(f32 width, f32 height, int widthSegs,
+                                 int heightSegs);
+};
 
-} // namespace geometry
+}  // namespace geometry
 
 KENSHIN_NS_END

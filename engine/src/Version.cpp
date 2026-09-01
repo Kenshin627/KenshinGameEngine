@@ -17,46 +17,38 @@
 
 KENSHIN_NS_BEGIN
 
-namespace
-{
-    char s_versionString[64];
-    char s_banner[96];
-    bool s_initialized = false;
+namespace {
+char s_versionString[64];
+char s_banner[96];
+bool s_initialized = false;
 
-    void ensureInitialized()
-    {
-        if (s_initialized)
-            return;
-        std::snprintf(s_versionString, sizeof(s_versionString),
-                      "%d.%d.%d+%s",
-                      KENSHIN_VERSION_MAJOR, KENSHIN_VERSION_MINOR, KENSHIN_VERSION_PATCH,
-                      KENSHIN_GIT_SHA);
-        std::snprintf(s_banner, sizeof(s_banner),
-                      "KENSHIN %s (%s build)",
-                      s_versionString, getBuildConfig());
-        s_initialized = true;
-    }
-} // namespace
+void ensureInitialized() {
+  if (s_initialized) return;
+  std::snprintf(s_versionString, sizeof(s_versionString), "%d.%d.%d+%s",
+                KENSHIN_VERSION_MAJOR, KENSHIN_VERSION_MINOR,
+                KENSHIN_VERSION_PATCH, KENSHIN_GIT_SHA);
+  std::snprintf(s_banner, sizeof(s_banner), "KENSHIN %s (%s build)",
+                s_versionString, getBuildConfig());
+  s_initialized = true;
+}
+}  // namespace
 
-const char* getVersionString()
-{
-    ensureInitialized();
-    return s_versionString;
+const char* getVersionString() {
+  ensureInitialized();
+  return s_versionString;
 }
 
-const char* getBuildConfig()
-{
+const char* getBuildConfig() {
 #if defined(KENSHIN_BUILD_DEBUG) || defined(_DEBUG)
-    return "Debug";
+  return "Debug";
 #else
-    return "Release";
+  return "Release";
 #endif
 }
 
-const char* getBanner()
-{
-    ensureInitialized();
-    return s_banner;
+const char* getBanner() {
+  ensureInitialized();
+  return s_banner;
 }
 
 KENSHIN_NS_END

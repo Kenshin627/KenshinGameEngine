@@ -5,24 +5,21 @@
 // on the X axis; a single name picks one; anything else is an OBJ path)
 // plus mesh loading and GPU upload.
 
+#include <glm/glm.hpp>
+#include <string>
+#include <vector>
+
 #include "kenshin/Common.h"
 #include "kenshin/assets/MeshData.h"
 #include "kenshin/manager/MeshPool.h"
 
-#include <glm/glm.hpp>
+namespace demo {
 
-#include <string>
-#include <vector>
-
-namespace demo
-{
-
-struct SceneShape
-{
-    const char* name;
-    kenshin::assets::MeshHandle handle = kenshin::assets::kInvalidMeshHandle;
-    glm::vec3 offset;
-    glm::vec3 kd;
+struct SceneShape {
+  const char* name;
+  kenshin::assets::MeshHandle handle = kenshin::assets::kInvalidMeshHandle;
+  glm::vec3 offset;
+  glm::vec3 kd;
 };
 
 /// Build the shape list for a --mesh argument. A name that matches no
@@ -35,6 +32,7 @@ bool loadMesh(const std::string& name, kenshin::assets::MeshData& out,
 
 /// Load + upload every scene shape (handles filled in). Returns true if
 /// at least one shape made it to the GPU.
-bool uploadScene(std::vector<SceneShape>& scene, kenshin::manager::MeshPool& pool);
+bool uploadScene(std::vector<SceneShape>& scene,
+                 kenshin::manager::MeshPool& pool);
 
-} // namespace demo
+}  // namespace demo

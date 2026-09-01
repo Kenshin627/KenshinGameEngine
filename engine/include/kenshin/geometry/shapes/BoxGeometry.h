@@ -8,18 +8,16 @@
 
 KENSHIN_NS_BEGIN
 
-namespace geometry
-{
+namespace geometry {
 
-    class BoxGeometry
-    {
-    public:
-        static assets::MeshData create(f32 width, f32 height, f32 depth);
+class BoxGeometry {
+ public:
+  static assets::MeshData create(f32 width, f32 height, f32 depth);
 
-        static constexpr u32 kVertexCount = 24;
-        static constexpr u32 kTriangleCount = 12;
-    };
+  static constexpr u32 kVertexCount = 24;
+  static constexpr u32 kTriangleCount = 12;
+};
 
-} // namespace geometry
+}  // namespace geometry
 
 KENSHIN_NS_END

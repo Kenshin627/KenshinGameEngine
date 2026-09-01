@@ -19,19 +19,18 @@
 // into one concatenated child-edge array (span offsets are end-inclusive
 // packed: offset[i] = start, count[i] = length).
 
-#include "kenshin/geometry/ClusterDag.h"
-
 #include <string>
+
+#include "kenshin/geometry/ClusterDag.h"
 
 KENSHIN_NS_BEGIN
 
-namespace geometry
-{
+namespace geometry {
 
-    bool writeKGeo(const std::string& path, const ClusterDag& dag,
-                   std::string& log);
-    bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log);
+bool writeKGeo(const std::string& path, const ClusterDag& dag,
+               std::string& log);
+bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log);
 
-} // namespace geometry
+}  // namespace geometry
 
 KENSHIN_NS_END
