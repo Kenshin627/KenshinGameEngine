@@ -40,6 +40,29 @@ if(MSVC)
     target_compile_options(kenshin_tests PRIVATE /W4 /permissive- /utf-8 /MP)
 endif()
 
+# ── GPU render regression net ──────────────────────────────────────
+# Byte-identical screenshot vs a reference under tests/data/ (regeneration
+# instructions at the top of render_regression.cmake). These run the real
+# GPU: deterministic on one machine/driver, intentionally binary-diff.
+add_test(NAME render_baseline
+    COMMAND ${CMAKE_COMMAND}
+        -DDEMO=$<TARGET_FILE:KENSHINDemo>
+        -DBUILDER=$<TARGET_FILE:kgeo_builder>
+        -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_baseline_ref.bmp
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_baseline_out.bmp
+        -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
+add_test(NAME render_kgeo
+    COMMAND ${CMAKE_COMMAND}
+        -DDEMO=$<TARGET_FILE:KENSHINDemo>
+        -DBUILDER=$<TARGET_FILE:kgeo_builder>
+        -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_kgeo_ref.bmp
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_out.bmp
+        -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
+        -DKGEO=1 -DPROC=knot -DLOD=1
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
+set_tests_properties(render_baseline render_kgeo PROPERTIES LABELS "gpu")
+
 add_test(NAME kenshin_tests COMMAND kenshin_tests)
 set_tests_properties(kenshin_tests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}   # resolve tests/assets relative paths

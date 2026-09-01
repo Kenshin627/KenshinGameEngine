@@ -17,3 +17,5 @@ log/
 # 系统杂项
 Thumbs.db
 Desktop.ini
+# render regression reference images (tests/render_regression.cmake)
+!tests/data/*.bmp
