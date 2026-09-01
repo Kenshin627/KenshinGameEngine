@@ -159,7 +159,7 @@ DeletionQueue 帧槽 fence 过后真销毁；StagingRing 16MB/槽起步、超限
 
 ## 五、分阶段落地（对齐 staged-plan）
 
-### P0 —— M2 前置（5 个工作块）
+### P0 —— M2 前置（5 个工作块）【已完成 2026-09-02，0-3 落地 / 4 取消】
 0. **Vk.h 落地**：KE_VK 纪律全量替换 + setName/DebugLabel 接入 +
     高频结构体默认值工厂（纯机械，逐字节验证）——先立纪律再动结构，
     后续每块重构都在"错误必报"的网里做
@@ -175,7 +175,7 @@ DeletionQueue 帧槽 fence 过后真销毁；StagingRing 16MB/槽起步、超限
 5. 验收：校验层**零警告**（含 SAMPLED_IMAGE 那条）、ctest 100%、
    基线/kgeo 截图逐字节不变
 
-### P1 —— M4 前置
+### P1 —— M4 前置【已完成 2026-09-02：timeline ✓ GPU timestamp ✓ 管线缓存 ✓；compute 队列待 M2 消费者】
 5. timeline semaphore 替换 binary 信号量组合；compute 队列 + 提交时间线
    （Raptor 形状：单 timeline + value 跟踪 + 独立 compute 提交）
 6. GPU timestamp（每 pass 耗时进 DebugOverlay）+ **管线磁盘缓存**
