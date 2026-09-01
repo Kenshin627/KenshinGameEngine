@@ -23,6 +23,7 @@ class DeletionQueue {
     m_entries.push_back(std::move(destroy));
   }
   bool empty() const { return m_entries.empty(); }
+  usize size() const { return m_entries.size(); }
 
   /// Run and drop all pending destroy callbacks. Call when the owning
   /// slot's fence has confirmed completion (frame reuse), or at shutdown

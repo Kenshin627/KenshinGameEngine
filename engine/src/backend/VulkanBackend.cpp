@@ -6,6 +6,7 @@
 #include "vulkan/Readback.h"
 #include "vulkan/PipelineStore.h"
 #include "vulkan/MeshStore.h"
+#include "vulkan/BufferStore.h"
 #include "vulkan/DescriptorCache.h"
 #include "vulkan/UploadEngine.h"
 
@@ -25,7 +26,6 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <fstream>
 
 #define WIN32_LEAN_AND_MEAN
@@ -60,6 +60,7 @@ struct VulkanBackend::Impl {
 
   // Uploaded meshes (MeshStore: SOA buffers behind handles)
   MeshStore meshes;
+  BufferStore buffers;  // general device buffers (GPU Scene paths)
 
   VkImage depthImage = VK_NULL_HANDLE;
   VmaAllocation depthAlloc = VK_NULL_HANDLE;
@@ -213,17 +214,22 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
 void VulkanBackend::shutdown() {
   if (!m_impl || m_shutdownDone) return;
   m_shutdownDone = true;
+  // The final frame was submitted and presented but never waited on (the
+  // timeline wait only happens at the NEXT beginFrame, which never comes) -
+  // idle the device BEFORE ImGui teardown destroys its pipelines/samplers,
+  // or validation flags them destroyed-while-in-use.
+  if (m_impl->device.device != VK_NULL_HANDLE)
+    KE_VK(vkDeviceWaitIdle(m_impl->device.device));
   if (m_impl->imguiInited) {
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplWin32_Shutdown();
     m_impl->imguiInited = false;
   }
-  if (m_impl->device.device != VK_NULL_HANDLE)
-    KE_VK(vkDeviceWaitIdle(m_impl->device.device));
   // Deferred destroys are safe now (device idle); run them before the
   // objects they reference (pools, device) go away.
-  for (u32 i = 0; i < kMaxFramesInFlight; ++i)
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
     m_impl->frameSync.slots[i].deletionQueue.flush();
+  }
   m_impl->staging.shutdown(m_impl->device.allocator);
   m_impl->descriptors.shutdown(m_impl->device.device);
   m_impl->readback.destroy(m_impl->device.allocator);
@@ -231,6 +237,7 @@ void VulkanBackend::shutdown() {
   // mesh/depth objects below (validation: objects stay "in use" until
   // the referencing command buffer is freed with its pool).
   m_impl->frameSync.shutdown(m_impl->device);
+  m_impl->buffers.destroyAll(m_impl->device.allocator);
   m_impl->meshes.destroyAll(m_impl->device.allocator);
   m_impl->pipelines.shutdown(m_impl->device.device);
   if (m_impl->depthImage != VK_NULL_HANDLE) {
@@ -752,6 +759,31 @@ void VulkanBackend::destroyGraphicsPipeline(u32 pipeline) {
         if (raw.layout != VK_NULL_HANDLE)
           vkDestroyPipelineLayout(device, raw.layout, nullptr);
       });
+}
+
+// ── general buffer forwards ────────────────────────────────────
+
+u32 VulkanBackend::createBuffer(const BufferDesc& desc) {
+  return m_impl->buffers.create(
+      m_impl->device, m_impl->frameSync.slots[0].commandPool, desc);
+}
+
+void VulkanBackend::destroyBuffer(u32 buffer) {
+  Impl& impl = *m_impl;
+  const BufferStore::Entry raw = impl.buffers.detach(buffer);
+  if (raw.buffer == VK_NULL_HANDLE) return;
+  VmaAllocator allocator = impl.device.allocator;
+  impl.frameSync.slots[impl.frameSync.frameIndex].deletionQueue.push(
+      [allocator, raw] { BufferStore::destroyRaw(allocator, raw); });
+}
+
+bool VulkanBackend::readbackBuffer(u32 buffer, usize offset, usize bytes,
+                                   std::vector<u8>& out) {
+  if (!m_impl->buffers.valid(buffer)) return false;
+  return BufferStore::readback(
+      m_impl->device, m_impl->frameSync.slots[0].commandPool,
+      {m_impl->buffers.buffer(buffer), {}, m_impl->buffers.size(buffer)},
+      offset, bytes, out);
 }
 
 void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {
