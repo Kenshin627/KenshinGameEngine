@@ -1,6 +1,7 @@
 #include "Swapchain.h"
 
 #include "kenshin/core/Log.h"
+#include "Vk.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -65,7 +66,7 @@ VkResult Swapchain::acquire(VkDevice device, VkSemaphore imageAvailable) {
 
 bool Swapchain::recreate(VkPhysicalDevice physicalDevice, VkDevice device,
                          u32 width, u32 height) {
-  vkDeviceWaitIdle(device);
+  KE_VK(vkDeviceWaitIdle(device));
   destroySwapchainObjects(device);
   if (!createSwapchain(physicalDevice, device, width, height)) return false;
   KENSHIN_INFO("[vulkan] swapchain recreated {}x{}", extent.width,
@@ -151,8 +152,7 @@ bool Swapchain::createSwapchain(VkPhysicalDevice physicalDevice,
       .clipped = VK_TRUE,
       .oldSwapchain = VK_NULL_HANDLE,
   };
-  if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain) !=
-      VK_SUCCESS) {
+  if (!KE_VK(vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain))) {
     KENSHIN_ERROR("[vulkan] vkCreateSwapchainKHR failed");
     return false;
   }
@@ -176,8 +176,7 @@ bool Swapchain::createSwapchain(VkPhysicalDevice physicalDevice,
                 .layerCount = 1,
             },
     };
-    if (vkCreateImageView(device, &viewInfo, nullptr, &imageViews[i]) !=
-        VK_SUCCESS) {
+    if (!KE_VK(vkCreateImageView(device, &viewInfo, nullptr, &imageViews[i]))) {
       KENSHIN_ERROR("[vulkan] swapchain image view creation failed");
       return false;
     }
@@ -191,8 +190,7 @@ bool Swapchain::createSwapchain(VkPhysicalDevice physicalDevice,
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
   };
   for (u32 i = 0; i < actualCount; ++i)
-    if (vkCreateSemaphore(device, &semInfo, nullptr, &presentSemaphores[i]) !=
-        VK_SUCCESS)
+    if (!KE_VK(vkCreateSemaphore(device, &semInfo, nullptr, &presentSemaphores[i])))
       return false;
   return true;
 }

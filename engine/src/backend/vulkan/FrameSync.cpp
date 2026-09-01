@@ -2,6 +2,7 @@
 
 #include "VulkanDevice.h"
 #include "kenshin/core/Log.h"
+#include "Vk.h"
 
 KENSHIN_NS_BEGIN
 
@@ -16,8 +17,8 @@ bool FrameSync::init(const VulkanDevice& device) {
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = device.graphicsFamily,
     };
-    if (vkCreateCommandPool(device.device, &poolInfo, nullptr,
-                            &slot.commandPool) != VK_SUCCESS)
+    if (!KE_VK(vkCreateCommandPool(device.device, &poolInfo, nullptr,
+                            &slot.commandPool)))
       return false;
 
     const VkCommandBufferAllocateInfo allocInfo{
@@ -26,23 +27,22 @@ bool FrameSync::init(const VulkanDevice& device) {
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
-    if (vkAllocateCommandBuffers(device.device, &allocInfo,
-                                 &slot.commandBuffer) != VK_SUCCESS)
+    if (!KE_VK(vkAllocateCommandBuffers(device.device, &allocInfo,
+                                 &slot.commandBuffer)))
       return false;
 
     const VkSemaphoreCreateInfo semInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
-    if (vkCreateSemaphore(device.device, &semInfo, nullptr,
-                          &slot.imageAvailable) != VK_SUCCESS)
+    if (!KE_VK(vkCreateSemaphore(device.device, &semInfo, nullptr,
+                          &slot.imageAvailable)))
       return false;
 
     const VkFenceCreateInfo fenceInfo{
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,  // first wait is a no-op
     };
-    if (vkCreateFence(device.device, &fenceInfo, nullptr, &slot.inFlight) !=
-        VK_SUCCESS)
+    if (!KE_VK(vkCreateFence(device.device, &fenceInfo, nullptr, &slot.inFlight)))
       return false;
   }
   return true;
@@ -78,7 +78,7 @@ bool FrameSync::ensureOffscreens(const VulkanDevice& device, u32 width,
 
   // The other in-flight slot's command buffer may still reference the
   // old targets; a resize is rare, so a full idle wait is fine here.
-  vkDeviceWaitIdle(device.device);
+  KE_VK(vkDeviceWaitIdle(device.device));
 
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
     FrameSlot& slot = slots[i];

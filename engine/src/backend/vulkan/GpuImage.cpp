@@ -1,4 +1,5 @@
 #include "GpuImage.h"
+#include "Vk.h"
 
 KENSHIN_NS_BEGIN
 
@@ -40,7 +41,7 @@ bool GpuImage::create(VmaAllocator allocator, VkDevice device, u32 w, u32 h,
               .layerCount = 1,
           },
   };
-  if (vkCreateImageView(device, &viewInfo, nullptr, &view) != VK_SUCCESS) {
+  if (!KE_VK(vkCreateImageView(device, &viewInfo, nullptr, &view))) {
     vmaDestroyImage(allocator, image, allocation);
     image = VK_NULL_HANDLE;
     allocation = VK_NULL_HANDLE;

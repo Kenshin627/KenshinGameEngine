@@ -1,5 +1,7 @@
 #include "VulkanContext.h"
 
+#include "Vk.h"
+
 #include "kenshin/core/Log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -162,9 +164,11 @@ bool VulkanContext::createInstance(bool enableValidation, bool needSurface) {
                        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
         .pfnUserCallback = debugCallback,
     };
-    if (vkCreateDebugUtilsMessengerEXT(instance, &messengerInfo, nullptr,
-                                       &messenger) != VK_SUCCESS)
+    if (!KE_VK(vkCreateDebugUtilsMessengerEXT(instance, &messengerInfo, nullptr,
+                                       &messenger)))
       KENSHIN_WARN("[vulkan] debug messenger creation failed (non-fatal)");
+    else
+      vkutil::g_debugUtilsEnabled = true;  // object names/labels become live
   }
 
   KENSHIN_INFO("[vulkan] instance {}.{} ok, validation={}",

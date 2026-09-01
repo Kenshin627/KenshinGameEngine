@@ -1,5 +1,7 @@
 #include "kenshin/backend/VulkanBackend.h"
 
+#include "vulkan/Vk.h"
+
 #include "kenshin/core/Log.h"
 #include "vulkan/FrameSync.h"
 #include "vulkan/Swapchain.h"
@@ -221,7 +223,7 @@ void VulkanBackend::shutdown() {
     m_impl->imguiInited = false;
   }
   if (m_impl->device.device != VK_NULL_HANDLE)
-    vkDeviceWaitIdle(m_impl->device.device);
+    KE_VK(vkDeviceWaitIdle(m_impl->device.device));
   if (m_impl->imguiPool != VK_NULL_HANDLE) {
     vkDestroyDescriptorPool(m_impl->device.device, m_impl->imguiPool, nullptr);
     m_impl->imguiPool = VK_NULL_HANDLE;
@@ -299,8 +301,8 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
 
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
 
-  vkWaitForFences(impl.device.device, 1, &slot.inFlight, VK_TRUE, UINT64_MAX);
-  vkResetFences(impl.device.device, 1, &slot.inFlight);
+  KE_VK(vkWaitForFences(impl.device.device, 1, &slot.inFlight, VK_TRUE, UINT64_MAX));
+  KE_VK(vkResetFences(impl.device.device, 1, &slot.inFlight));
 
   // (Re)create per-frame offscreen targets on size/format change.
   if (!impl.frameSync.ensureOffscreens(
@@ -330,8 +332,8 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
   };
-  vkResetCommandBuffer(slot.commandBuffer, 0);
-  vkBeginCommandBuffer(slot.commandBuffer, &beginInfo);
+  KE_VK(vkResetCommandBuffer(slot.commandBuffer, 0));
+  KE_VK(vkBeginCommandBuffer(slot.commandBuffer, &beginInfo));
 
   // Clear the offscreen target (the "rendering" of S1.3).
   recordBarrier(slot.commandBuffer,
@@ -439,8 +441,11 @@ void VulkanBackend::endFrame() {
       .pColorAttachments = &colorAttachment,
   };
   vkCmdBeginRendering(slot.commandBuffer, &renderingInfo);
-  if (drawData && drawData->CmdListsCount > 0)
-    ImGui_ImplVulkan_RenderDrawData(drawData, slot.commandBuffer);
+  {
+    const vkutil::ScopedDebugLabel uiLabel{slot.commandBuffer, "ui-composite"};
+    if (drawData && drawData->CmdListsCount > 0)
+      ImGui_ImplVulkan_RenderDrawData(drawData, slot.commandBuffer);
+  }
   vkCmdEndRendering(slot.commandBuffer);
 
   // swapchain image: COLOR_ATTACHMENT -> PRESENT (via a capture copy
@@ -482,7 +487,7 @@ void VulkanBackend::endFrame() {
                      VK_ACCESS_2_MEMORY_READ_BIT));
   }
 
-  if (vkEndCommandBuffer(slot.commandBuffer) != VK_SUCCESS) {
+  if (!KE_VK(vkEndCommandBuffer(slot.commandBuffer))) {
     KENSHIN_ERROR("[vulkan] vkEndCommandBuffer failed");
     return;
   }
@@ -510,8 +515,7 @@ void VulkanBackend::endFrame() {
       .signalSemaphoreInfoCount = 1,
       .pSignalSemaphoreInfos = &signalSubmit,
   };
-  if (vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, slot.inFlight) !=
-      VK_SUCCESS) {
+  if (!KE_VK(vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, slot.inFlight))) {
     KENSHIN_ERROR("[vulkan] vkQueueSubmit2 failed");
     return;
   }
@@ -549,7 +553,7 @@ bool VulkanBackend::readbackFrame(std::vector<u8>& rgbaOut, u32& width,
   width = slot.offscreen.width;
   height = slot.offscreen.height;
 
-  vkWaitForFences(impl.device.device, 1, &slot.inFlight, VK_TRUE, UINT64_MAX);
+  KE_VK(vkWaitForFences(impl.device.device, 1, &slot.inFlight, VK_TRUE, UINT64_MAX));
 
   // Staging buffer (host visible) for the copy.
   const VkBufferCreateInfo bufferInfo{
@@ -579,12 +583,12 @@ bool VulkanBackend::readbackFrame(std::vector<u8>& rgbaOut, u32& width,
       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
       .commandBufferCount = 1,
   };
-  vkAllocateCommandBuffers(impl.device.device, &allocInfo, &cmd);
+  KE_VK(vkAllocateCommandBuffers(impl.device.device, &allocInfo, &cmd));
   const VkCommandBufferBeginInfo beginInfo{
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
   };
-  vkBeginCommandBuffer(cmd, &beginInfo);
+  KE_VK(vkBeginCommandBuffer(cmd, &beginInfo));
   recordBarrier(cmd, imageBarrier(slot.offscreen.image,
                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -601,7 +605,7 @@ bool VulkanBackend::readbackFrame(std::vector<u8>& rgbaOut, u32& width,
   vkCmdCopyImageToBuffer(cmd, slot.offscreen.image,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1,
                          &region);
-  vkEndCommandBuffer(cmd);
+  KE_VK(vkEndCommandBuffer(cmd));
   const VkCommandBufferSubmitInfo cmdSubmit{
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
       .commandBuffer = cmd,
@@ -611,8 +615,8 @@ bool VulkanBackend::readbackFrame(std::vector<u8>& rgbaOut, u32& width,
       .commandBufferInfoCount = 1,
       .pCommandBufferInfos = &cmdSubmit,
   };
-  vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
-  vkQueueWaitIdle(impl.device.graphicsQueue);
+  KE_VK(vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, VK_NULL_HANDLE));
+  KE_VK(vkQueueWaitIdle(impl.device.graphicsQueue));
   vkFreeCommandBuffers(impl.device.device, impl.frameSync.slots[0].commandPool,
                        1, &cmd);
 
@@ -655,8 +659,7 @@ bool VulkanBackend::runComputeOneshot(
       .pCode = job.spirv,
   };
   VkShaderModule module = VK_NULL_HANDLE;
-  if (vkCreateShaderModule(device, &moduleInfo, nullptr, &module) !=
-      VK_SUCCESS) {
+  if (!KE_VK(vkCreateShaderModule(device, &moduleInfo, nullptr, &module))) {
     KENSHIN_ERROR("[compute] shader module creation failed");
     return false;
   }
@@ -676,7 +679,7 @@ bool VulkanBackend::runComputeOneshot(
       .pBindings = layoutBindings,
   };
   VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
-  vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout);
+  KE_VK(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout));
 
   const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -684,7 +687,7 @@ bool VulkanBackend::runComputeOneshot(
       .pSetLayouts = &setLayout,
   };
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-  vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
+  KE_VK(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout));
 
   const VkComputePipelineCreateInfo pipelineInfo{
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -698,8 +701,8 @@ bool VulkanBackend::runComputeOneshot(
       .layout = pipelineLayout,
   };
   VkPipeline pipeline = VK_NULL_HANDLE;
-  if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
-                               nullptr, &pipeline) != VK_SUCCESS) {
+  if (!KE_VK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
+                               nullptr, &pipeline))) {
     KENSHIN_ERROR("[compute] pipeline creation failed");
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
@@ -753,7 +756,7 @@ bool VulkanBackend::runComputeOneshot(
         .poolSizeCount = 1,
         .pPoolSizes = &poolSize,
     };
-    vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool);
+    KE_VK(vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool));
 
     const VkDescriptorSetAllocateInfo setInfo{
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -761,7 +764,7 @@ bool VulkanBackend::runComputeOneshot(
         .descriptorSetCount = 1,
         .pSetLayouts = &setLayout,
     };
-    if (vkAllocateDescriptorSets(device, &setInfo, &set) != VK_SUCCESS) {
+    if (!KE_VK(vkAllocateDescriptorSets(device, &setInfo, &set))) {
       KENSHIN_ERROR("[compute] descriptor set allocation failed");
       ok = false;
     }
@@ -796,18 +799,18 @@ bool VulkanBackend::runComputeOneshot(
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
-    vkAllocateCommandBuffers(device, &allocInfo, &cmd);
+    KE_VK(vkAllocateCommandBuffers(device, &allocInfo, &cmd));
     const VkCommandBufferBeginInfo beginInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
-    vkBeginCommandBuffer(cmd, &beginInfo);
+    KE_VK(vkBeginCommandBuffer(cmd, &beginInfo));
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     if (bufferCount > 0)
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                               pipelineLayout, 0, 1, &set, 0, nullptr);
     vkCmdDispatch(cmd, job.groupCountX, 1, 1);
-    vkEndCommandBuffer(cmd);
+    KE_VK(vkEndCommandBuffer(cmd));
 
     const VkCommandBufferSubmitInfo cmdSubmit{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
@@ -818,8 +821,8 @@ bool VulkanBackend::runComputeOneshot(
         .commandBufferInfoCount = 1,
         .pCommandBufferInfos = &cmdSubmit,
     };
-    vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
-    vkQueueWaitIdle(impl.device.graphicsQueue);
+    KE_VK(vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, VK_NULL_HANDLE));
+    KE_VK(vkQueueWaitIdle(impl.device.graphicsQueue));
     vkFreeCommandBuffers(device, impl.frameSync.slots[0].commandPool, 1, &cmd);
   }
 
@@ -891,8 +894,8 @@ bool VulkanBackend::initImGuiBackend(void* hwnd, u32 width, u32 height) {
       .poolSizeCount = 2,
       .pPoolSizes = poolSizes,
   };
-  if (vkCreateDescriptorPool(impl.device.device, &poolInfo, nullptr,
-                             &impl.imguiPool) != VK_SUCCESS) {
+  if (!KE_VK(vkCreateDescriptorPool(impl.device.device, &poolInfo, nullptr,
+                             &impl.imguiPool))) {
     KENSHIN_ERROR("[imgui] descriptor pool creation failed");
     return false;
   }
@@ -952,9 +955,9 @@ bool VulkanBackend::readbackFullFrame(std::vector<u8>& rgbaOut, u32& width,
                                       u32& height) {
   Impl& impl = *m_impl;
   if (!impl.fullCaptured || impl.captureStaging == VK_NULL_HANDLE) return false;
-  vkWaitForFences(impl.device.device, 1,
+  KE_VK(vkWaitForFences(impl.device.device, 1,
                   &impl.frameSync.slots[impl.frameSync.lastCompleted].inFlight,
-                  VK_TRUE, UINT64_MAX);
+                  VK_TRUE, UINT64_MAX));
 
   width = impl.captureWidth;
   height = impl.captureHeight;
@@ -1057,15 +1060,15 @@ bool uploadDeviceBuffer(VmaAllocator allocator, VkDevice device, VkQueue queue,
       .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
       .commandBufferCount = 1,
   };
-  vkAllocateCommandBuffers(device, &allocCmd, &cmd);
+  KE_VK(vkAllocateCommandBuffers(device, &allocCmd, &cmd));
   const VkCommandBufferBeginInfo beginInfo{
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
   };
-  vkBeginCommandBuffer(cmd, &beginInfo);
+  KE_VK(vkBeginCommandBuffer(cmd, &beginInfo));
   const VkBufferCopy region{.size = bytes};
   vkCmdCopyBuffer(cmd, staging, outBuffer, 1, &region);
-  vkEndCommandBuffer(cmd);
+  KE_VK(vkEndCommandBuffer(cmd));
   const VkCommandBufferSubmitInfo cmdSubmit{
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
       .commandBuffer = cmd,
@@ -1075,8 +1078,8 @@ bool uploadDeviceBuffer(VmaAllocator allocator, VkDevice device, VkQueue queue,
       .commandBufferInfoCount = 1,
       .pCommandBufferInfos = &cmdSubmit,
   };
-  vkQueueSubmit2(queue, 1, &submit, VK_NULL_HANDLE);
-  vkQueueWaitIdle(queue);
+  KE_VK(vkQueueSubmit2(queue, 1, &submit, VK_NULL_HANDLE));
+  KE_VK(vkQueueWaitIdle(queue));
   vkFreeCommandBuffers(device, pool, 1, &cmd);
   vmaDestroyBuffer(allocator, staging, stagingAlloc);
   return true;
@@ -1122,7 +1125,15 @@ u32 VulkanBackend::createMeshBuffer(const MeshUpload& upload) {
   mesh.vertexCount = upload.vertexCount;
   mesh.indexCount = upload.indexCount;
   impl.meshes.push_back(mesh);
-  return static_cast<u32>(impl.meshes.size());
+  const u32 handle = static_cast<u32>(impl.meshes.size());
+  char name[40];
+  snprintf(name, sizeof(name), "mesh-%u-positions", handle);
+  vkutil::setName(impl.device.device, VK_OBJECT_TYPE_BUFFER,
+                  (uint64_t)impl.meshes[handle - 1].positions, name);
+  snprintf(name, sizeof(name), "mesh-%u-indices", handle);
+  vkutil::setName(impl.device.device, VK_OBJECT_TYPE_BUFFER,
+                  (uint64_t)impl.meshes[handle - 1].indices, name);
+  return handle;
 }
 
 void VulkanBackend::destroyMeshBuffer(u32 mesh) {
@@ -1138,7 +1149,7 @@ void VulkanBackend::ensureViewportDepth(u32 width, u32 height) {
       impl.depthHeight == height)
     return;
   if (impl.depthImage != VK_NULL_HANDLE) {
-    vkDeviceWaitIdle(impl.device.device);
+    KE_VK(vkDeviceWaitIdle(impl.device.device));
     vkDestroyImageView(impl.device.device, impl.depthView, nullptr);
     vmaDestroyImage(impl.device.allocator, impl.depthImage, impl.depthAlloc);
     impl.depthImage = VK_NULL_HANDLE;
@@ -1174,7 +1185,11 @@ void VulkanBackend::ensureViewportDepth(u32 width, u32 height) {
       .format = VK_FORMAT_D32_SFLOAT,
       .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
   };
-  vkCreateImageView(impl.device.device, &viewInfo, nullptr, &impl.depthView);
+  KE_VK(vkCreateImageView(impl.device.device, &viewInfo, nullptr, &impl.depthView));
+  vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE, (uint64_t)impl.depthImage,
+                  "viewport-depth");
+  vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE_VIEW,
+                  (uint64_t)impl.depthView, "viewport-depth-view");
   impl.depthWidth = width;
   impl.depthHeight = height;
 }
@@ -1237,7 +1252,7 @@ u32 VulkanBackend::createGraphicsPipeline(const GraphicsPipelineInfo& info) {
       .pPushConstantRanges = &pushRange,
   };
   VkPipelineLayout layout = VK_NULL_HANDLE;
-  vkCreatePipelineLayout(impl.device.device, &layoutInfo, nullptr, &layout);
+  KE_VK(vkCreatePipelineLayout(impl.device.device, &layoutInfo, nullptr, &layout));
 
   const VkShaderModuleCreateInfo vsInfo{
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -1245,8 +1260,7 @@ u32 VulkanBackend::createGraphicsPipeline(const GraphicsPipelineInfo& info) {
       .pCode = info.vsSpirv,
   };
   VkShaderModule vs = VK_NULL_HANDLE;
-  if (vkCreateShaderModule(impl.device.device, &vsInfo, nullptr, &vs) !=
-      VK_SUCCESS) {
+  if (!KE_VK(vkCreateShaderModule(impl.device.device, &vsInfo, nullptr, &vs))) {
     vkDestroyPipelineLayout(impl.device.device, layout, nullptr);
     return kInvalidPipelineHandle;
   }
@@ -1256,8 +1270,7 @@ u32 VulkanBackend::createGraphicsPipeline(const GraphicsPipelineInfo& info) {
       .pCode = info.fsSpirv,
   };
   VkShaderModule fs = VK_NULL_HANDLE;
-  if (vkCreateShaderModule(impl.device.device, &fsInfo, nullptr, &fs) !=
-      VK_SUCCESS) {
+  if (!KE_VK(vkCreateShaderModule(impl.device.device, &fsInfo, nullptr, &fs))) {
     vkDestroyShaderModule(impl.device.device, vs, nullptr);
     vkDestroyPipelineLayout(impl.device.device, layout, nullptr);
     return kInvalidPipelineHandle;
@@ -1368,9 +1381,9 @@ u32 VulkanBackend::createGraphicsPipeline(const GraphicsPipelineInfo& info) {
       .layout = layout,
   };
   VkPipeline pipeline = VK_NULL_HANDLE;
-  if (vkCreateGraphicsPipelines(impl.device.device, VK_NULL_HANDLE, 1,
+  if (!KE_VK(vkCreateGraphicsPipelines(impl.device.device, VK_NULL_HANDLE, 1,
                                 &createInfo, nullptr,
-                                &pipeline) != VK_SUCCESS) {
+                                &pipeline))) {
     KENSHIN_ERROR("[vulkan] graphics pipeline creation failed");
     vkDestroyShaderModule(impl.device.device, vs, nullptr);
     vkDestroyShaderModule(impl.device.device, fs, nullptr);
@@ -1381,14 +1394,23 @@ u32 VulkanBackend::createGraphicsPipeline(const GraphicsPipelineInfo& info) {
   vkDestroyShaderModule(impl.device.device, fs, nullptr);
 
   // Reuse a freed slot when one exists; handle = index + 1.
+  u32 handle = 0;
   for (usize i = 0; i < impl.pipelines.size(); ++i) {
     if (impl.pipelines[i].pipeline == VK_NULL_HANDLE) {
       impl.pipelines[i] = {layout, pipeline};
-      return static_cast<u32>(i + 1);
+      handle = static_cast<u32>(i + 1);
+      break;
     }
   }
-  impl.pipelines.push_back({layout, pipeline});
-  return static_cast<u32>(impl.pipelines.size());
+  if (handle == 0) {
+    impl.pipelines.push_back({layout, pipeline});
+    handle = static_cast<u32>(impl.pipelines.size());
+  }
+  char name[32];
+  snprintf(name, sizeof(name), "graphics-pipeline-%u", handle);
+  vkutil::setName(impl.device.device, VK_OBJECT_TYPE_PIPELINE,
+                  (uint64_t)pipeline, name);
+  return handle;
 }
 
 void VulkanBackend::destroyGraphicsPipeline(u32 pipeline) {
@@ -1416,6 +1438,7 @@ void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
   const Impl::MeshResource& mesh = impl.meshes[meshHandle - 1];
   const Impl::Pipeline& pipe = impl.pipelines[pipeline - 1];
+  const vkutil::ScopedDebugLabel passLabel{slot.commandBuffer, "opaque-draw"};
 
   // Push constants: viewProj + kd + lightDir + camPos.
   struct Push {
