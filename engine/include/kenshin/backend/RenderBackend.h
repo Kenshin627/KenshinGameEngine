@@ -91,7 +91,9 @@ class IRenderBackend {
   /// Bindings map to SSBO set=0, binding=i. Used for shader smoke tests
   /// and offline utilities; per-frame in-frame compute arrives in Phase 4.
   struct Job {
-    static constexpr u32 kMaxBuffers = 4;
+    // 8 slots: the cluster-cull pass binds params + clusters + groups +
+    // work items + instances + outputs; 4 was the S1.4 smoke-test shape.
+    static constexpr u32 kMaxBuffers = 8;
     struct Buffer {
       const void* initData = nullptr;  // host data copied in (may be null)
       usize size = 0;                  // bytes, 0 = slot unused

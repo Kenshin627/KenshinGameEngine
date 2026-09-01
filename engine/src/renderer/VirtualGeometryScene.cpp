@@ -23,28 +23,15 @@ namespace {
 // shaders mirror these layouts - single declaration point is the header.
 
 void appendGpuCluster(std::vector<u8>& out, const geometry::DagCluster& c) {
-  const usize base = out.size();  // resize FIRST: data() may reallocate
-  out.resize(base + 48);
-  u8* ptr = out.data() + base;
-  std::memcpy(ptr + 0, &c.boundsSphere, 16);
-  std::memcpy(ptr + 16, &c.error, 4);
-  std::memcpy(ptr + 20, &c.parentError, 4);
-  std::memcpy(ptr + 24, &c.vertexOffset, 4);
-  std::memcpy(ptr + 28, &c.vertexCount, 4);
-  std::memcpy(ptr + 32, &c.indexOffset, 4);
-  std::memcpy(ptr + 36, &c.indexCount, 4);
-  std::memcpy(ptr + 40, &c.group, 4);
-  std::memcpy(ptr + 44, &c.refinedGroup, 4);  // i32, -1 = original
+  packGpuCluster(out, c.group, c.boundsSphere.x, c.boundsSphere.y,
+                 c.boundsSphere.z, c.boundsSphere.w, c.error, c.parentError,
+                 c.vertexOffset, c.vertexCount, c.indexOffset, c.indexCount,
+                 c.refinedGroup);
 }
 
 void appendGpuGroup(std::vector<u8>& out, const geometry::DagGroup& g) {
-  const usize base = out.size();
-  out.resize(base + 32);
-  u8* ptr = out.data() + base;
-  std::memcpy(ptr + 0, &g.boundsSphere, 16);
-  std::memcpy(ptr + 16, &g.maxError, 4);
-  std::memcpy(ptr + 20, &g.simplifyError, 4);
-  std::memset(ptr + 24, 0, 8);  // pad to 32
+  packGpuGroup(out, g.boundsSphere.x, g.boundsSphere.y, g.boundsSphere.z,
+               g.boundsSphere.w, g.maxError, g.simplifyError);
 }
 
 /// Upload (or replace) one pool buffer; verify with a CRC round trip.

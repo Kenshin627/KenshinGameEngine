@@ -15,6 +15,8 @@
 
 #include <glm/glm.hpp>
 
+#include <cstring>
+
 #include <vector>
 
 #include "kenshin/Common.h"
@@ -29,6 +31,42 @@ struct ClusterDag;
 }
 
 namespace renderer {
+
+/// ---- GPU packing helpers (single declaration point) -------------------
+/// The std430 layouts the S4.x shaders mirror. packGpuCluster writes 48B,
+/// packGpuGroup 32B; the instance 96B packing lives in the .cpp (used by
+/// setInstances; the cull test reuses GpuInstance structs directly).
+inline void packGpuCluster(std::vector<u8>& out, u32 group, f32 boundsX,
+                           f32 boundsY, f32 boundsZ, f32 boundsW, f32 error,
+                           f32 parentError, u32 vertexOffset, u32 vertexCount,
+                           u32 indexOffset, u32 indexCount, i32 refinedGroup) {
+  const usize base = out.size();  // resize FIRST: data() may reallocate
+  out.resize(base + 48);
+  u8* p = out.data() + base;
+  const f32 bounds[4] = {boundsX, boundsY, boundsZ, boundsW};
+  std::memcpy(p + 0, bounds, 16);
+  std::memcpy(p + 16, &error, 4);
+  std::memcpy(p + 20, &parentError, 4);
+  std::memcpy(p + 24, &vertexOffset, 4);
+  std::memcpy(p + 28, &vertexCount, 4);
+  std::memcpy(p + 32, &indexOffset, 4);
+  std::memcpy(p + 36, &indexCount, 4);
+  std::memcpy(p + 40, &group, 4);
+  std::memcpy(p + 44, &refinedGroup, 4);
+}
+
+inline void packGpuGroup(std::vector<u8>& out, f32 boundsX, f32 boundsY,
+                         f32 boundsZ, f32 boundsW, f32 maxError,
+                         f32 simplifyError) {
+  const usize base = out.size();
+  out.resize(base + 32);
+  u8* p = out.data() + base;
+  const f32 bounds[4] = {boundsX, boundsY, boundsZ, boundsW};
+  std::memcpy(p + 0, bounds, 16);
+  std::memcpy(p + 16, &maxError, 4);
+  std::memcpy(p + 20, &simplifyError, 4);
+  std::memset(p + 24, 0, 8);
+}
 
 /// Mesh registry entry: where this mesh's clusters live in the shared
 /// pools (clusters [clusterBegin, clusterEnd) of the cluster table; the
