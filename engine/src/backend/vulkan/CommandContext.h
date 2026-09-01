@@ -15,12 +15,25 @@ namespace backend {
 
 class CommandContext {
  public:
-  /// Reset + begin the slot's command buffer (one-time submit).
+  /// Reset + begin the slot's command buffer (one-time submit). Closes any
+  /// stale pass state from the previous use of this slot.
   bool begin(VkCommandBuffer cmd);
-  /// End recording; false on failure (caller drops the frame).
+  /// End recording; false on failure (caller drops the frame). m_cmd
+  /// stays valid until the next begin(): the submit path still reads it.
   bool end();
 
   VkCommandBuffer cmd() const { return m_cmd; }
+
+  // ---- the frame's single viewport rendering scope ────────────────
+  /// Open it (color LOAD - beginFrame already cleared the image; depth
+  /// CLEAR once here) and set the viewport/scissor. All draws of the
+  /// frame record into this one scope: the render pass's implicit subpass
+  /// ordering replaces the hand-rolled inter-draw barriers.
+  void beginViewportPass(VkImageView color, VkImageView depth, u32 width,
+                         u32 height);
+  /// Close the viewport scope (no-op when it never opened).
+  void endPass();
+  bool passOpen() const { return m_passOpen; }
 
   // ---- recording helpers (shared by the frame paths) ─────────────
 
@@ -41,6 +54,7 @@ class CommandContext {
 
  private:
   VkCommandBuffer m_cmd = VK_NULL_HANDLE;
+  bool m_passOpen = false;
 };
 
 }  // namespace backend

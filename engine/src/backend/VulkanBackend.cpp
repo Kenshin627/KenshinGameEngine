@@ -76,9 +76,6 @@ struct VulkanBackend::Impl {
   VmaAllocation depthAlloc = VK_NULL_HANDLE;
   VkImageView depthView = VK_NULL_HANDLE;
   u32 depthWidth = 0, depthHeight = 0;
-  // Depth must survive across drawMesh calls within a frame (inter-mesh
-  // occlusion): the first draw clears, the rest LOAD.
-  bool depthClearedThisFrame = false;
 
   // Graphics pipelines created through createGraphicsPipeline
   // (renderer layer defines state, this layer translates). Handle =
@@ -358,7 +355,6 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   }
 
   impl.frameActive = true;
-  impl.depthClearedThisFrame = false;
   impl.activeWidth = info.width;
   impl.activeHeight = info.height;
   return true;
@@ -371,6 +367,11 @@ void VulkanBackend::endFrame() {
 
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
   const VkImage dstImage = impl.swapchain.images[impl.swapchain.imageIndex];
+
+  // Close the frame's viewport scope before transitioning its target (and
+  // before the UI scope opens - render passes never nest). endPass is also
+  // called inside cmd.end() as a backstop; this call is the real one.
+  impl.cmd.endPass();
 
   // offscreen: COLOR_ATTACHMENT -> SHADER_READ_ONLY for the ImGui sample.
   CommandContext::pipelineBarrier(impl.cmd.cmd(),
@@ -1341,6 +1342,13 @@ void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {
   const Impl::Pipeline& pipe = impl.pipelines[pipeline - 1];
   const vkutil::ScopedDebugLabel passLabel{impl.cmd.cmd(), "opaque-draw"};
 
+  // The frame's single viewport scope opens lazily on the first draw and
+  // stays open; the render pass's implicit subpass ordering makes the old
+  // per-draw scopes + hand-rolled inter-draw depth barrier unnecessary.
+  if (!impl.cmd.passOpen())
+    impl.cmd.beginViewportPass(slot.offscreen.view, impl.depthView,
+                               slot.offscreen.width, slot.offscreen.height);
+
   // Push constants: viewProj + kd + lightDir + camPos.
   struct Push {
     f32 viewProj[16];
@@ -1353,80 +1361,16 @@ void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {
   std::memcpy(pushData.lightDir, data.lightDir, sizeof(pushData.lightDir));
   std::memcpy(pushData.camPos, data.camPos, sizeof(pushData.camPos));
 
-  // Rendering pass scoped to this draw: color LOAD (clear already done),
-  // depth CLEAR (each frame's first draw resets it).
-  const VkRenderingAttachmentInfo colorAttachment{
-      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-      .imageView = slot.offscreen.view,
-      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-  };
-  const VkClearValue depthClear{.depthStencil = {1.0f, 0}};
-  const VkRenderingAttachmentInfo depthAttachment{
-      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-      .imageView = impl.depthView,
-      .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-      // Depth: the frame's FIRST draw clears, later draws LOAD —
-      // clearing per draw wipes earlier meshes' depth (occlusion broke
-      // between meshes). STORE keeps it for the draws that follow.
-      .loadOp = impl.depthClearedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD
-                                           : VK_ATTACHMENT_LOAD_OP_CLEAR,
-      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-      .clearValue = depthClear,
-  };
-  const VkRenderingInfo renderingInfo{
-      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-      .renderArea = {0, 0, slot.offscreen.width, slot.offscreen.height},
-      .layerCount = 1,
-      .colorAttachmentCount = 1,
-      .pColorAttachments = &colorAttachment,
-      .pDepthAttachment = &depthAttachment,
-  };
-  vkCmdBeginRendering(impl.cmd.cmd(), &renderingInfo);
-
-  const VkViewport viewport{
-      .x = 0.0f,
-      .y = 0.0f,
-      .width = static_cast<f32>(slot.offscreen.width),
-      .height = static_cast<f32>(slot.offscreen.height),
-      .minDepth = 0.0f,
-      .maxDepth = 1.0f,
-  };
-  const VkRect2D scissor{{0, 0}, {slot.offscreen.width, slot.offscreen.height}};
-  vkCmdSetViewport(impl.cmd.cmd(), 0, 1, &viewport);
-  vkCmdSetScissor(impl.cmd.cmd(), 0, 1, &scissor);
-
   vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pipe.pipeline);
   const VkBuffer vertexBuffers[3] = {mesh.positions, mesh.normals, mesh.uvs};
   const VkDeviceSize vertexOffsets[3] = {0, 0, 0};
-  vkCmdBindVertexBuffers(impl.cmd.cmd(), 0, 3, vertexBuffers,
-                         vertexOffsets);
-  vkCmdBindIndexBuffer(impl.cmd.cmd(), mesh.indices, 0,
-                       VK_INDEX_TYPE_UINT32);
+  vkCmdBindVertexBuffers(impl.cmd.cmd(), 0, 3, vertexBuffers, vertexOffsets);
+  vkCmdBindIndexBuffer(impl.cmd.cmd(), mesh.indices, 0, VK_INDEX_TYPE_UINT32);
   vkCmdPushConstants(impl.cmd.cmd(), pipe.layout,
                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                      0, sizeof(pushData), &pushData);
   vkCmdDrawIndexed(impl.cmd.cmd(), mesh.indexCount, 1, 0, 0, 0);
-  vkCmdEndRendering(impl.cmd.cmd());
-  impl.depthClearedThisFrame = true;
-  // Depth carries into the next draw's rendering scope: order the
-  // writes of this pass before the reads/writes of the next one.
-  CommandContext::pipelineBarrier(
-      impl.cmd.cmd(),
-      VkImageMemoryBarrier2{
-          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-          .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-          .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                           VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-          .oldLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-          .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-          .image = impl.depthImage,
-          .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
-      });
 }
 
 }  // namespace backend

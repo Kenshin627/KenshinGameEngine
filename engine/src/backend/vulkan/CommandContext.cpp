@@ -8,6 +8,7 @@ namespace backend {
 
 bool CommandContext::begin(VkCommandBuffer cmd) {
   m_cmd = cmd;
+  m_passOpen = false;
   if (!KE_VK(vkResetCommandBuffer(m_cmd, 0))) return false;
   const VkCommandBufferBeginInfo beginInfo{
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -17,9 +18,57 @@ bool CommandContext::begin(VkCommandBuffer cmd) {
 }
 
 bool CommandContext::end() {
-  // m_cmd stays valid until the next begin(): the submit path still reads
-  // it after recording ends.
+  endPass();
   return KE_VK(vkEndCommandBuffer(m_cmd));
+}
+
+void CommandContext::beginViewportPass(VkImageView color, VkImageView depth,
+                                       u32 width, u32 height) {
+  const VkRenderingAttachmentInfo colorAttachment{
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView = color,
+      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,  // cleared in beginFrame
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+  };
+  const VkClearValue depthClear{.depthStencil = {1.0f, 0}};
+  const VkRenderingAttachmentInfo depthAttachment{
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView = depth,
+      .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,  // once per frame, on open
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .clearValue = depthClear,
+  };
+  const VkRenderingInfo renderingInfo{
+      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea = {0, 0, width, height},
+      .layerCount = 1,
+      .colorAttachmentCount = 1,
+      .pColorAttachments = &colorAttachment,
+      .pDepthAttachment = &depthAttachment,
+  };
+  vkCmdBeginRendering(m_cmd, &renderingInfo);
+
+  const VkViewport viewport{
+      .x = 0.0f,
+      .y = 0.0f,
+      .width = static_cast<f32>(width),
+      .height = static_cast<f32>(height),
+      .minDepth = 0.0f,
+      .maxDepth = 1.0f,
+  };
+  const VkRect2D scissor{{0, 0}, {width, height}};
+  vkCmdSetViewport(m_cmd, 0, 1, &viewport);
+  vkCmdSetScissor(m_cmd, 0, 1, &scissor);
+  m_passOpen = true;
+}
+
+void CommandContext::endPass() {
+  if (m_passOpen) {
+    vkCmdEndRendering(m_cmd);
+    m_passOpen = false;
+  }
 }
 
 void CommandContext::pipelineBarrier(VkCommandBuffer cmd,
