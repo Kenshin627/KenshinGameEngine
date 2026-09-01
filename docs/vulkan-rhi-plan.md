@@ -88,15 +88,16 @@ struct ScopedDebugLabel { ... };
 逐字节验证）；资源创建处补 `setName`（mesh/pipeline/depth/swapchain）；
 `endFrame` 的 pass 区段包 `ScopedDebugLabel("opaque") / ("ui-composite")`。
 
-### 2.3 设置期：vk-bootstrap 接管 instance/device（builder 式，vkguide 同款）
+### 2.3 设置期：保持自有 instance/device 创建（不引入 vk-bootstrap）
 
-[ vk-bootstrap ](https://github.com/charles-lunarg/vk-bootstrap)（MIT、
-header-only、[vcpkg port](https://vcpkg.io/en/package/vk-bootstrap.html)、
-支持 volk 自定义加载）接管 **InstanceBuilder / PhysicalDeviceSelector /
-DeviceBuilder**：类型化 feature 结构体 + 自动 pNext 链（原 FeatureChain
-工具退休）、队列族选择、扩展匹配。caps 报告（GPU/内存/int64 门检）为
-自有逻辑，站在其结果之上。**Swapchain 保持自有实现**（已过 resize 验证、
-与 FrameSync 重建联动是定制逻辑，builder 收益最小）。
+2026-09-02 用户裁定：**不引入 vk-bootstrap**，VulkanContext/VulkanDevice
+的自有创建代码保持现状（已隔离在 vulkan/ 子目录、KE_VK 纪律覆盖、
+caps 报告逻辑自有）。评估记录备查：vk-bootstrap（[仓库](https://github.com/charles-lunarg/vk-bootstrap)、
+[vcpkg port](https://vcpkg.io/en/package/vk-bootstrap.html)）提供 builder 式
+Instance/Device/Swapchain 创建与类型化 feature 链，vkguide 采用；当初
+提议接管 InstanceBuilder/PhysicalDeviceSelector/DeviceBuilder、Swapchain
+保持自有——该提议在计划评审时被否，理由：现有创建代码能跑且已模块化，
+换库替换的收益（feature pNext 链工效）不抵迁移成本。
 
 ## 三、业界实践汇总 → 架构采纳矩阵
 
@@ -169,8 +170,8 @@ DeletionQueue 帧槽 fence 过后真销毁；StagingRing 16MB/槽起步、超限
    双轨同款）+ StagingRing + `stagePerFrameData()`（Raptor `dynamic_allocate`
    同款）；**DescriptorCache 落地**：池分层 + ImGui SAMPLED_IMAGE 警告清零 +
    布局由 shader 反射生成（Slang 反射 API 优先）
-4. vk-bootstrap 接管 instance/device 创建（VulkanContext/VulkanDevice 瘦身，
-   caps 报告保留）
+4. ~~vk-bootstrap 接管 instance/device 创建~~（2026-09-02 取消——用户裁定
+   不引入该库，设置期代码保持自有，见 2.3）
 5. 验收：校验层**零警告**（含 SAMPLED_IMAGE 那条）、ctest 100%、
    基线/kgeo 截图逐字节不变
 
