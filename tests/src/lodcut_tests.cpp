@@ -3,7 +3,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "kenshin/assets/MeshData.h"
-#include "kenshin/assets/ProceduralMesh.h"
+#include "kenshin/geometry/shapes/SphereGeometry.h"
+#include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/geometry/ClusterDag.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
 #include "kenshin/geometry/LodCut.h"
@@ -39,7 +40,7 @@ namespace
 TEST_CASE("lod cut threshold monotonicity", "[geometry][lodcut]")
 {
     Built built;
-    REQUIRE(build(kenshin::assets::createTorusKnot(2, 3, 192, 48, 1.0f, 0.32f), built));
+    REQUIRE(build(kenshin::geometry::TorusKnotGeometry::create(2, 3, 192, 48, 1.0f), built));
     // Far camera: all groups see ~the same threshold, restoring strict
     // monotonicity (near cameras mix per-group scales legitimately).
     const float camPos[3] = {0.0f, 0.0f, 1000.0f};
@@ -72,7 +73,7 @@ TEST_CASE("lod cut threshold monotonicity", "[geometry][lodcut]")
 TEST_CASE("lod cut single-level-per-path validity", "[geometry][lodcut]")
 {
     Built built;
-    REQUIRE(build(kenshin::assets::createTorusKnot(2, 3, 128, 32, 1.0f, 0.32f), built));
+    REQUIRE(build(kenshin::geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
     const float camPos[3] = {0.0f, 0.0f, 4.0f};
 
     std::vector<kenshin::u32> cut;
@@ -101,7 +102,7 @@ TEST_CASE("lod cut single-level-per-path validity", "[geometry][lodcut]")
 TEST_CASE("lod cut never empty", "[geometry][lodcut]")
 {
     Built built;
-    REQUIRE(build(kenshin::assets::createUvSphere(32, 16, 1.0f), built));
+    REQUIRE(build(kenshin::geometry::SphereGeometry::create(32, 16, 1.0f), built));
     const float camPos[3] = {0.0f, 0.0f, 4.0f};
     for (const kenshin::f32 threshold : {1e-6f, 1.0f, 1e12f})
     {

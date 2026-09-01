@@ -17,7 +17,9 @@
 #include "kenshin/assets/ObjLoader.h"
 #include "kenshin/geometry/KGeoFile.h"
 #include "kenshin/geometry/LodCut.h"
-#include "kenshin/assets/ProceduralMesh.h"
+#include "kenshin/geometry/shapes/BoxGeometry.h"
+#include "kenshin/geometry/shapes/SphereGeometry.h"
+#include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/scene/Camera.h"
 
@@ -178,49 +180,17 @@ namespace
     {
         if (name == "cube")
         {
-            // Procedural cube (8 verts, CCW) with per-face normals.
-            out.positions = {
-                -0.5f, -0.5f, -0.5f,  0.5f, -0.5f, -0.5f,  0.5f, 0.5f, -0.5f, -0.5f, 0.5f, -0.5f,
-                -0.5f, -0.5f,  0.5f,  0.5f, -0.5f,  0.5f,  0.5f, 0.5f,  0.5f, -0.5f, 0.5f,  0.5f,
-            };
-            out.normals.assign(24 * 3, 0.0f);
-            out.uvs.assign(24 * 2, 0.0f);
-            const int quads[6][4] = {
-                {0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
-                {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7},
-            };
-            const float normals[6][3] = {
-                {0, 0, -1}, {0, 0, 1}, {0, -1, 0}, {1, 0, 0}, {0, 1, 0}, {-1, 0, 0},
-            };
-            kenshin::u32 vertex = 8;
-            for (int q = 0; q < 6; ++q)
-            {
-                for (int c = 0; c < 4; ++c)
-                {
-                    const int src = quads[q][c];
-                    for (int k = 0; k < 3; ++k)
-                        out.positions.push_back(out.positions[src * 3 + k]);
-                    for (int k = 0; k < 3; ++k)
-                        out.normals.push_back(normals[q][k]);
-                    out.uvs.push_back(0.0f);
-                    out.uvs.push_back(0.0f);
-                    ++vertex;
-                }
-                // Two CCW triangles from the fan (v0, v1, v2) and (v0, v2, v3).
-                const kenshin::u32 base = vertex - 4;
-                out.indices.insert(out.indices.end(), {base, base + 1, base + 2,
-                                                       base, base + 2, base + 3});
-            }
+            out = kenshin::geometry::BoxGeometry::create(1.0f, 1.0f, 1.0f);
             return true;
         }
         if (name == "sphere")
         {
-            out = kenshin::assets::createUvSphere(64, 32, 1.0f);
+            out = kenshin::geometry::SphereGeometry::create(64, 32, 1.0f);
             return true;
         }
         if (name == "knot")
         {
-            out = kenshin::assets::createTorusKnot(2, 3, 256, 32, 1.0f, 0.32f);
+            out = kenshin::geometry::TorusKnotGeometry::create(2, 3, 256, 32, 1.0f);
             return true;
         }
         return kenshin::assets::loadObj(name, out, log);

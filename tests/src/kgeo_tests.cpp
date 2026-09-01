@@ -3,7 +3,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "kenshin/assets/MeshData.h"
-#include "kenshin/assets/ProceduralMesh.h"
+#include "kenshin/geometry/shapes/SphereGeometry.h"
+#include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/geometry/ClusterDag.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
 #include "kenshin/geometry/KGeoFile.h"
@@ -31,7 +32,7 @@ namespace
 
 TEST_CASE("kgeo roundtrip sphere", "[geometry][kgeo]")
 {
-    const auto mesh = kenshin::assets::createUvSphere(48, 24, 1.0f);
+    const auto mesh = kenshin::geometry::SphereGeometry::create(48, 24, 1.0f);
     kenshin::geometry::ClusterDag dag;
     std::string log;
     REQUIRE(buildDag(mesh, dag, log));
@@ -65,7 +66,7 @@ TEST_CASE("kgeo roundtrip sphere", "[geometry][kgeo]")
 
 TEST_CASE("kgeo rejects corrupt magic", "[geometry][kgeo]")
 {
-    const auto mesh = kenshin::assets::createUvSphere(16, 8, 1.0f);
+    const auto mesh = kenshin::geometry::SphereGeometry::create(16, 8, 1.0f);
     kenshin::geometry::ClusterDag dag;
     std::string log;
     REQUIRE(buildDag(mesh, dag, log));

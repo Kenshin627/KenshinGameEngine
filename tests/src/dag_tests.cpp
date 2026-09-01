@@ -5,7 +5,8 @@
 
 #include "kenshin/assets/MeshData.h"
 #include "kenshin/assets/ObjLoader.h"
-#include "kenshin/assets/ProceduralMesh.h"
+#include "kenshin/geometry/shapes/SphereGeometry.h"
+#include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/geometry/ClusterDag.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
 
@@ -83,7 +84,7 @@ TEST_CASE("dag grid invariants hold", "[geometry][dag]")
 TEST_CASE("dag knot parent-child triangle ratio", "[geometry][dag]")
 {
     Built built;
-    REQUIRE(buildProc(kenshin::assets::createTorusKnot(2, 3, 128, 32, 1.0f, 0.32f), built));
+    REQUIRE(buildProc(kenshin::geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
     INFO("log: " << built.log);
     REQUIRE(built.stats.clusterCount > 10);
     REQUIRE(built.stats.maxLevel >= 3);
@@ -116,7 +117,7 @@ TEST_CASE("dag two sheets produce independent subtrees", "[geometry][dag]")
 TEST_CASE("dag monotonic fixes reported", "[geometry][dag]")
 {
     Built built;
-    REQUIRE(buildProc(kenshin::assets::createUvSphere(48, 24, 1.0f), built));
+    REQUIRE(buildProc(kenshin::geometry::SphereGeometry::create(48, 24, 1.0f), built));
     INFO("log: " << built.log);
     // Either raw errors were already monotonic (0 fixes) or we raised some;
     // the invariant check is the real gate; just exercise the counter.

@@ -3,7 +3,8 @@
 #include "kenshin/Version.h"
 #include "kenshin/assets/MeshData.h"
 #include "kenshin/assets/ObjLoader.h"
-#include "kenshin/assets/ProceduralMesh.h"
+#include "kenshin/geometry/shapes/SphereGeometry.h"
+#include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/geometry/ClusterDag.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
@@ -43,9 +44,9 @@ int main(int argc, char** argv)
     if (!proc.empty())
     {
         if (proc == "knot")
-            mesh = kenshin::assets::createTorusKnot(2, 3, 512, 1024, 1.0f, 0.35f);
+            mesh = kenshin::geometry::TorusKnotGeometry::create(2, 3, 512, 1024, 1.0f);
         else if (proc == "sphere")
-            mesh = kenshin::assets::createUvSphere(256, 128, 1.0f);
+            mesh = kenshin::geometry::SphereGeometry::create(256, 128, 1.0f);
         else
         {
             KENSHIN_ERROR("unknown --proc '{}'", proc);

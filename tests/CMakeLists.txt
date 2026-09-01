@@ -14,6 +14,7 @@ add_executable(kenshin_tests
     src/dag_tests.cpp
     src/kgeo_tests.cpp
     src/lodcut_tests.cpp
+    src/shapes_tests.cpp
     src/smoke.cpp
 )
 

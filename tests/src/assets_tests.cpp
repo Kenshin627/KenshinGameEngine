@@ -4,7 +4,8 @@
 
 #include "kenshin/assets/MeshData.h"
 #include "kenshin/assets/ObjLoader.h"
-#include "kenshin/assets/ProceduralMesh.h"
+#include "kenshin/geometry/shapes/SphereGeometry.h"
+#include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Timer.h"
 
@@ -128,7 +129,7 @@ TEST_CASE("obj missing normals get defaults", "[assets][obj]")
 
 TEST_CASE("uv sphere exact counts", "[assets][procedural]")
 {
-    const auto mesh = kenshin::assets::createUvSphere(64, 32, 1.0f);
+    const auto mesh = kenshin::geometry::SphereGeometry::create(64, 32, 1.0f);
     REQUIRE(mesh.triangleCount() == 64u * (2u * (32u - 1u)));
     REQUIRE(mesh.valid());
     // Unit sphere bounds.
@@ -141,7 +142,7 @@ TEST_CASE("uv sphere exact counts", "[assets][procedural]")
 TEST_CASE("torus knot million triangles under 2s", "[assets][procedural]")
 {
     kenshin::Timer timer;
-    const auto mesh = kenshin::assets::createTorusKnot(2, 3, 512, 1024, 1.0f, 0.35f);
+    const auto mesh = kenshin::geometry::TorusKnotGeometry::create(2, 3, 512, 1024, 1.0f);
     const double seconds = timer.elapsedSeconds();
     REQUIRE(mesh.triangleCount() == 512u * 1024u * 2u);
     REQUIRE(mesh.valid());

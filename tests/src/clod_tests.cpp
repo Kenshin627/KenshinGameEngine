@@ -4,7 +4,8 @@
 
 #include "kenshin/assets/MeshData.h"
 #include "kenshin/assets/ObjLoader.h"
-#include "kenshin/assets/ProceduralMesh.h"
+#include "kenshin/geometry/shapes/SphereGeometry.h"
+#include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
 
@@ -74,7 +75,7 @@ TEST_CASE("clod grid cluster sizes and coverage", "[geometry][clod]")
 
 TEST_CASE("clod torus knot depth and error monotonicity", "[geometry][clod]")
 {
-    const auto mesh = kenshin::assets::createTorusKnot(2, 3, 128, 32, 1.0f, 0.32f);
+    const auto mesh = kenshin::geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f);
     std::vector<kenshin::geometry::ClusterGroup> groups;
     std::string log;
     const auto stats = buildAll(mesh, groups, log);
@@ -89,7 +90,7 @@ TEST_CASE("clod torus knot depth and error monotonicity", "[geometry][clod]")
 
 TEST_CASE("clod attributes preserved (uv seam safety)", "[geometry][clod]")
 {
-    const auto mesh = kenshin::assets::createUvSphere(32, 16, 1.0f);
+    const auto mesh = kenshin::geometry::SphereGeometry::create(32, 16, 1.0f);
     std::vector<kenshin::geometry::ClusterGroup> groups;
     std::string log;
     kenshin::geometry::BuildStats stats;
@@ -108,7 +109,7 @@ TEST_CASE("clod attributes preserved (uv seam safety)", "[geometry][clod]")
 
 TEST_CASE("clod million-triangle budget", "[geometry][clod][performance]")
 {
-    const auto mesh = kenshin::assets::createTorusKnot(2, 3, 512, 1024, 1.0f, 0.35f);
+    const auto mesh = kenshin::geometry::TorusKnotGeometry::create(2, 3, 512, 1024, 1.0f);
     std::vector<kenshin::geometry::ClusterGroup> groups;
     std::string log;
     const auto stats = buildAll(mesh, groups, log);
