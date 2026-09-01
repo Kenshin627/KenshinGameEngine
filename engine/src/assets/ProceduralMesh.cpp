@@ -87,15 +87,18 @@ namespace assets
         if (p < 1 || q < 1 || tubeSegs < 3 || ringSegs < 3)
             return mesh;
 
-        // Curve point at parameter t (three.js TorusKnotGeometry).
+        // Canonical (p,q) torus knot on a torus of major radius R and
+        // minor radius r (Wikipedia parametrization): winds p times around
+        // the Y axis while crossing the tube q times. The earlier three.js
+        // transcription produced an elliptical rotating ring (constant x
+        // amplitude 0.5R, pulsing z 0.5..1.5R) - a distorted knot.
+        const f32 minorRadius = radius * 0.375f;
         auto curve = [&](f32 t, glm::vec3& pos) {
-            const f32 cu = std::cos(q * t);
-            const f32 su = std::sin(q * t);
-            const f32 quOverP = glm::pi<f32>() * 2.0f * static_cast<f32>(q) / p;
-            const f32 cs = std::cos(quOverP);
-            pos.x = radius * (2.0f + cs) * 0.5f * std::cos(p * t);
-            pos.y = radius * (2.0f + cs) * su * 0.5f;
-            pos.z = radius * (2.0f + cu) * 0.5f * std::sin(p * t);
+            const f32 cq = std::cos(q * t);
+            const f32 ring = radius + minorRadius * cq;
+            pos.x = ring * std::cos(p * t);
+            pos.y = minorRadius * std::sin(q * t);
+            pos.z = ring * std::sin(p * t);
         };
 
         const usize vertexTotal = static_cast<usize>(tubeSegs + 1) * (ringSegs + 1);
