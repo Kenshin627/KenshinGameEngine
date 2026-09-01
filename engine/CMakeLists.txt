@@ -45,6 +45,7 @@ add_library(kenshin_engine STATIC
     src/core/Timer.cpp
     src/core/Window.cpp
     src/DebugOverlay.cpp
+    src/Engine.cpp
     src/manager/ShaderManager.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp

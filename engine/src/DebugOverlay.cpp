@@ -1,5 +1,6 @@
 #include "kenshin/DebugOverlay.h"
 
+#include "kenshin/Engine.h"
 #include "kenshin/backend/RenderBackend.h"
 #include "kenshin/core/Window.h"
 #include "kenshin/scene/Camera.h"
@@ -22,6 +23,11 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 #include <filesystem>
 
 KENSHIN_NS_BEGIN
+
+    bool DebugOverlay::onInit(Engine& engine)
+    {
+        return init(&engine.get<backend::IRenderBackend>(), engine.get<core::Window>());
+    }
 
     bool DebugOverlay::init(backend::IRenderBackend* backend, core::Window& window)
     {

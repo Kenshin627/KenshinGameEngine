@@ -17,12 +17,17 @@
 
 KENSHIN_NS_BEGIN
 
+class Engine;
 namespace core { class Window; }
 namespace backend { class IRenderBackend; }
 
 class DebugOverlay
 {
 public:
+    /// Subsystem hook: resolve backend + window from the engine registry
+    /// and init — registering the overlay initializes it.
+    bool onInit(Engine& engine);
+
     /// ImGui context + ini file next to the exe + docking config + Win32
     /// wndproc hookup + backend ImGui init. Call once, after the backend
     /// and the window exist. Returns false if the backend init fails

@@ -1,6 +1,7 @@
-// KENSHINDemo entry: parse args, build the demo scene, boot the engine,
-// run the frame loop. UI lives in kenshin::DebugOverlay, scene contents in
-// DemoScene, the .kgeo LOD preview in KgeoPreview.
+// KENSHINDemo entry: parse args, build the demo scene, boot the engine
+// (subsystem registry: window / render backend / shader manager / debug
+// overlay), run the frame loop. UI panels live in kenshin::DebugOverlay,
+// scene contents in DemoScene, the .kgeo LOD preview in KgeoPreview.
 // Usage:
 //   KENSHINDemo                                  windowed loop (ESC quits)
 //   KENSHINDemo --frames N                       auto-exit after N frames
@@ -12,6 +13,7 @@
 #include "KgeoPreview.h"
 
 #include "kenshin/DebugOverlay.h"
+#include "kenshin/Engine.h"
 #include "kenshin/Version.h"
 #include "kenshin/backend/RenderBackend.h"
 #include "kenshin/core/FrameStats.h"
@@ -33,7 +35,6 @@
 
 #include <cstring>
 #include <filesystem>
-#include <memory>
 #include <string>
 
 namespace
@@ -129,10 +130,14 @@ int main(int argc, char** argv)
     kenshin::log::init();
     KENSHIN_INFO("{}", kenshin::getBanner());
 
+    // Engine facade: global subsystem registry (type-indexed get<T>()).
+    kenshin::Engine& engine = kenshin::Engine::get();
+
+    // Per-scene state stays local (cameras are view state, not services).
     kenshin::scene::Camera camera;
     kenshin::scene::CameraController controller;
 
-    kenshin::core::Window window;
+    auto& window = engine.registerSubsystem<kenshin::core::Window>();
     if (!window.create({"KENSHIN Demo", static_cast<kenshin::u32>(args.width),
                         static_cast<kenshin::u32>(args.height)}))
     {
@@ -149,54 +154,52 @@ int main(int argc, char** argv)
     if (args.validation)
         setupValidationLayerPath();
 
-    auto backend = kenshin::backend::createVulkanBackend();
+    auto& backend = engine.registerInstance<kenshin::backend::IRenderBackend>(
+        kenshin::backend::createVulkanBackend());
     kenshin::backend::BackendInitParams backendParams;
     backendParams.nativeWindowHandle = window.nativeHandle();
     backendParams.enableValidation = args.validation;
-    if (!backend->initialize(backendParams))
+    if (!backend.initialize(backendParams))
     {
         KENSHIN_ERROR("vulkan backend init failed");
-        backend->shutdown();
+        engine.shutdown();
         kenshin::log::shutdown();
         return 1;
     }
-    if (!backend->caps().enabledShaderBufferInt64Atomics)
+    if (!backend.caps().enabledShaderBufferInt64Atomics)
     {
         // HARD GATE: the 64-bit atomic VisBuffer depends on this feature.
         KENSHIN_ERROR("GATE FAILED: shaderBufferInt64Atomics not supported — "
                       "stop and decide the 32-bit packed fallback (see staged-plan risk table)");
-        backend->shutdown();
+        engine.shutdown();
         kenshin::log::shutdown();
         return 2;
     }
     KENSHIN_INFO("[vulkan] gate shaderBufferInt64Atomics: OK");
 
-    // Debug UI: docking workspace, viewport/stats/camera panels; the kgeo
-    // LOD panel plugs in below when the preview is active.
-    kenshin::DebugOverlay overlay;
-    if (!overlay.init(backend.get(), window))
-    {
-        KENSHIN_ERROR("ImGui backend init failed");
-        backend->shutdown();
-        kenshin::log::shutdown();
-        return 1;
-    }
+    // Shader service (baseline.slang compile + staging lives with the scene
+    // setup below).
+    auto& shaders = engine.registerSubsystem<kenshin::manager::ShaderManager>();
+
+    // Debug UI: docking workspace, viewport/stats/camera panels; registering
+    // initializes it (onInit resolves backend + window from the registry).
+    // The kgeo LOD panel plugs in below when the preview is active.
+    auto& overlay = engine.registerSubsystem<kenshin::DebugOverlay>();
 
     // ---- demo scene (S2.2): one instance of every shape on the X axis;
     // --mesh <name> picks one, --kgeo switches to the LOD preview instead.
     auto scene = args.kgeo.empty() ? demo::buildScene(args.mesh)
                                    : std::vector<demo::SceneShape>{};
     {
-        kenshin::manager::ShaderManager shaders;
         std::vector<kenshin::u32> vsSpirv, fsSpirv;
         std::string shaderLog;
         if (shaders.init(findShaderRoot()) &&
             shaders.compileFile("baseline.slang", vsSpirv, shaderLog, "vsMain") &&
             shaders.compileFile("baseline.slang", fsSpirv, shaderLog, "fsMain"))
         {
-            backend->stageBaselineShaders(vsSpirv.data(), vsSpirv.size() * 4,
-                                          fsSpirv.data(), fsSpirv.size() * 4);
-            demo::uploadScene(scene, backend.get());
+            backend.stageBaselineShaders(vsSpirv.data(), vsSpirv.size() * 4,
+                                         fsSpirv.data(), fsSpirv.size() * 4);
+            demo::uploadScene(scene, &backend);
         }
         else
         {
@@ -237,8 +240,8 @@ int main(int argc, char** argv)
         kenshin::u32 w = 0, h = 0;
         if (const auto parent = std::filesystem::path(path).parent_path(); !parent.empty())
             std::filesystem::create_directories(parent);
-        const bool read = fullFrame ? backend->readbackFullFrame(rgba, w, h)
-                                    : backend->readbackFrame(rgba, w, h);
+        const bool read = fullFrame ? backend.readbackFullFrame(rgba, w, h)
+                                    : backend.readbackFrame(rgba, w, h);
         if (read && kenshin::util::writeBmp24(path, rgba, w, h))
             KENSHIN_INFO("{} written: {} ({}x{})", what, path, w, h);
         else
@@ -258,6 +261,7 @@ int main(int argc, char** argv)
 
         const kenshin::f32 dt = static_cast<kenshin::f32>(frameTimer.elapsedSeconds());
         frameTimer.reset();
+        engine.beginFrame(dt);
 
         const bool isLastFrame = args.frames >= 0 && frame + 1 >= args.frames;
 
@@ -274,17 +278,16 @@ int main(int argc, char** argv)
         beginInfo.width = static_cast<kenshin::u32>(vp.x);
         beginInfo.height = static_cast<kenshin::u32>(vp.y);
         std::memcpy(beginInfo.clearColor, kClearColor, sizeof(beginInfo.clearColor));
-        if (!backend->beginFrame(beginInfo))
+        if (!backend.beginFrame(beginInfo))
         {
             KENSHIN_ERROR("beginFrame failed");
             break;
         }
 
-        overlay.draw(backend->viewportImGuiTexture(), stats, camera, controller);
+        overlay.draw(backend.viewportImGuiTexture(), stats, camera, controller);
 
         controller.handleInput(camera, overlay.controllerInput(dt));
-        controller.updateMatrices(
-            camera, vp.x / glm::max(vp.y, 1.0f));
+        controller.updateMatrices(camera, vp.x / glm::max(vp.y, 1.0f));
 
         if (!cameraChecked &&
             glm::abs(glm::dot(camera.forward(), camera.up())) < 1e-4f)
@@ -294,7 +297,7 @@ int main(int argc, char** argv)
         }
 
         if (kgeoMode)
-            demo::updateCut(kgeoPreview, backend.get(), camera, controller,
+            demo::updateCut(kgeoPreview, &backend, camera, controller,
                             static_cast<kenshin::u32>(vp.y));
 
         // Baseline draw (S2.2): meshes render into the viewport target
@@ -323,7 +326,7 @@ int main(int argc, char** argv)
                 // Blinn-Phong specular half-vector.
                 std::memcpy(draw.lightDir, light, sizeof(draw.lightDir));
                 std::memcpy(draw.camPos, camArr, sizeof(draw.camPos));
-                backend->drawMesh(draw);
+                backend.drawMesh(draw);
             }
         }
         else if (kgeoMode && drawable &&
@@ -341,15 +344,16 @@ int main(int argc, char** argv)
             const kenshin::f32 camArr[4] = {camera.position().x, camera.position().y,
                                             camera.position().z, 0.0f};
             std::memcpy(draw.camPos, camArr, sizeof(draw.camPos));
-            backend->drawMesh(draw);
+            backend.drawMesh(draw);
         }
 
         // Full-frame capture must be flagged before endFrame records it.
         const bool exiting = isLastFrame || !window.isOpen();
         if (!args.screenshotUi.empty() && exiting)
-            backend->requestFullFrameCapture();
+            backend.requestFullFrameCapture();
 
-        backend->endFrame();
+        backend.endFrame();
+        engine.endFrame();
         stats.push(dt * 1000.0f);
         if (frame > 0 && frame % 60 == 0)
             KENSHIN_INFO("[pacing] avg={:.3f}ms std={:.3f}ms max={:.3f}ms fps={:.1f}",
@@ -372,8 +376,9 @@ int main(int argc, char** argv)
     }
 
     KENSHIN_INFO("main loop exited after {} frames", frame);
-    backend->shutdown();
-    overlay.shutdown();
+    // Reverse registration order: overlay context, shader manager, render
+    // backend, window.
+    engine.shutdown();
     kenshin::log::shutdown();
     return 0;
 }

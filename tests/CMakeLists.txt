@@ -12,6 +12,7 @@ add_executable(kenshin_tests
     src/assets_tests.cpp
     src/clod_tests.cpp
     src/dag_tests.cpp
+    src/engine_tests.cpp
     src/kgeo_tests.cpp
     src/lodcut_tests.cpp
     src/shapes_tests.cpp
