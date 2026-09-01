@@ -111,16 +111,14 @@ namespace
         return args;
     }
 
-    /// Deterministic clear color for a frame index: exact k/255 values so the
-    /// float32 -> UNORM round trip reproduces the same byte in every run.
+    /// Deterministic clear color: constant dark slate (exact k/255 values
+    /// keep the float32 -> UNORM round trip byte-exact across runs). The
+    /// earlier per-frame cycling hue was a flashing strobe.
     void clearColorForFrame(int frame, kenshin::f32 out[4])
     {
-        const int r = (frame * 37 + 11) & 0xFF;
-        const int g = (frame * 61 + 3) & 0xFF;
-        const int b = (frame * 97 + 200) & 0xFF;
-        out[0] = static_cast<kenshin::f32>(r) / 255.0f;
-        out[1] = static_cast<kenshin::f32>(g) / 255.0f;
-        out[2] = static_cast<kenshin::f32>(b) / 255.0f;
+        out[0] = 14.0f / 255.0f;
+        out[1] = 16.0f / 255.0f;
+        out[2] = 22.0f / 255.0f;
         out[3] = 1.0f;
     }
 

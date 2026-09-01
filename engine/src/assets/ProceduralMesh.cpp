@@ -95,7 +95,7 @@ namespace assets
         // with the axis along Z.
         const f32 knotR = radius * 2.2f;
         const f32 knotr = radius * 0.9f;
-        const f32 tubeR = radius * 0.10f;
+        const f32 tubeR = radius * 0.16f;
         auto curve = [&](f32 t, glm::vec3& pos) {
             const f32 cr = knotR + knotr * std::cos(q * t);
             pos.x = cr * std::cos(p * t);
