@@ -40,6 +40,9 @@ add_library(kenshin_engine STATIC
     src/backend/vulkan/Swapchain.cpp
     src/backend/vulkan/VulkanContext.cpp
     src/backend/vulkan/VulkanDevice.cpp
+    src/backend/vulkan/CommandContext.cpp
+    src/backend/vulkan/DescriptorCache.cpp
+    src/backend/vulkan/UploadEngine.cpp
     src/core/Input.cpp
     src/core/Log.cpp
     src/core/Timer.cpp

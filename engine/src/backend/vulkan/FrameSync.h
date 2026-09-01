@@ -7,6 +7,7 @@
 
 #include <volk.h>
 
+#include "DeletionQueue.h"
 #include "GpuImage.h"
 #include "kenshin/Common.h"
 
@@ -25,6 +26,9 @@ struct FrameSlot {
       VK_NULL_HANDLE;  // signaled by acquire, consumed by submit
   VkFence inFlight = VK_NULL_HANDLE;
   GpuImage offscreen;
+  // Deferred destroys queued while this slot was recording run when the
+  // slot is reused (its fence confirmed the frame completed by then).
+  DeletionQueue deletionQueue;
   // ImGui descriptor set sampling `offscreen` (VkImage it was created for
   // tracked so a resize recreates the set). Opaque in this header.
   void* imguiTexture = nullptr;

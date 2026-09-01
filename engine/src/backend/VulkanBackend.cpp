@@ -1,6 +1,9 @@
 #include "kenshin/backend/VulkanBackend.h"
 
 #include "vulkan/Vk.h"
+#include "vulkan/CommandContext.h"
+#include "vulkan/DescriptorCache.h"
+#include "vulkan/UploadEngine.h"
 
 #include "kenshin/core/Log.h"
 #include "vulkan/FrameSync.h"
@@ -53,7 +56,8 @@ struct VulkanBackend::Impl {
   u32 activeHeight = 0;
 
   // ImGui integration (S1.5)
-  VkDescriptorPool imguiPool = VK_NULL_HANDLE;
+  DescriptorCache descriptors;
+  CommandContext cmd;  // the current frame slot's recording
   bool imguiInited = false;
   f32 bgColor[4] = {0.055f, 0.055f, 0.075f, 1.0f};
 
@@ -224,10 +228,11 @@ void VulkanBackend::shutdown() {
   }
   if (m_impl->device.device != VK_NULL_HANDLE)
     KE_VK(vkDeviceWaitIdle(m_impl->device.device));
-  if (m_impl->imguiPool != VK_NULL_HANDLE) {
-    vkDestroyDescriptorPool(m_impl->device.device, m_impl->imguiPool, nullptr);
-    m_impl->imguiPool = VK_NULL_HANDLE;
-  }
+  // Deferred destroys are safe now (device idle); run them before the
+  // objects they reference (pools, device) go away.
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i)
+    m_impl->frameSync.slots[i].deletionQueue.flush();
+  m_impl->descriptors.shutdown(m_impl->device.device);
   if (m_impl->captureStaging != VK_NULL_HANDLE) {
     vmaDestroyBuffer(m_impl->device.allocator, m_impl->captureStaging,
                      m_impl->captureAlloc);
@@ -262,33 +267,7 @@ std::unique_ptr<IRenderBackend> createVulkanBackend() {
 
 // ── frame loop (S1.3) ─────────────────────────────────────────
 
-namespace {
-VkImageMemoryBarrier2 imageBarrier(VkImage image, VkImageLayout oldLayout,
-                                   VkImageLayout newLayout,
-                                   VkPipelineStageFlags2 dstStage,
-                                   VkAccessFlags2 dstAccess) {
-  return VkImageMemoryBarrier2{
-      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-      .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
-      .dstStageMask = dstStage,
-      .dstAccessMask = dstAccess,
-      .oldLayout = oldLayout,
-      .newLayout = newLayout,
-      .image = image,
-      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-  };
-}
-
-void recordBarrier(VkCommandBuffer cmd, const VkImageMemoryBarrier2& barrier) {
-  const VkDependencyInfo dep{
-      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .imageMemoryBarrierCount = 1,
-      .pImageMemoryBarriers = &barrier,
-  };
-  vkCmdPipelineBarrier2(cmd, &dep);
-}
-}  // namespace
+// Barrier/clear recording helpers live in CommandContext.
 
 bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   Impl& impl = *m_impl;
@@ -328,33 +307,26 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
     return false;
   }
 
-  const VkCommandBufferBeginInfo beginInfo{
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-  };
-  KE_VK(vkResetCommandBuffer(slot.commandBuffer, 0));
-  KE_VK(vkBeginCommandBuffer(slot.commandBuffer, &beginInfo));
+  // Begin this slot's recording; destroys queued on this slot's last use
+  // are now provably finished (the fence wait above).
+  slot.deletionQueue.flush();
+  impl.cmd.begin(slot.commandBuffer);
 
   // Clear the offscreen target (the "rendering" of S1.3).
-  recordBarrier(slot.commandBuffer,
-                imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_UNDEFINED,
+  CommandContext::pipelineBarrier(impl.cmd.cmd(),
+                CommandContext::imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_UNDEFINED,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                              VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                              VK_ACCESS_2_TRANSFER_WRITE_BIT));
-  VkClearColorValue clear{};
-  clear.float32[0] = info.clearColor[0];
-  clear.float32[1] = info.clearColor[1];
-  clear.float32[2] = info.clearColor[2];
-  clear.float32[3] = info.clearColor[3];
-  const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-  vkCmdClearColorImage(slot.commandBuffer, slot.offscreen.image,
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);
+  CommandContext::clearColorImage(impl.cmd.cmd(), slot.offscreen.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  info.clearColor);
 
   // offscreen: TRANSFER_DST -> COLOR_ATTACHMENT (passes between
   // begin/end render here; endFrame moves it to SHADER_READ_ONLY).
-  recordBarrier(
-      slot.commandBuffer,
-      imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                    VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
@@ -363,8 +335,8 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   // Depth companion target: reset to DEPTH_ATTACHMENT each frame.
   ensureViewportDepth(info.width, info.height);
   if (impl.depthImage != VK_NULL_HANDLE) {
-    recordBarrier(
-        slot.commandBuffer,
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(),
         VkImageMemoryBarrier2{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
             .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
@@ -401,8 +373,8 @@ void VulkanBackend::endFrame() {
   const VkImage dstImage = impl.swapchain.images[impl.swapchain.imageIndex];
 
   // offscreen: COLOR_ATTACHMENT -> SHADER_READ_ONLY for the ImGui sample.
-  recordBarrier(slot.commandBuffer,
-                imageBarrier(slot.offscreen.image,
+  CommandContext::pipelineBarrier(impl.cmd.cmd(),
+                CommandContext::imageBarrier(slot.offscreen.image,
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
@@ -416,8 +388,8 @@ void VulkanBackend::endFrame() {
 
   // swapchain image: UNDEFINED -> COLOR_ATTACHMENT (ImGui draws the
   // whole window through dynamic rendering).
-  recordBarrier(slot.commandBuffer,
-                imageBarrier(dstImage, VK_IMAGE_LAYOUT_UNDEFINED,
+  CommandContext::pipelineBarrier(impl.cmd.cmd(),
+                CommandContext::imageBarrier(dstImage, VK_IMAGE_LAYOUT_UNDEFINED,
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                              VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
@@ -440,22 +412,22 @@ void VulkanBackend::endFrame() {
       .colorAttachmentCount = 1,
       .pColorAttachments = &colorAttachment,
   };
-  vkCmdBeginRendering(slot.commandBuffer, &renderingInfo);
+  vkCmdBeginRendering(impl.cmd.cmd(), &renderingInfo);
   {
-    const vkutil::ScopedDebugLabel uiLabel{slot.commandBuffer, "ui-composite"};
+    const vkutil::ScopedDebugLabel uiLabel{impl.cmd.cmd(), "ui-composite"};
     if (drawData && drawData->CmdListsCount > 0)
-      ImGui_ImplVulkan_RenderDrawData(drawData, slot.commandBuffer);
+      ImGui_ImplVulkan_RenderDrawData(drawData, impl.cmd.cmd());
   }
-  vkCmdEndRendering(slot.commandBuffer);
+  vkCmdEndRendering(impl.cmd.cmd());
 
   // swapchain image: COLOR_ATTACHMENT -> PRESENT (via a capture copy
   // when a full-frame screenshot was requested).
   if (impl.captureFull) {
     ensureCaptureStaging(impl.swapchain.extent.width,
                          impl.swapchain.extent.height);
-    recordBarrier(
-        slot.commandBuffer,
-        imageBarrier(dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(),
+        CommandContext::imageBarrier(dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                      VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      VK_ACCESS_2_TRANSFER_READ_BIT));
@@ -468,33 +440,33 @@ void VulkanBackend::endFrame() {
         .imageExtent = {impl.swapchain.extent.width,
                         impl.swapchain.extent.height, 1},
     };
-    vkCmdCopyImageToBuffer(slot.commandBuffer, dstImage,
+    vkCmdCopyImageToBuffer(impl.cmd.cmd(), dstImage,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            impl.captureStaging, 1, &captureRegion);
-    recordBarrier(slot.commandBuffer,
-                  imageBarrier(dstImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+    CommandContext::pipelineBarrier(impl.cmd.cmd(),
+                  CommandContext::imageBarrier(dstImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                                VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                VK_ACCESS_2_MEMORY_READ_BIT));
     impl.captureFull = false;
     impl.fullCaptured = true;
   } else {
-    recordBarrier(
-        slot.commandBuffer,
-        imageBarrier(dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(),
+        CommandContext::imageBarrier(dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                      VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                      VK_ACCESS_2_MEMORY_READ_BIT));
   }
 
-  if (!KE_VK(vkEndCommandBuffer(slot.commandBuffer))) {
+  if (!impl.cmd.end()) {
     KENSHIN_ERROR("[vulkan] vkEndCommandBuffer failed");
     return;
   }
 
   const VkCommandBufferSubmitInfo cmdSubmit{
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-      .commandBuffer = slot.commandBuffer,
+      .commandBuffer = impl.cmd.cmd(),
   };
   const VkSemaphoreSubmitInfo waitSubmit{
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
@@ -589,7 +561,7 @@ bool VulkanBackend::readbackFrame(std::vector<u8>& rgbaOut, u32& width,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
   };
   KE_VK(vkBeginCommandBuffer(cmd, &beginInfo));
-  recordBarrier(cmd, imageBarrier(slot.offscreen.image,
+  CommandContext::pipelineBarrier(cmd, CommandContext::imageBarrier(slot.offscreen.image,
                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                   VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -877,28 +849,9 @@ bool VulkanBackend::initImGuiBackend(void* hwnd, u32 width, u32 height) {
                            impl.device.device, impl.hwnd, width, height))
     return false;
 
-  // NOTE: the validation layer (vcpkg build) warns that this pool lacks
-  // VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE even though it is listed below —
-  // a layer bookkeeping gap for the Vulkan 1.4 standalone image
-  // descriptor enums, not a real pool mismatch (allocation succeeds,
-  // counts are far below limits). Verified against source and pool handle.
-  const VkDescriptorPoolSize poolSizes[] = {
-      {VK_DESCRIPTOR_TYPE_SAMPLER, 16},
-      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64},
-      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 64},
-  };
-  const VkDescriptorPoolCreateInfo poolInfo{
-      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-      .maxSets = 64,
-      .poolSizeCount = 2,
-      .pPoolSizes = poolSizes,
-  };
-  if (!KE_VK(vkCreateDescriptorPool(impl.device.device, &poolInfo, nullptr,
-                             &impl.imguiPool))) {
-    KENSHIN_ERROR("[imgui] descriptor pool creation failed");
-    return false;
-  }
+  // NOTE: the pool config (and its known SAMPLED_IMAGE poolSizeCount gap)
+  // lives in DescriptorCache; the fix lands with P0-3.
+  if (!impl.descriptors.initImGuiPool(impl.device.device)) return false;
 
   VkFormat colorFormat = impl.swapchain.format;
   ImGui_ImplVulkan_InitInfo initInfo{};
@@ -908,7 +861,7 @@ bool VulkanBackend::initImGuiBackend(void* hwnd, u32 width, u32 height) {
   initInfo.Device = impl.device.device;
   initInfo.QueueFamily = impl.device.graphicsFamily;
   initInfo.Queue = impl.device.graphicsQueue;
-  initInfo.DescriptorPool = impl.imguiPool;
+  initInfo.DescriptorPool = impl.descriptors.imguiPool();
   initInfo.MinImageCount = 2;
   initInfo.ImageCount = 3;
   initInfo.UseDynamicRendering = true;
@@ -926,15 +879,13 @@ bool VulkanBackend::initImGuiBackend(void* hwnd, u32 width, u32 height) {
 
   if (!ImGui_ImplVulkan_Init(&initInfo)) {
     KENSHIN_ERROR("[imgui] ImGui_ImplVulkan_Init failed");
-    vkDestroyDescriptorPool(impl.device.device, impl.imguiPool, nullptr);
-    impl.imguiPool = VK_NULL_HANDLE;
+    impl.descriptors.shutdown(impl.device.device);
     return false;
   }
   if (!ImGui_ImplWin32_Init(hwnd)) {
     KENSHIN_ERROR("[imgui] ImGui_ImplWin32_Init failed");
     ImGui_ImplVulkan_Shutdown();
-    vkDestroyDescriptorPool(impl.device.device, impl.imguiPool, nullptr);
-    impl.imguiPool = VK_NULL_HANDLE;
+    impl.descriptors.shutdown(impl.device.device);
     return false;
   }
 
@@ -1010,81 +961,7 @@ void VulkanBackend::ensureCaptureStaging(u32 width, u32 height) {
 
 // ── baseline mesh path (S2.2) ─────────────────────────────────
 
-namespace {
-bool uploadDeviceBuffer(VmaAllocator allocator, VkDevice device, VkQueue queue,
-                        VkCommandPool pool, const void* data,
-                        VkDeviceSize bytes, VkBufferUsageFlags usage,
-                        VkBuffer& outBuffer, VmaAllocation& outAlloc) {
-  const VkBufferCreateInfo bufferInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = bytes,
-      .usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-  };
-  const VmaAllocationCreateInfo allocInfo{
-      .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-      .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-  };
-  if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &outBuffer, &outAlloc,
-                      nullptr) != VK_SUCCESS)
-    return false;
-
-  const VkBufferCreateInfo stagingInfo{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = bytes,
-      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-  };
-  const VmaAllocationCreateInfo stagingAllocInfo{
-      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-               VMA_ALLOCATION_CREATE_MAPPED_BIT,
-      .usage = VMA_MEMORY_USAGE_AUTO,
-      .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-  };
-  VkBuffer staging = VK_NULL_HANDLE;
-  VmaAllocation stagingAlloc = VK_NULL_HANDLE;
-  VmaAllocationInfo stagingInfoOut{};
-  if (vmaCreateBuffer(allocator, &stagingInfo, &stagingAllocInfo, &staging,
-                      &stagingAlloc, &stagingInfoOut) != VK_SUCCESS) {
-    vmaDestroyBuffer(allocator, outBuffer, outAlloc);
-    outBuffer = VK_NULL_HANDLE;
-    outAlloc = VK_NULL_HANDLE;
-    return false;
-  }
-  std::memcpy(stagingInfoOut.pMappedData, data, static_cast<usize>(bytes));
-
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  const VkCommandBufferAllocateInfo allocCmd{
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-      .commandPool = pool,
-      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-      .commandBufferCount = 1,
-  };
-  KE_VK(vkAllocateCommandBuffers(device, &allocCmd, &cmd));
-  const VkCommandBufferBeginInfo beginInfo{
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-  };
-  KE_VK(vkBeginCommandBuffer(cmd, &beginInfo));
-  const VkBufferCopy region{.size = bytes};
-  vkCmdCopyBuffer(cmd, staging, outBuffer, 1, &region);
-  KE_VK(vkEndCommandBuffer(cmd));
-  const VkCommandBufferSubmitInfo cmdSubmit{
-      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-      .commandBuffer = cmd,
-  };
-  const VkSubmitInfo2 submit{
-      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-      .commandBufferInfoCount = 1,
-      .pCommandBufferInfos = &cmdSubmit,
-  };
-  KE_VK(vkQueueSubmit2(queue, 1, &submit, VK_NULL_HANDLE));
-  KE_VK(vkQueueWaitIdle(queue));
-  vkFreeCommandBuffers(device, pool, 1, &cmd);
-  vmaDestroyBuffer(allocator, staging, stagingAlloc);
-  return true;
-}
-}  // namespace
+// Mesh upload lives in UploadEngine (one-shot path; P0-3 adds the ring).
 
 u32 VulkanBackend::createMeshBuffer(const MeshUpload& upload) {
   Impl& impl = *m_impl;
@@ -1140,7 +1017,24 @@ void VulkanBackend::destroyMeshBuffer(u32 mesh) {
   Impl& impl = *m_impl;
   if (mesh == kInvalidMeshHandle || mesh == 0 || mesh > impl.meshes.size())
     return;
-  destroyMeshResourceInternal(impl.meshes[mesh - 1]);
+  // Deferred: the slot is invalidated now (handle unusable), the actual
+  // buffer destruction runs when the current frame slot is reused - its
+  // fence wait proves no in-flight frame still binds these buffers.
+  Impl::MeshResource& res = impl.meshes[mesh - 1];
+  const Impl::MeshResource raw = res;
+  res = {};
+  VmaAllocator allocator = impl.device.allocator;
+  impl.frameSync.slots[impl.frameSync.frameIndex].deletionQueue.push(
+      [allocator, raw] {
+        if (raw.positions != VK_NULL_HANDLE)
+          vmaDestroyBuffer(allocator, raw.positions, raw.positionsAlloc);
+        if (raw.normals != VK_NULL_HANDLE)
+          vmaDestroyBuffer(allocator, raw.normals, raw.normalsAlloc);
+        if (raw.uvs != VK_NULL_HANDLE)
+          vmaDestroyBuffer(allocator, raw.uvs, raw.uvsAlloc);
+        if (raw.indices != VK_NULL_HANDLE)
+          vmaDestroyBuffer(allocator, raw.indices, raw.indicesAlloc);
+      });
 }
 
 void VulkanBackend::ensureViewportDepth(u32 width, u32 height) {
@@ -1417,11 +1311,18 @@ void VulkanBackend::destroyGraphicsPipeline(u32 pipeline) {
   Impl& impl = *m_impl;
   if (pipeline == 0 || pipeline > impl.pipelines.size()) return;
   Impl::Pipeline& p = impl.pipelines[pipeline - 1];
-  if (p.pipeline != VK_NULL_HANDLE)
-    vkDestroyPipeline(impl.device.device, p.pipeline, nullptr);
-  if (p.layout != VK_NULL_HANDLE)
-    vkDestroyPipelineLayout(impl.device.device, p.layout, nullptr);
+  if (p.pipeline == VK_NULL_HANDLE && p.layout == VK_NULL_HANDLE) return;
+  // Deferred like mesh buffers: destroy at slot reuse (fence-proven idle).
+  const Impl::Pipeline raw = p;
   p = {};
+  VkDevice device = impl.device.device;
+  impl.frameSync.slots[impl.frameSync.frameIndex].deletionQueue.push(
+      [device, raw] {
+        if (raw.pipeline != VK_NULL_HANDLE)
+          vkDestroyPipeline(device, raw.pipeline, nullptr);
+        if (raw.layout != VK_NULL_HANDLE)
+          vkDestroyPipelineLayout(device, raw.layout, nullptr);
+      });
 }
 
 void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {
@@ -1438,7 +1339,7 @@ void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
   const Impl::MeshResource& mesh = impl.meshes[meshHandle - 1];
   const Impl::Pipeline& pipe = impl.pipelines[pipeline - 1];
-  const vkutil::ScopedDebugLabel passLabel{slot.commandBuffer, "opaque-draw"};
+  const vkutil::ScopedDebugLabel passLabel{impl.cmd.cmd(), "opaque-draw"};
 
   // Push constants: viewProj + kd + lightDir + camPos.
   struct Push {
@@ -1482,7 +1383,7 @@ void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {
       .pColorAttachments = &colorAttachment,
       .pDepthAttachment = &depthAttachment,
   };
-  vkCmdBeginRendering(slot.commandBuffer, &renderingInfo);
+  vkCmdBeginRendering(impl.cmd.cmd(), &renderingInfo);
 
   const VkViewport viewport{
       .x = 0.0f,
@@ -1493,27 +1394,27 @@ void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {
       .maxDepth = 1.0f,
   };
   const VkRect2D scissor{{0, 0}, {slot.offscreen.width, slot.offscreen.height}};
-  vkCmdSetViewport(slot.commandBuffer, 0, 1, &viewport);
-  vkCmdSetScissor(slot.commandBuffer, 0, 1, &scissor);
+  vkCmdSetViewport(impl.cmd.cmd(), 0, 1, &viewport);
+  vkCmdSetScissor(impl.cmd.cmd(), 0, 1, &scissor);
 
-  vkCmdBindPipeline(slot.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pipe.pipeline);
   const VkBuffer vertexBuffers[3] = {mesh.positions, mesh.normals, mesh.uvs};
   const VkDeviceSize vertexOffsets[3] = {0, 0, 0};
-  vkCmdBindVertexBuffers(slot.commandBuffer, 0, 3, vertexBuffers,
+  vkCmdBindVertexBuffers(impl.cmd.cmd(), 0, 3, vertexBuffers,
                          vertexOffsets);
-  vkCmdBindIndexBuffer(slot.commandBuffer, mesh.indices, 0,
+  vkCmdBindIndexBuffer(impl.cmd.cmd(), mesh.indices, 0,
                        VK_INDEX_TYPE_UINT32);
-  vkCmdPushConstants(slot.commandBuffer, pipe.layout,
+  vkCmdPushConstants(impl.cmd.cmd(), pipe.layout,
                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                      0, sizeof(pushData), &pushData);
-  vkCmdDrawIndexed(slot.commandBuffer, mesh.indexCount, 1, 0, 0, 0);
-  vkCmdEndRendering(slot.commandBuffer);
+  vkCmdDrawIndexed(impl.cmd.cmd(), mesh.indexCount, 1, 0, 0, 0);
+  vkCmdEndRendering(impl.cmd.cmd());
   impl.depthClearedThisFrame = true;
   // Depth carries into the next draw's rendering scope: order the
   // writes of this pass before the reads/writes of the next one.
-  recordBarrier(
-      slot.commandBuffer,
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
       VkImageMemoryBarrier2{
           .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
           .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
