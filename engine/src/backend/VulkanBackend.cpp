@@ -68,6 +68,9 @@ namespace backend
         VmaAllocation depthAlloc = VK_NULL_HANDLE;
         VkImageView depthView = VK_NULL_HANDLE;
         u32 depthWidth = 0, depthHeight = 0;
+        // Depth must survive across drawMesh calls within a frame (inter-mesh
+        // occlusion): the first draw clears, the rest LOAD.
+        bool depthClearedThisFrame = false;
 
         VkPipelineLayout baselineLayout = VK_NULL_HANDLE;
         VkPipeline baselinePipeline = VK_NULL_HANDLE;
@@ -373,6 +376,7 @@ namespace backend
         }
 
         impl.frameActive = true;
+        impl.depthClearedThisFrame = false;
         impl.activeWidth = info.width;
         impl.activeHeight = info.height;
         return true;
@@ -1417,8 +1421,12 @@ namespace backend
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = impl.depthView,
             .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            // Depth: the frame's FIRST draw clears, later draws LOAD —
+            // clearing per draw wipes earlier meshes' depth (occlusion broke
+            // between meshes). STORE keeps it for the draws that follow.
+            .loadOp = impl.depthClearedThisFrame ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                                 : VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .clearValue = depthClear,
         };
         const VkRenderingInfo renderingInfo {
@@ -1456,6 +1464,22 @@ namespace backend
                            0, sizeof(pushData), &pushData);
         vkCmdDrawIndexed(slot.commandBuffer, mesh.indexCount, 1, 0, 0, 0);
         vkCmdEndRendering(slot.commandBuffer);
+        impl.depthClearedThisFrame = true;
+        // Depth carries into the next draw's rendering scope: order the
+        // writes of this pass before the reads/writes of the next one.
+        recordBarrier(slot.commandBuffer,
+                      VkImageMemoryBarrier2 {
+                          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                          .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                          .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                          .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                          .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                           VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                          .oldLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                          .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                          .image = impl.depthImage,
+                          .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
+                      });
     }
 
 } // namespace backend

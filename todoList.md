@@ -63,3 +63,4 @@
 （随手记，格式：`- [ ] 事项 —— 备注/日期`）
 
 - [ ] （示例）调研 clusterlod.h 的 clodConfig 各参数含义 —— 对应 S3.1
+- [ ] VulkanBackend：drawMesh 每 draw 独立 rendering scope，color 附件跨 scope 无屏障（实践可行但不合规范）—— 合并为每帧单一 rendering scope（beginScene/endScene）—— 2026-09-01 深度遮挡 bug 修复时遗留
