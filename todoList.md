@@ -58,6 +58,14 @@
 - [ ] Interfaces/ DLL 公共 API 边界层（参照 renderEngine，需要分发时）
 - [ ] TextureManager（需要纹理时）
 
+## Vulkan RHI v2 重构
+
+（详见 docs/vulkan-rhi-plan.md，2026-09-01 调研定稿）
+
+- [ ] P0（M2 前置）：拆 CommandContext/DeletionQueue/DescriptorCache/UploadEngine + 每帧单一 rendering scope + staging ring
+- [ ] P1（M4 前置）：timeline semaphore + compute 队列 + GPU timer
+- [ ] P2（M6 前置）：分页上传/传输队列/驻留预算
+
 ## 杂项待办
 
 （随手记，格式：`- [ ] 事项 —— 备注/日期`）
