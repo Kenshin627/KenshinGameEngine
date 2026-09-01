@@ -18,6 +18,9 @@
 #include "kenshin/geometry/KGeoFile.h"
 #include "kenshin/geometry/LodCut.h"
 #include "kenshin/geometry/shapes/BoxGeometry.h"
+#include "kenshin/geometry/shapes/CylinderGeometry.h"
+#include "kenshin/geometry/shapes/PlaneGeometry.h"
+#include "kenshin/geometry/shapes/TorusGeometry.h"
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/manager/ShaderManager.h"
@@ -66,7 +69,8 @@ namespace
         std::string kgeo;                            // .kgeo virtual-geometry preview (S3.4)
         float lodThreshold = 1.0f;                   // initial LOD pixel-error threshold
         std::string cam;                             // parsed by Camera (S1.5)
-        std::string mesh = "cube";                   // cube | sphere | knot | <path.obj>
+        std::string mesh = "all";                    // all (full scene) | cube | sphere |
+                                                    // torus | cylinder | cone | knot | <path.obj>
         std::string screenshot;
         std::string screenshotUi;                    // full window incl. ImGui
     };
@@ -191,6 +195,26 @@ namespace
         if (name == "knot")
         {
             out = kenshin::geometry::TorusKnotGeometry::create(2, 3, 256, 32, 1.0f);
+            return true;
+        }
+        if (name == "torus")
+        {
+            out = kenshin::geometry::TorusGeometry::create(1.2f, 0.45f, 24, 96);
+            return true;
+        }
+        if (name == "cone")
+        {
+            out = kenshin::geometry::ConeGeometry::create(1.0f, 2.0f, 48);
+            return true;
+        }
+        if (name == "cylinder")
+        {
+            out = kenshin::geometry::CylinderGeometry::create(0.8f, 0.8f, 2.0f, 48);
+            return true;
+        }
+        if (name == "plane")
+        {
+            out = kenshin::geometry::PlaneGeometry::create(3.0f, 3.0f, 12, 12);
             return true;
         }
         return kenshin::assets::loadObj(name, out, log);
@@ -611,17 +635,54 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // ---- baseline mesh path (S2.2) --------------------------------------
-    kenshin::assets::MeshData demoMesh;
+    // ---- baseline demo scene (S2.2): one instance of every shape, spread
+    // in a row on the X axis. --mesh <name> selects a single shape; --mesh
+    // all (the default) lays out the full scene; --kgeo switches to the
+    // virtual-geometry preview entirely.
+    struct SceneShape
     {
-        std::string meshLog;
-        if (!loadDemoMesh(args.mesh, demoMesh, meshLog))
+        const char* name;
+        kenshin::u32 handle;
+        glm::vec3 offset;
+        glm::vec3 kd;
+    };
+    std::vector<SceneShape> scene;
+    if (args.kgeo.empty())
+    {
+        struct Def
         {
-            KENSHIN_ERROR("mesh load failed: {}", meshLog);
-            backend->shutdown();
-            ImGui::DestroyContext();
-            kenshin::log::shutdown();
-            return 1;
+            const char* name;
+            glm::vec3 kd;
+        };
+        const Def defs[] = {
+            {"cube", glm::vec3(0.80f, 0.55f, 0.30f)},
+            {"sphere", glm::vec3(0.75f, 0.30f, 0.35f)},
+            {"torus", glm::vec3(0.30f, 0.65f, 0.80f)},
+            {"cylinder", glm::vec3(0.55f, 0.75f, 0.35f)},
+            {"cone", glm::vec3(0.80f, 0.80f, 0.30f)},
+            {"knot", glm::vec3(0.80f, 0.70f, 0.35f)},
+        };
+        const size_t count = sizeof(defs) / sizeof(defs[0]);
+        const kenshin::f32 spacing = 5.0f;
+        const kenshin::f32 x0 = -0.5f * spacing * static_cast<kenshin::f32>(count - 1);
+        const bool all = args.mesh == "all";
+        for (size_t i = 0; i < count; ++i)
+        {
+            if (!all && args.mesh != defs[i].name)
+                continue;
+            scene.push_back({defs[i].name,
+                             kenshin::backend::IRenderBackend::kInvalidMeshHandle,
+                             all ? glm::vec3(x0 + spacing * static_cast<kenshin::f32>(i),
+                                             0.0f, 0.0f)
+                                 : glm::vec3(0.0f),
+                             defs[i].kd});
+        }
+        if (scene.empty())
+        {
+            // unrecognized --mesh name: treat as OBJ path, single instance
+            scene.push_back({args.mesh.c_str(),
+                             kenshin::backend::IRenderBackend::kInvalidMeshHandle,
+                             glm::vec3(0.0f), glm::vec3(0.8f, 0.7f, 0.35f)});
         }
     }
 
@@ -637,18 +698,30 @@ int main(int argc, char** argv)
         {
             backend->stageBaselineShaders(vsSpirv.data(), vsSpirv.size() * 4,
                                           fsSpirv.data(), fsSpirv.size() * 4);
-            kenshin::backend::IRenderBackend::MeshUpload upload;
-            upload.positions = demoMesh.positions.data();
-            upload.normals = demoMesh.normals.data();
-            upload.uvs = demoMesh.uvs.data();
-            upload.vertexCount = demoMesh.vertexCount();
-            upload.indices = demoMesh.indices.data();
-            upload.indexCount = static_cast<kenshin::u32>(demoMesh.indices.size());
-            meshHandle = backend->createMeshBuffer(upload);
-            KENSHIN_INFO("[baseline] mesh '{}' uploaded: {} verts / {} tris (handle {})",
-                         args.mesh, demoMesh.vertexCount(), demoMesh.triangleCount(),
-                         meshHandle);
-            meshKd = glm::vec3(demoMesh.material.kd);
+            bool any = false;
+            for (auto& shape : scene)
+            {
+                kenshin::assets::MeshData m;
+                std::string meshLog;
+                if (!loadDemoMesh(shape.name, m, meshLog))
+                {
+                    KENSHIN_ERROR("mesh '{}' load failed: {}", shape.name, meshLog);
+                    continue;
+                }
+                kenshin::backend::IRenderBackend::MeshUpload upload;
+                upload.positions = m.positions.data();
+                upload.normals = m.normals.data();
+                upload.uvs = m.uvs.data();
+                upload.vertexCount = m.vertexCount();
+                upload.indices = m.indices.data();
+                upload.indexCount = static_cast<kenshin::u32>(m.indices.size());
+                shape.handle = backend->createMeshBuffer(upload);
+                KENSHIN_INFO("[baseline] mesh '{}' uploaded: {} verts / {} tris",
+                             shape.name, m.vertexCount(), m.triangleCount());
+                any = true;
+            }
+            if (any && !scene.empty())
+                meshHandle = scene.front().handle;
         }
         else
         {
@@ -865,24 +938,46 @@ int main(int argc, char** argv)
                 backend->drawMesh(draw);
             }
         }
-        if (activeMesh != kenshin::backend::IRenderBackend::kInvalidMeshHandle &&
-            ui.viewportSize.x > 1.0f && ui.viewportSize.y > 1.0f)
+        const bool drawable =
+            ui.viewportSize.x > 1.0f && ui.viewportSize.y > 1.0f;
+        if (!kgeoMode && !args.depthProbe && drawable && !scene.empty())
         {
             const kenshin::f32 aspect = ui.viewportSize.x / ui.viewportSize.y;
-            // Slang push-constant matrices read the 64 bytes row-major;
-            // GLM stores column-major, so upload the transpose.
-            const glm::mat4 viewProj = glm::transpose(camera.projection(aspect) * camera.view());
-            kenshin::backend::IRenderBackend::MeshDraw draw;
-            draw.mesh = activeMesh;
-            std::memcpy(draw.viewProj, &viewProj, sizeof(draw.viewProj));
-            kenshin::f32 kdArr[4] = {meshKd.r, meshKd.g, meshKd.b, 1.0f};
-            if (kgeoMode)
+            for (const auto& shape : scene)
             {
-                kdArr[0] = 0.75f; kdArr[1] = 0.75f; kdArr[2] = 0.78f; kdArr[3] = 1.0f;
-            }
+                if (shape.handle == kenshin::backend::IRenderBackend::kInvalidMeshHandle)
+                    continue;
+                // Slang push-constant matrices read the 64 bytes row-major;
+                // GLM stores column-major, so upload the transpose.
+                const glm::mat4 model = glm::translate(glm::mat4(1.0f), shape.offset);
+                const glm::mat4 viewProj =
+                    glm::transpose(camera.projection(aspect) * camera.view() * model);
+                kenshin::backend::IRenderBackend::MeshDraw draw;
+                draw.mesh = shape.handle;
+                std::memcpy(draw.viewProj, &viewProj, sizeof(draw.viewProj));
+                const kenshin::f32 kdArr[4] = {shape.kd.r, shape.kd.g, shape.kd.b, 1.0f};
             std::memcpy(draw.kd, kdArr, sizeof(draw.kd));
             // Studio light from upper-left-front; camera position feeds the
             // Blinn-Phong specular half-vector.
+            const kenshin::f32 light[4] = {0.35f, 0.8f, 0.45f, 0.0f};
+            std::memcpy(draw.lightDir, light, sizeof(draw.lightDir));
+                const kenshin::f32 camArr[4] = {camera.position.x, camera.position.y,
+                                                camera.position.z, 0.0f};
+                std::memcpy(draw.camPos, camArr, sizeof(draw.camPos));
+                backend->drawMesh(draw);
+            }
+        }
+        else if (kgeoMode && drawable && activeMesh !=
+                                           kenshin::backend::IRenderBackend::kInvalidMeshHandle)
+        {
+            const kenshin::f32 aspect = ui.viewportSize.x / ui.viewportSize.y;
+            const glm::mat4 viewProj =
+                glm::transpose(camera.projection(aspect) * camera.view());
+            kenshin::backend::IRenderBackend::MeshDraw draw;
+            draw.mesh = activeMesh;
+            std::memcpy(draw.viewProj, &viewProj, sizeof(draw.viewProj));
+            const kenshin::f32 kdArr[4] = {0.75f, 0.75f, 0.78f, 1.0f};
+            std::memcpy(draw.kd, kdArr, sizeof(draw.kd));
             const kenshin::f32 light[4] = {0.35f, 0.8f, 0.45f, 0.0f};
             std::memcpy(draw.lightDir, light, sizeof(draw.lightDir));
             const kenshin::f32 camArr[4] = {camera.position.x, camera.position.y,
