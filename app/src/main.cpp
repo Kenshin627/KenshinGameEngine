@@ -4,10 +4,7 @@
 //   KENSHINDemo --frames N                       auto-exit after N frames
 //   KENSHINDemo --no-validation                 disable the validation layer (dev default: ON)
 //   KENSHINDemo --size WxH                       client size (default 1600x900)
-//   KENSHINDemo --cam yaw,pitch,dist[,x,y,z]     camera params (consumed from S1.5 on)
 //   KENSHINDemo --screenshot path.bmp            capture the last rendered frame
-//   KENSHINDemo --selftest-window                window event-chain selftest (no GPU)
-//   KENSHINDemo --selftest-shader                Slang compile + uint64 atomic compute selftest
 
 #include "kenshin/Version.h"
 #include "kenshin/backend/RenderBackend.h"
@@ -61,14 +58,11 @@ namespace
         int  frames = -1;                            // -1 = run until the user closes
         int  width = 1600;
         int  height = 900;
-        bool selftest = false;
-        bool selftestShader = false;
         bool validation = true;   // dev default ON; --no-validation to disable
         int resizeAt = -1;                           // frame index to program-resize (S2.3)
         bool depthProbe = false;                     // two-cube occlusion diagnostic
         std::string kgeo;                            // .kgeo virtual-geometry preview (S3.4)
         float lodThreshold = 1.0f;                   // initial LOD pixel-error threshold
-        std::string cam;                             // parsed by Camera (S1.5)
         std::string mesh = "all";                    // all (full scene) | cube | sphere |
                                                     // torus | cylinder | cone | knot | <path.obj>
         std::string screenshot;
@@ -80,11 +74,7 @@ namespace
         Args args;
         for (int i = 1; i < argc; ++i)
         {
-            if (std::strcmp(argv[i], "--selftest-window") == 0)
-                args.selftest = true;
-            else if (std::strcmp(argv[i], "--selftest-shader") == 0)
-                args.selftestShader = true;
-            else if (std::strcmp(argv[i], "--resize-at") == 0 && i + 1 < argc)
+            if (std::strcmp(argv[i], "--resize-at") == 0 && i + 1 < argc)
                 args.resizeAt = std::atoi(argv[++i]);
             else if (std::strcmp(argv[i], "--validation") == 0)
                 args.validation = true;
@@ -94,8 +84,6 @@ namespace
                 args.frames = std::atoi(argv[++i]);
             else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc)
                 sscanf_s(argv[++i], "%dx%d", &args.width, &args.height);
-            else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc)
-                args.cam = argv[++i];
             else if (std::strcmp(argv[i], "--mesh") == 0 && i + 1 < argc)
                 args.mesh = argv[++i];
             else if (std::strcmp(argv[i], "--kgeo") == 0 && i + 1 < argc)
@@ -128,50 +116,6 @@ namespace
         out[3] = 1.0f;
     }
 
-    void selftestWindow()
-    {
-        kenshin::core::Window window;
-        if (!window.create({"KENSHIN S1.1 selftest", 1600, 900}))
-        {
-            KENSHIN_ERROR("selftest: window create FAILED");
-            std::exit(2);
-        }
-        KENSHIN_INFO("selftest: step1 window-created ok");
-
-        // Programmatic resize -> WM_SIZE should surface via pumpEvents.
-        // (SetWindowPos takes the outer rect; convert a 1024x768 client rect first.)
-        const HWND hwnd = static_cast<HWND>(window.nativeHandle());
-        RECT clientRect {0, 0, 1024, 768};
-        AdjustWindowRect(&clientRect, WS_OVERLAPPEDWINDOW, FALSE);
-        SetWindowPos(hwnd, nullptr, 100, 100,
-                     clientRect.right - clientRect.left,
-                     clientRect.bottom - clientRect.top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
-        window.pumpEvents();
-        if (window.width() == 1024 && window.height() == 768)
-            KENSHIN_INFO("selftest: step2 resize 1024x768 ok");
-        else
-        {
-            KENSHIN_ERROR("selftest: step2 resize FAILED (got {}x{})",
-                          window.width(), window.height());
-            std::exit(2);
-        }
-
-        // Inject a key event (synthesized message) -> Input state
-        SendMessageW(hwnd, WM_KEYDOWN, 'A', 0);
-        SendMessageW(hwnd, WM_KEYUP, 'A', 0);
-        if (kenshin::core::Input::get().keyReleased('A'))
-            KENSHIN_INFO("selftest: step3 key event ok");
-        else
-        {
-            KENSHIN_ERROR("selftest: step3 key event FAILED");
-            std::exit(2);
-        }
-
-        window.requestClose();
-        window.pumpEvents();
-        KENSHIN_INFO("selftest: PASSED");
-    }
 } // namespace
 
 
@@ -423,98 +367,6 @@ namespace
         }
     }
 
-    /// S1.4 smoke: compile test_atomic.slang, run it, verify the uint64
-    /// atomic path (the VisBuffer primitive). Exits 0 on success.
-    int selftestShader(bool validation)
-    {
-        kenshin::manager::ShaderManager shaders;
-        if (!shaders.init(findShaderRoot()))
-        {
-            KENSHIN_ERROR("selftest-shader: ShaderManager init FAILED");
-            return 2;
-        }
-        KENSHIN_INFO("selftest-shader: step1 shader manager ok");
-
-        // Error-path: a deliberately broken source must fail with diagnostics.
-        {
-            std::vector<kenshin::u32> bogusSpirv;
-            std::string errLog;
-            const std::string brokenSource =
-                "[shader(\"compute\")]\n"
-                "[numthreads(1,1,1)]\n"
-                "void main(uint tid : SV_DispatchThreadID)\n"
-                "{\n"
-                "    totally_undefined_function_12345();\n"
-                "}\n";
-            if (shaders.compileSource(brokenSource, "broken.slang", bogusSpirv, errLog))
-            {
-                KENSHIN_ERROR("selftest-shader: step2 ERROR-PATH FAILED (broken shader compiled)");
-                return 2;
-            }
-            const bool hasError = errLog.find("error") != std::string::npos;
-            KENSHIN_INFO("selftest-shader: step2 error-path ok (diagnostics: {})",
-                         errLog);
-            if (!hasError)
-            {
-                KENSHIN_ERROR("selftest-shader: step2 diagnostics lack an 'error' marker");
-                return 2;
-            }
-        }
-
-        // Compile the smoke shader.
-        std::vector<kenshin::u32> spirv;
-        std::string log;
-        if (!shaders.compileFile("test_atomic.slang", spirv, log))
-        {
-            KENSHIN_ERROR("selftest-shader: step3 compile FAILED: {}", log);
-            return 2;
-        }
-        KENSHIN_INFO("selftest-shader: step3 compile ok ({} SPIR-V words)", spirv.size());
-
-        // Device (no window) + run.
-        if (validation)
-            setupValidationLayerPath();
-        auto backend = kenshin::backend::createVulkanBackend();
-        kenshin::backend::BackendInitParams params;
-        if (!backend->initialize(params))
-        {
-            KENSHIN_ERROR("selftest-shader: backend init FAILED");
-            return 2;
-        }
-
-        const kenshin::u32 input[4] = {1, 2, 3, 4};
-        kenshin::u64 atomicInit = 0;
-        kenshin::u32 outputInit = 0;
-        kenshin::backend::IRenderBackend::Job job;
-        job.spirv = spirv.data();
-        job.spirvBytes = spirv.size() * sizeof(kenshin::u32);
-        job.entryPoint = "main";
-        job.groupCountX = 1;
-        job.buffers[0] = { input, sizeof(input), false };              // in
-        job.buffers[1] = { &atomicInit, sizeof(atomicInit), true };    // u64 atomic out
-        job.buffers[2] = { &outputInit, sizeof(outputInit), true };    // reduce out
-
-        std::vector<kenshin::u8> outs[kenshin::backend::IRenderBackend::Job::kMaxBuffers];
-        if (!backend->runComputeOneshot(job, outs))
-        {
-            KENSHIN_ERROR("selftest-shader: step4 compute FAILED");
-            backend->shutdown();
-            return 2;
-        }
-        const kenshin::u64 atomicMax = *reinterpret_cast<const kenshin::u64*>(outs[1].data());
-        const kenshin::u32 reduce = *reinterpret_cast<const kenshin::u32*>(outs[2].data());
-        backend->shutdown();
-
-        KENSHIN_INFO("selftest-shader: step4 compute ok: atomicMax(u64)={}, reduce={}",
-                     atomicMax, reduce);
-        if (atomicMax != 16 || reduce != 10)
-        {
-            KENSHIN_ERROR("selftest-shader: FAILED (expected atomicMax=16, reduce=10)");
-            return 2;
-        }
-        KENSHIN_INFO("selftest-shader: PASSED (uint64 atomic path verified)");
-        return 0;
-    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -524,34 +376,8 @@ int main(int argc, char** argv)
     kenshin::log::init();
     KENSHIN_INFO("{}", kenshin::getBanner());
 
-    if (args.selftest)
-    {
-        selftestWindow();
-        kenshin::log::shutdown();
-        return 0;
-    }
-
-    if (args.selftestShader)
-    {
-        const int code = selftestShader(args.validation);
-        kenshin::log::shutdown();
-        return code;
-    }
-
     kenshin::scene::Camera camera;
     kenshin::scene::CameraController controller;
-    if (!args.cam.empty())
-    {
-        float yaw = 35.0f, pitch = 20.0f, dist = 8.0f, tx = 0.0f, ty = 0.5f, tz = 0.0f;
-        if (sscanf_s(args.cam.c_str(), "%f,%f,%f,%f,%f,%f",
-                     &yaw, &pitch, &dist, &tx, &ty, &tz) >= 3)
-        {
-            controller.setup(yaw, pitch, dist, {tx, ty, tz}, 1.0f);
-            KENSHIN_INFO("camera params applied (yaw={} pitch={} dist={})", yaw, pitch, dist);
-        }
-        else
-            KENSHIN_WARN("could not parse --cam '{}' (want yaw,pitch,dist[,tx,ty,tz])", args.cam);
-    }
 
     kenshin::core::Window window;
     if (!window.create({"KENSHIN Demo", static_cast<kenshin::u32>(args.width),
