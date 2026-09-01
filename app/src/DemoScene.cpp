@@ -78,8 +78,7 @@ namespace demo
         {
             if (!all && meshArg != defs[i].name)
                 continue;
-            scene.push_back({defs[i].name,
-                             kenshin::backend::IRenderBackend::kInvalidMeshHandle,
+            scene.push_back({defs[i].name, kenshin::assets::kInvalidMeshHandle,
                              all ? glm::vec3(x0 + spacing * static_cast<kenshin::f32>(i),
                                              0.0f, 0.0f)
                                  : glm::vec3(0.0f),
@@ -88,15 +87,13 @@ namespace demo
         if (scene.empty())
         {
             // unrecognized --mesh name: treat as OBJ path, single instance
-            scene.push_back({meshArg.c_str(),
-                             kenshin::backend::IRenderBackend::kInvalidMeshHandle,
+            scene.push_back({meshArg.c_str(), kenshin::assets::kInvalidMeshHandle,
                              glm::vec3(0.0f), glm::vec3(0.8f, 0.7f, 0.35f)});
         }
         return scene;
     }
 
-    bool uploadScene(std::vector<SceneShape>& scene,
-                     kenshin::backend::IRenderBackend* backend)
+    bool uploadScene(std::vector<SceneShape>& scene, kenshin::manager::MeshPool& pool)
     {
         bool any = false;
         for (auto& shape : scene)
@@ -108,14 +105,7 @@ namespace demo
                 KENSHIN_ERROR("mesh '{}' load failed: {}", shape.name, meshLog);
                 continue;
             }
-            kenshin::backend::IRenderBackend::MeshUpload upload;
-            upload.positions = m.positions.data();
-            upload.normals = m.normals.data();
-            upload.uvs = m.uvs.data();
-            upload.vertexCount = m.vertexCount();
-            upload.indices = m.indices.data();
-            upload.indexCount = static_cast<kenshin::u32>(m.indices.size());
-            shape.handle = backend->createMeshBuffer(upload);
+            shape.handle = pool.upload(m);
             KENSHIN_INFO("[baseline] mesh '{}' uploaded: {} verts / {} tris",
                          shape.name, m.vertexCount(), m.triangleCount());
             any = true;

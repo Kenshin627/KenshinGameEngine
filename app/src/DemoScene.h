@@ -7,7 +7,7 @@
 
 #include "kenshin/Common.h"
 #include "kenshin/assets/MeshData.h"
-#include "kenshin/backend/RenderBackend.h"
+#include "kenshin/manager/MeshPool.h"
 
 #include <glm/glm.hpp>
 
@@ -20,7 +20,7 @@ namespace demo
 struct SceneShape
 {
     const char* name;
-    kenshin::u32 handle = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
+    kenshin::assets::MeshHandle handle = kenshin::assets::kInvalidMeshHandle;
     glm::vec3 offset;
     glm::vec3 kd;
 };
@@ -35,7 +35,6 @@ bool loadMesh(const std::string& name, kenshin::assets::MeshData& out,
 
 /// Load + upload every scene shape (handles filled in). Returns true if
 /// at least one shape made it to the GPU.
-bool uploadScene(std::vector<SceneShape>& scene,
-                 kenshin::backend::IRenderBackend* backend);
+bool uploadScene(std::vector<SceneShape>& scene, kenshin::manager::MeshPool& pool);
 
 } // namespace demo

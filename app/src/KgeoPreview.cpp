@@ -19,8 +19,7 @@ namespace demo
 
     /// Rebuild the drawable mesh from the current cut (baseline path):
     /// concatenate the cut clusters' local vertices/indices into one buffer.
-    static void rebuildCutMesh(KgeoPreview& preview,
-                               kenshin::backend::IRenderBackend* backend)
+    static void rebuildCutMesh(KgeoPreview& preview, kenshin::manager::MeshPool& pool)
     {
         const auto& dag = preview.dag;
         kenshin::assets::MeshData mesh;
@@ -41,22 +40,15 @@ namespace demo
             for (kenshin::u32 i = 0; i < cluster.indexCount; ++i)
                 mesh.indices.push_back(base + dag.indices[cluster.indexOffset + i]);
         }
-        if (preview.meshHandle != kenshin::backend::IRenderBackend::kInvalidMeshHandle)
-            backend->destroyMeshBuffer(preview.meshHandle);
-        preview.meshHandle = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
+        if (preview.meshHandle != kenshin::assets::kInvalidMeshHandle)
+            pool.destroy(preview.meshHandle);
+        preview.meshHandle = kenshin::assets::kInvalidMeshHandle;
         if (mesh.indices.empty())
             return;
-        kenshin::backend::IRenderBackend::MeshUpload upload;
-        upload.positions = mesh.positions.data();
-        upload.normals = mesh.normals.data();
-        upload.uvs = mesh.uvs.data();
-        upload.vertexCount = mesh.vertexCount();
-        upload.indices = mesh.indices.data();
-        upload.indexCount = static_cast<kenshin::u32>(mesh.indices.size());
-        preview.meshHandle = backend->createMeshBuffer(upload);
+        preview.meshHandle = pool.upload(mesh);
     }
 
-    void updateCut(KgeoPreview& preview, kenshin::backend::IRenderBackend* backend,
+    void updateCut(KgeoPreview& preview, kenshin::manager::MeshPool& pool,
                    const kenshin::scene::Camera& camera,
                    const kenshin::scene::CameraController& controller,
                    kenshin::u32 viewportHeight)
@@ -87,7 +79,7 @@ namespace demo
         }
         if (preview.needRebuild)
         {
-            rebuildCutMesh(preview, backend);
+            rebuildCutMesh(preview, pool);
             preview.needRebuild = false;
         }
     }

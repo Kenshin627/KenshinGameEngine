@@ -33,9 +33,9 @@ namespace backend
         bool readbackFullFrame(std::vector<u8>& rgbaOut, u32& width, u32& height) override;
         u32 createMeshBuffer(const MeshUpload& upload) override;
         void destroyMeshBuffer(u32 mesh) override;
-        void drawMesh(const MeshDraw& draw) override;
-        bool stageBaselineShaders(const u32* vsSpirv, usize vsBytes,
-                                  const u32* fsSpirv, usize fsBytes) override;
+        u32 createGraphicsPipeline(const GraphicsPipelineInfo& info) override;
+        void destroyGraphicsPipeline(u32 pipeline) override;
+        void draw(u32 pipeline, u32 mesh, const DrawData& data) override;
 
     private:
         struct Impl;
@@ -50,8 +50,6 @@ namespace backend
         struct MeshResourceOpaque; // defined in the .cpp
         void destroyMeshResourceInternal(MeshResourceOpaque& raw);
         void ensureViewportDepth(u32 width, u32 height);
-        void ensureBaselinePipeline();
-        struct Impl;
     };
 
 } // namespace backend

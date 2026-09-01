@@ -46,7 +46,10 @@ add_library(kenshin_engine STATIC
     src/core/Window.cpp
     src/DebugOverlay.cpp
     src/Engine.cpp
+    src/manager/MeshPool.cpp
     src/manager/ShaderManager.cpp
+    src/renderer/BaselineForwardPipeline.cpp
+    src/renderer/Renderer.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpWriter.cpp

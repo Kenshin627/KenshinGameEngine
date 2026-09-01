@@ -17,6 +17,11 @@ KENSHIN_NS_BEGIN
 namespace assets
 {
 
+    /// GPU-side mesh identifier: the currency of the draw stream. MeshPool
+    /// issues them (upload), DrawItem carries them, the renderer layer draws.
+    using MeshHandle = u32;
+    inline constexpr MeshHandle kInvalidMeshHandle = 0xFFFFFFFFu;
+
     struct MeshData
     {
         std::vector<f32> positions; // 3 per vertex

@@ -63,5 +63,7 @@
 （随手记，格式：`- [ ] 事项 —— 备注/日期`）
 
 - [ ] （示例）调研 clusterlod.h 的 clodConfig 各参数含义 —— 对应 S3.1
+- [ ] RenderView 抽象（多视口/多窗口时引入；Filament View=Scene+Camera、renderEngine RenderView 同位）—— 2026-09-01 Renderer/IRenderPipeline 落地时明确推迟
+- [ ] RenderGraph（pass 图 + 资源生命周期 + 调度；参照 Frostbite FrameGraph / UE RDG / Godot RDG；UI 合成届时从 backend endFrame 上移为真 pass）—— M2 多 pass 化时引入
 - [ ] Input 迁入子系统容器（当前 static 单例被 Window 的 WndProc 直接喂数据，解耦需动消息泵）—— 2026-09-01 子系统容器落地时评估
 - [ ] VulkanBackend：drawMesh 每 draw 独立 rendering scope，color 附件跨 scope 无屏障（实践可行但不合规范）—— 合并为每帧单一 rendering scope（beginScene/endScene）—— 2026-09-01 深度遮挡 bug 修复时遗留

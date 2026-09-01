@@ -146,24 +146,48 @@ namespace backend
             const u32* indices = nullptr;
             u32 indexCount = 0;
         };
-        struct MeshDraw
-        {
-            u32 mesh = kInvalidMeshHandle;
-            f32 viewProj[16];     // column-major mat4 (glm layout)
-            f32 kd[4];            // material diffuse RGBA
-            f32 lightDir[4] = {0.4f, 0.7f, -0.5f, 0.0f}; // TO light, world
-            f32 camPos[4] = {};   // world-space camera position (specular)
-        };
         /// Upload a mesh (staging copy, one-time). Returns handle or kInvalidMeshHandle.
         virtual u32 createMeshBuffer(const MeshUpload& upload) = 0;
         virtual void destroyMeshBuffer(u32 mesh) = 0;
-        /// Stage VS/FS SPIR-V for the internal baseline pipeline (created
-        /// lazily on first draw).
-        virtual bool stageBaselineShaders(const u32* vsSpirv, usize vsBytes,
-                                          const u32* fsSpirv, usize fsBytes) = 0;
+
+        // ---- graphics pipelines (renderer layer defines, backend translates) ---
+        /// Pipeline state enums — renderer-layer policy; translated to the
+        /// native API inside the backend (UE RHI / Godot RenderingDevice cut).
+        enum class CompareOp { Never, Less, Equal, LessOrEqual, Greater, NotEqual, GreaterOrEqual, Always };
+        enum class CullMode  { None, Back, Front };
+        enum class FrontFace { CounterClockwise, Clockwise };
+
+        /// One graphics pipeline = a shader pair + fixed-function state.
+        /// Vertex input is the engine-wide SOA PNU layout (see MeshUpload).
+        struct GraphicsPipelineInfo
+        {
+            const u32* vsSpirv = nullptr;
+            usize vsBytes = 0;
+            const u32* fsSpirv = nullptr;
+            usize fsBytes = 0;
+            bool depthTest = true;
+            bool depthWrite = true;
+            CompareOp depthCompare = CompareOp::Less;
+            CullMode cullMode = CullMode::Back;
+            FrontFace frontFace = FrontFace::CounterClockwise;
+        };
+        static constexpr u32 kInvalidPipelineHandle = 0xFFFFFFFFu;
+        /// Compile SPIR-V + build the pipeline. Returns handle or
+        /// kInvalidPipelineHandle on failure.
+        virtual u32 createGraphicsPipeline(const GraphicsPipelineInfo& info) = 0;
+        virtual void destroyGraphicsPipeline(u32 pipeline) = 0;
+
+        /// Per-draw push payload (row-major 4x4 as the Slang shaders read it).
+        struct DrawData
+        {
+            f32 viewProj[16];   // column-major mat4 (glm layout)
+            f32 kd[4];          // material diffuse RGBA
+            f32 lightDir[4];    // TO light, world
+            f32 camPos[4];      // world-space camera position (specular)
+        };
         /// Record an opaque draw into the CURRENT frame's viewport target.
         /// Must be called between beginFrame() and endFrame(); depth-tested.
-        virtual void drawMesh(const MeshDraw& draw) = 0;
+        virtual void draw(u32 pipeline, u32 mesh, const DrawData& data) = 0;
     };
 
     /// Factory implemented by the Vulkan backend (src/backend/).
