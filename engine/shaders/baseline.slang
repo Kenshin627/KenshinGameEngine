@@ -49,7 +49,11 @@ float4 fsMain(VSOutput input) : SV_Target
 
     const float ndl = max(0.0, dot(n, l));
     const float ndh = max(0.0, dot(n, h));
-    const float specular = pow(ndh, 48.0) * 0.35;
+    // Gate the specular by the light side: without this, h = normalize(l+v)
+    // still yields ndh > 0 on surfaces facing AWAY from the light, firing a
+    // bright backside highlight on shadowed geometry (the "back faces show"
+    // artifact on the knot's far strands).
+    const float specular = pow(ndh, 48.0) * 0.35 * (dot(n, l) > 0.0 ? 1.0 : 0.0);
 
     // Ambient + diffuse + Blinn-Phong specular.
     const float3 color = push.kd.rgb * (0.15 + 0.85 * ndl) + specular;
