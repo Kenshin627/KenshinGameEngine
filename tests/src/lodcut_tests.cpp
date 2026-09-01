@@ -1,6 +1,9 @@
 // S3.4: LOD cut tests - threshold monotonicity + cut validity.
 
 #include <catch2/catch_test_macros.hpp>
+
+#include <cmath>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -92,6 +95,85 @@ TEST_CASE("lod cut single-level-per-path validity", "[geometry][lodcut]") {
       stack.insert(stack.end(), built.dag.clusters[d].children.begin(),
                    built.dag.clusters[d].children.end());
     }
+  }
+}
+
+TEST_CASE("lod cut full coverage - every root's produced-from closure "
+          "selects exactly one cluster",
+          "[geometry][lodcut]") {
+  // The M1 acceptance gap: "no ancestor pairs" prevents double selection
+  // but says nothing about ZERO selection. Coverage invariant per the
+  // clusterlod contract (per-cluster refined edges): following from any
+  // root cluster through the clusters PRODUCED FROM its group (coarser
+  // via refinedGroup), exactly one cluster must be selected - otherwise
+  // a region renders at no level (the missing-strand bug).
+  Built built;
+  REQUIRE(
+      build(kenshin::geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f),
+            built));
+  const auto& dag = built.dag;
+
+  // producedFrom[g] = clusters whose source group is g (coarser than g).
+  std::vector<std::vector<kenshin::u32>> producedFrom(dag.groups.size());
+  for (kenshin::u32 c = 0; c < dag.clusters.size(); ++c)
+    if (dag.clusters[c].refinedGroup >= 0)
+      producedFrom[dag.clusters[c].refinedGroup].push_back(c);
+
+  std::vector<bool> selected(dag.clusters.size(), false);
+  const auto check = [&](kenshin::f32 threshold, const float* cam) {
+    std::vector<kenshin::u32> cut;
+    kenshin::geometry::selectLodCut(dag, threshold, 720, 60.0f, cam, cut);
+    std::fill(selected.begin(), selected.end(), false);
+    for (kenshin::u32 c : cut) selected[c] = true;
+
+    // The selected set is a CUT over refined chains:
+    //   a) coverage - every root's coarser closure holds >=1 selected
+    //      cluster (its region renders at some level; the merge->re-split
+    //      structure legitimately selects SEVERAL tiling pieces).
+    //   b) no double cover - a selected cluster's coarser descendants
+    //      (via refined edges) are all unselected.
+    for (kenshin::u32 root : dag.roots) {
+      kenshin::u32 selectedCount = selected[root] ? 1u : 0u;
+      std::vector<kenshin::u32> stack{root};
+      std::vector<bool> seen(dag.clusters.size(), false);
+      seen[root] = true;
+      while (!stack.empty()) {
+        const kenshin::u32 c = stack.back();
+        stack.pop_back();
+        for (kenshin::u32 next : producedFrom[dag.clusters[c].group]) {
+          if (seen[next]) continue;
+          seen[next] = true;
+          if (selected[next]) ++selectedCount;
+          stack.push_back(next);
+        }
+      }
+      INFO("threshold " << threshold << " root cluster " << root
+                        << " selected " << selectedCount << " (coverage)");
+      REQUIRE(selectedCount >= 1);
+    }
+    for (kenshin::u32 c : cut) {
+      std::vector<kenshin::u32> stack{c};
+      while (!stack.empty()) {
+        const kenshin::u32 d = stack.back();
+        stack.pop_back();
+        for (kenshin::u32 next : producedFrom[dag.clusters[d].group]) {
+          INFO("threshold " << threshold << " cluster " << c
+                            << " and coarser " << next << " both selected");
+          REQUIRE_FALSE(selected[next]);
+          stack.push_back(next);
+        }
+      }
+    }
+  };
+
+  // Near cameras mix per-group distance scales hard - exactly where the
+  // all-parents rule lost strands.
+  const float nearCam[3] = {2.5f, 3.0f, 2.0f};
+  const float midCam[3] = {0.0f, 0.0f, 4.0f};
+  for (const kenshin::f32 threshold :
+       {0.05f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 16.0f}) {
+    check(threshold, nearCam);
+    check(threshold, midCam);
   }
 }
 

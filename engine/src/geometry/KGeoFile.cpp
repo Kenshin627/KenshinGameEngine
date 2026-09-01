@@ -54,7 +54,7 @@ struct ClusterDisk {
   u32 childOffset;
   u32 childCount;
   u32 isRoot;
-  u32 pad;
+  u32 refinedGroup;  // clodCluster::refined, 0xFFFFFFFF = -1
 };
 #pragma pack(pop)
 
@@ -119,7 +119,9 @@ bool writeKGeo(const std::string& path, const ClusterDag& dag,
         .childOffset = static_cast<u32>(childIndices.size()),
         .childCount = static_cast<u32>(src.children.size()),
         .isRoot = src.isRoot ? 1u : 0u,
-        .pad = 0,
+        .refinedGroup = src.refinedGroup < 0
+                            ? 0xFFFFFFFFu
+                            : static_cast<u32>(src.refinedGroup),
     };
     childIndices.insert(childIndices.end(), src.children.begin(),
                         src.children.end());
@@ -245,6 +247,9 @@ bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log) {
         childIndices.begin() + src.childOffset,
         childIndices.begin() + src.childOffset + src.childCount);
     dst.isRoot = src.isRoot != 0;
+    dst.refinedGroup = src.refinedGroup == 0xFFFFFFFFu
+                           ? -1
+                           : static_cast<i32>(src.refinedGroup);
   }
   dag.sourceVertexCount = header.sourceVertexCount;
   dag.sourceTriangleCount = header.sourceTriangleCount;

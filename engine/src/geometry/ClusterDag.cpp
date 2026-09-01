@@ -54,6 +54,7 @@ bool assembleClusterDag(const assets::MeshData& mesh,
 
       DagCluster node;
       node.group = g;
+      node.refinedGroup = cluster.parentGroupId;  // clodCluster::refined
       for (int k = 0; k < 4; ++k)
         node.boundsSphere[k] = cluster.boundsCenter[k];
       node.error = cluster.error;
@@ -152,6 +153,29 @@ bool assembleClusterDag(const assets::MeshData& mesh,
       const f32 raised = std::max(dag.clusters[c].error, group.maxError);
       if (raised > dag.clusters[c].parentError) ++stats.monotonicFixes;
       dag.clusters[c].parentError = raised;
+    }
+  }
+
+  // Pass 5 (Nanite build-time dominance, Karis SIGGRAPH 2021: "modify the
+  // parent's stored error AND projected bounds, both >= child's"): a
+  // coarser group's bounds sphere and simplify error must dominate every
+  // finer group's (DagGroup.parents points to the FINER groups that
+  // refined into this one). The runtime cut evaluates each node against
+  // ITS OWN projected error/threshold; monotone stored data makes that
+  // projection monotone along chains for ANY view, so the first-fireable
+  // level exists everywhere (full coverage) by construction. Pass 3 only
+  // unions SAME-LEVEL member spheres - a parent sphere that misses a
+  // child's pokes breaks the monotonicity and left whole strands
+  // unselected. Groups are emitted in non-decreasing coarsening depth and
+  // parent edges point to lower indices, so one forward pass reads
+  // already-raised spheres.
+  for (u32 g = 0; g < dag.groups.size(); ++g) {
+    DagGroup& group = dag.groups[g];
+    for (u32 parentGroup : group.parents) {
+      const DagGroup& finer = dag.groups[parentGroup];
+      group.boundsSphere = unionSphere(group.boundsSphere, finer.boundsSphere);
+      group.simplifyError = std::max(group.simplifyError, finer.simplifyError);
+      group.maxError = std::max(group.maxError, finer.maxError);
     }
   }
 

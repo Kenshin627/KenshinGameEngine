@@ -40,6 +40,14 @@ struct DagCluster {
   u32 group = 0;              // -> ClusterDag::groups
   std::vector<u32> children;  // finer clusters this one replaces
   bool isRoot = false;        // no parent (level-0 refinement target)
+
+  // clodCluster::refined: THE group this cluster was produced from during
+  // simplification (-1 = original geometry). The cut's second condition
+  // checks ONLY this source (clusterlod.h contract) - per-cluster, fully
+  // local/parallel. The all-parents union lives on the group (parents) for
+  // traversal only; judging a cluster by ALL parents' thresholds blocks it
+  // for regions its own source could still cover (the missing-strand bug).
+  i32 refinedGroup = -1;
 };
 
 /// One group: clusters that must make identical LOD decisions.

@@ -40,31 +40,38 @@ void selectLodCut(const ClusterDag& dag, f32 pixelThreshold, u32 viewHeight,
         worldErrorAt(pixelThreshold, viewHeight, fovYDeg, distance);
   }
 
-  // Render rule (clusterlod semantics, from its header):
-  //   1. own group's simplifyError > T  (coarsening further would be
-  //      too lossy; FLT_MAX on terminal groups always passes)
-  //   2. every refined (finer parent) group's simplifyError <= T
-  //      (the coarsening that produced this level was acceptable)
-  // clusterlod's error merging already makes simplifyError monotonic
-  // along a chain, so exactly one level crosses the threshold ->
-  // crack-free cut by construction.
+  // Render rule (Nanite SIGGRAPH 2021 "cutting the DAG", Karis slides
+  // 62-66; clusterlod semantics): a cluster renders when it is the FIRST
+  // (finest) level on its chains that fires:
+  //   fireable(G) = simplifyError(G) > T_G   [node property: own stored
+  //                                     error, own distance-scaled threshold]
+  //   select(G) = fireable(G) AND every direct parent !fireable
+  // ("parent says no, child says yes" - fully local, no path context.)
+  // EVERY comparison uses its OWN node's threshold: fireable stays a pure
+  // node property, so multi-parent DAG nodes cannot be judged
+  // inconsistently by different children. Build-time monotonicity (parent
+  // error AND bounds >= child's) makes fireable monotone along chains ->
+  // the first-fireable level exists on every chain (terminals hold
+  // FLT_MAX) -> full coverage, exactly-once selection, by construction.
+  // [Bug this fixed: judging parents against the CHILD's threshold let a
+  //  parent fail its child's check while passing its own -> neither
+  //  selected -> a whole strand of the knot vanished at threshold 1.0.]
+  std::vector<bool> fireable(dag.groups.size());
+  for (usize g = 0; g < dag.groups.size(); ++g)
+    fireable[g] = dag.groups[g].simplifyError > thresholdOf[g];
+
   for (u32 c = 0; c < dag.clusters.size(); ++c) {
     const DagCluster& cluster = dag.clusters[c];
-    const DagGroup& group = dag.groups[cluster.group];
-
-    // Per-CLUSTER threshold (own bounds distance) for BOTH
-    // conditions - mixing different groups' distance-scaled
-    // thresholds breaks the crossing logic and leaves holes on
-    // paths where no level fires.
-    const f32 worldThreshold = thresholdOf[cluster.group];
-    if (!(group.simplifyError > worldThreshold)) continue;
-    bool parentsAcceptable = true;
-    for (u32 parentGroup : group.parents)
-      if (dag.groups[parentGroup].simplifyError > worldThreshold) {
-        parentsAcceptable = false;
-        break;
-      }
-    if (parentsAcceptable) outClusters.push_back(c);
+    if (!fireable[cluster.group]) continue;
+    // Condition 2 is PER-CLUSTER and checks ONLY this cluster's source
+    // group (clusterlod.h: "cluster.refined is -1 or simplified for
+    // groups[cluster.refined] is at or under threshold"). Judging by ALL
+    // parent groups blocks a cluster for regions its own source covers -
+    // sibling parents straddling the threshold left whole strands
+    // unrendered.
+    if (cluster.refinedGroup >= 0 && fireable[cluster.refinedGroup])
+      continue;
+    outClusters.push_back(c);
   }
 
   // Fallback: pathological thresholds never select - render roots.
