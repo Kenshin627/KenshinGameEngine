@@ -189,6 +189,28 @@ class IRenderBackend {
   /// Must be called between beginFrame() and endFrame(); depth-tested.
   virtual void draw(u32 pipeline, u32 mesh, const DrawData& data) = 0;
 
+  // ---- general device buffers (GPU Scene / compute paths) -----------
+  /// Usage flags (bitfield). Storage = SSBO binding (the virtual geometry
+  /// pipeline's currency); Uniform for small constant blocks; TransferSrc
+  /// lets a buffer feed later copies.
+  enum BufferUsage : u32 { BufferStorage = 0x1, BufferUniform = 0x2, BufferTransferSrc = 0x4 };
+  struct BufferDesc {
+    usize size = 0;
+    u32 usage = BufferStorage;
+    const void* initialData = nullptr;  // one-shot upload when non-null
+    const char* debugName = nullptr;    // RenderDoc-visible when set
+  };
+  static constexpr u32 kInvalidBufferHandle = 0xFFFFFFFFu;
+  /// Create a device-local buffer (optionally filled). Returns handle or
+  /// kInvalidBufferHandle on failure.
+  virtual u32 createBuffer(const BufferDesc& desc) = 0;
+  /// Deferred destruction (safe while frames are in flight).
+  virtual void destroyBuffer(u32 buffer) = 0;
+  /// Blocking readback of a byte range (verification paths). Returns false
+  /// on failure.
+  virtual bool readbackBuffer(u32 buffer, usize offset, usize bytes,
+                              std::vector<u8>& out) = 0;
+
   // ---- GPU timing (debug overlay readout) ---------------------------
   /// Last completed frame's GPU timings. Zeroes when unsupported (queue
   /// family without timestampValidBits).

@@ -45,6 +45,7 @@ add_library(kenshin_engine STATIC
     src/backend/vulkan/Readback.cpp
     src/backend/vulkan/PipelineStore.cpp
     src/backend/vulkan/MeshStore.cpp
+    src/backend/vulkan/BufferStore.cpp
     src/backend/vulkan/DescriptorCache.cpp
     src/backend/vulkan/UploadEngine.cpp
     src/core/Input.cpp
@@ -57,6 +58,7 @@ add_library(kenshin_engine STATIC
     src/manager/ShaderManager.cpp
     src/renderer/BaselineForwardPipeline.cpp
     src/renderer/Renderer.cpp
+    src/renderer/VirtualGeometryScene.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpWriter.cpp

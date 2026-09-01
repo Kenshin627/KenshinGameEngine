@@ -25,6 +25,7 @@
 #include "kenshin/manager/MeshPool.h"
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/renderer/Renderer.h"
+#include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/scene/Camera.h"
 #include "kenshin/scene/CameraController.h"
 #include "kenshin/util/BmpWriter.h"
@@ -161,6 +162,17 @@ int main(int argc, char** argv) {
     if (demo::loadKgeo(args.kgeo, kgeoPreview, kgeoLog)) {
       kgeoMode = true;
       kgeoPreview.pixelThreshold = args.lodThreshold;
+
+      // S4.1: the dag also goes to the GPU-resident virtual geometry
+      // pools (cluster/group tables + shared vertex/index pools), CRC
+      // round-trip verified at upload. The S4.2+ culling passes consume
+      // these; rendering still runs the CPU-cut path until S4.5.
+      auto& vgScene =
+          engine.registerSubsystem<kenshin::renderer::VirtualGeometryScene>();
+      const kenshin::u32 vgMeshId = vgScene.addMesh(kgeoPreview.dag);
+      vgScene.flushPools();
+      vgScene.setInstances(
+          {kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}});
       overlay.setExtraPanel(
           [&kgeoPreview] { demo::drawLodPanel(kgeoPreview); });
       KENSHIN_INFO("[kgeo] loaded: {} clusters / {} groups / {} levels",

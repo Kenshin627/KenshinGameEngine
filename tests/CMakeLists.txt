@@ -11,6 +11,7 @@ find_package(Catch2 CONFIG REQUIRED)
 add_executable(kenshin_tests
     src/assets_tests.cpp
     src/clod_tests.cpp
+    src/crc32_tests.cpp
     src/dag_tests.cpp
     src/engine_tests.cpp
     src/kgeo_tests.cpp
