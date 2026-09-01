@@ -1312,10 +1312,13 @@ namespace backend
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             .polygonMode = VK_POLYGON_MODE_FILL,
             .cullMode = VK_CULL_MODE_BACK_BIT,
-            // Mesh convention is CCW in object space (staged-plan 0.5); the
-            // projection's clip-space Y flip inverts rasterized winding, so
-            // the rasterizer's front face is CLOCKWISE.
-            .frontFace = VK_FRONT_FACE_CLOCKWISE,
+            // Mesh convention is CCW in object space (staged-plan 0.5) and
+            // it STAYS CCW in rasterizer space: the projection's clip-space
+            // Y negation and Vulkan's NDC->viewport Y mapping each flip once
+            // (two flips cancel). User-verified fix; my earlier single-flip
+            // derivation of CLOCKWISE was wrong and closed-mesh renders
+            // couldn't distinguish it (both cull a closed surface plausibly).
+            .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
             .lineWidth = 1.0f,
         };
         const VkPipelineMultisampleStateCreateInfo multisample {
