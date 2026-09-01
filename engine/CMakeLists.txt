@@ -51,6 +51,14 @@ add_library(kenshin_engine STATIC
 )
 add_library(kenshin::engine ALIAS kenshin_engine)
 
+# List headers as sources so the VS solution explorer shows them, and group
+# sources+headers by their real folder tree (filters mirror the layout).
+file(GLOB_RECURSE KENSHIN_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h)
+target_sources(kenshin_engine PRIVATE ${KENSHIN_HEADERS})
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/include PREFIX "Header Files" FILES ${KENSHIN_HEADERS})
+file(GLOB_RECURSE KENSHIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/src PREFIX "Source Files" FILES ${KENSHIN_SOURCES})
+
 target_compile_features(kenshin_engine PUBLIC cxx_std_20)
 
 target_include_directories(kenshin_engine PUBLIC
