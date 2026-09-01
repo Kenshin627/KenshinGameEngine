@@ -29,19 +29,19 @@ namespace geometry
 
         for (const Face& f : faces)
         {
-            const auto center = [&](const f32* d) {
-                f32 c[3] = {0, 0, 0};
+            const auto center = [&](const f32* d, f32 (&out)[3]) {
+                out[0] = out[1] = out[2] = 0.0f;
                 for (int axis = 0; axis < 3; ++axis)
                 {
                     const int a = d[axis] != 0.0f ? axis : -1;
                     if (a >= 0)
-                        c[a] = d[a] * he[a];
+                        out[a] = d[a] * he[a];
                 }
-                return c;
             };
-            const f32 cr[3] = {center(f.r)[0], center(f.r)[1], center(f.r)[2]};
-            const f32 cs[3] = {center(f.s)[0], center(f.s)[1], center(f.s)[2]};
-            const f32 ct[3] = {center(f.t)[0], center(f.t)[1], center(f.t)[2]};
+            f32 cr[3], cs[3], ct[3];
+            center(f.r, cr);
+            center(f.s, cs);
+            center(f.t, ct);
             const f32 corners[4][3] = {
                 {cr[0] - cs[0] - ct[0], cr[1] - cs[1] - ct[1], cr[2] - cs[2] - ct[2]},
                 {cr[0] + cs[0] - ct[0], cr[1] + cs[1] - ct[1], cr[2] + cs[2] - ct[2]},
