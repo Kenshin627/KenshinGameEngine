@@ -49,8 +49,6 @@ class VulkanBackend final : public IRenderBackend {
   void ensureViewportTextures();
   /// (Re)create the full-frame capture staging buffer on size change.
   void ensureCaptureStaging(u32 width, u32 height);
-  struct MeshResourceOpaque;  // defined in the .cpp
-  void destroyMeshResourceInternal(MeshResourceOpaque& raw);
   void ensureViewportDepth(u32 width, u32 height);
 };
 

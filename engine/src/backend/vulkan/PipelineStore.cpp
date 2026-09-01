@@ -1,0 +1,312 @@
+#include "PipelineStore.h"
+
+#include "Vk.h"
+#include "kenshin/core/Log.h"
+
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
+
+KENSHIN_NS_BEGIN
+
+namespace backend {
+
+namespace {
+VkCompareOp toVk(IRenderBackend::CompareOp op) {
+  using Op = IRenderBackend::CompareOp;
+  switch (op) {
+    case Op::Never:
+      return VK_COMPARE_OP_NEVER;
+    case Op::Less:
+      return VK_COMPARE_OP_LESS;
+    case Op::Equal:
+      return VK_COMPARE_OP_EQUAL;
+    case Op::LessOrEqual:
+      return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case Op::Greater:
+      return VK_COMPARE_OP_GREATER;
+    case Op::NotEqual:
+      return VK_COMPARE_OP_NOT_EQUAL;
+    case Op::GreaterOrEqual:
+      return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    default:
+      return VK_COMPARE_OP_ALWAYS;
+  }
+}
+VkCullModeFlags toVk(IRenderBackend::CullMode mode) {
+  using M = IRenderBackend::CullMode;
+  switch (mode) {
+    case M::None:
+      return VK_CULL_MODE_NONE;
+    case M::Front:
+      return VK_CULL_MODE_FRONT_BIT;
+    default:
+      return VK_CULL_MODE_BACK_BIT;
+  }
+}
+VkFrontFace toVk(IRenderBackend::FrontFace face) {
+  return face == IRenderBackend::FrontFace::Clockwise
+             ? VK_FRONT_FACE_CLOCKWISE
+             : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+}
+}  // namespace
+
+bool PipelineStore::init(VkDevice device) {
+  std::vector<char> cacheData;
+  wchar_t exePath[MAX_PATH]{};
+  GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+  const auto cachePath = std::filesystem::path(exePath).parent_path() /
+                         "kenshin_pipeline.cache";
+  if (std::filesystem::exists(cachePath)) {
+    std::ifstream in(cachePath, std::ios::binary);
+    in.seekg(0, std::ios::end);
+    const std::streamsize size = in.tellg();
+    in.seekg(0, std::ios::beg);
+    if (size > 0) {
+      cacheData.resize(static_cast<usize>(size));
+      in.read(cacheData.data(), size);
+    }
+  }
+  const VkPipelineCacheCreateInfo cacheInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+      .initialDataSize = cacheData.size(),
+      .pInitialData = cacheData.data(),
+  };
+  return KE_VK(vkCreatePipelineCache(device, &cacheInfo, nullptr, &m_cache));
+}
+
+void PipelineStore::shutdown(VkDevice device) {
+  for (const Pipeline& p : m_slots) {
+    if (p.pipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(device, p.pipeline, nullptr);
+    if (p.layout != VK_NULL_HANDLE)
+      vkDestroyPipelineLayout(device, p.layout, nullptr);
+  }
+  m_slots.clear();
+  if (m_cache != VK_NULL_HANDLE) {
+    // Persist this session's driver compilations next to the exe;
+    // rebuilt pipelines hit the cache on the next launch.
+    size_t bytes = 0;
+    if (KE_VK(vkGetPipelineCacheData(device, m_cache, &bytes, nullptr)) &&
+        bytes > 0) {
+      std::vector<char> data(bytes);
+      if (KE_VK(vkGetPipelineCacheData(device, m_cache, &bytes, data.data()))) {
+        wchar_t exePath[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        const auto cachePath =
+            std::filesystem::path(exePath).parent_path() /
+            "kenshin_pipeline.cache";
+        std::ofstream out(cachePath, std::ios::binary);
+        out.write(data.data(), static_cast<std::streamsize>(bytes));
+      }
+    }
+    vkDestroyPipelineCache(device, m_cache, nullptr);
+    m_cache = VK_NULL_HANDLE;
+  }
+}
+
+PipelineStore::Pipeline PipelineStore::detach(u32 handle) {
+  if (handle == 0 || handle > m_slots.size()) return {};
+  Pipeline raw = m_slots[handle - 1];
+  m_slots[handle - 1] = {};
+  return raw;
+}
+
+bool PipelineStore::valid(u32 handle) const {
+  return handle != 0 && handle <= m_slots.size() &&
+         m_slots[handle - 1].pipeline != VK_NULL_HANDLE;
+}
+
+VkPipeline PipelineStore::pipeline(u32 handle) const {
+  return m_slots[handle - 1].pipeline;
+}
+
+VkPipelineLayout PipelineStore::layout(u32 handle) const {
+  return m_slots[handle - 1].layout;
+}
+
+u32 PipelineStore::create(VkDevice device, VkFormat colorFormat,
+                           const IRenderBackend::GraphicsPipelineInfo& info) {
+  if (info.vsSpirv == nullptr || info.vsBytes == 0 || info.fsSpirv == nullptr ||
+      info.fsBytes == 0)
+    return IRenderBackend::kInvalidPipelineHandle;
+
+  const VkPushConstantRange pushRange{
+      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+      .offset = 0,
+      .size =
+          112,  // mat4 viewProj (64) + kd (16) + lightDir (16) + camPos (16)
+  };
+  const VkPipelineLayoutCreateInfo layoutInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &pushRange,
+  };
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  KE_VK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout));
+
+  const VkShaderModuleCreateInfo vsInfo{
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = info.vsBytes,
+      .pCode = info.vsSpirv,
+  };
+  VkShaderModule vs = VK_NULL_HANDLE;
+  if (!KE_VK(vkCreateShaderModule(device, &vsInfo, nullptr, &vs))) {
+    vkDestroyPipelineLayout(device, layout, nullptr);
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
+  const VkShaderModuleCreateInfo fsInfo{
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = info.fsBytes,
+      .pCode = info.fsSpirv,
+  };
+  VkShaderModule fs = VK_NULL_HANDLE;
+  if (!KE_VK(vkCreateShaderModule(device, &fsInfo, nullptr, &fs))) {
+    vkDestroyShaderModule(device, vs, nullptr);
+    vkDestroyPipelineLayout(device, layout, nullptr);
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
+
+  const VkPipelineShaderStageCreateInfo stages[2] = {
+      VkPipelineShaderStageCreateInfo{
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = vs,
+          .pName =
+              "main",  // Slang emits OpEntryPoint "main" regardless of function name
+      },
+      VkPipelineShaderStageCreateInfo{
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = fs,
+          .pName = "main",
+      },
+  };
+
+  // SOA vertex input: three bindings (positions / normals / uvs).
+  const VkVertexInputBindingDescription bindings[3] = {
+      {0, 12, VK_VERTEX_INPUT_RATE_VERTEX},
+      {1, 12, VK_VERTEX_INPUT_RATE_VERTEX},
+      {2, 8, VK_VERTEX_INPUT_RATE_VERTEX},
+  };
+  const VkVertexInputAttributeDescription attributes[3] = {
+      {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+      {1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0},
+      {2, 2, VK_FORMAT_R32G32_SFLOAT, 0},
+  };
+  const VkPipelineRenderingCreateInfoKHR renderingInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+      .colorAttachmentCount = 1,
+      .pColorAttachmentFormats = &colorFormat,
+      .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT,
+  };
+  const VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                           VK_DYNAMIC_STATE_SCISSOR};
+  const VkPipelineDynamicStateCreateInfo dynamicState{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamicStates,
+  };
+
+  // State structs need named locals (designated initializers of
+  // temporaries can't be address-taken).
+  const VkPipelineVertexInputStateCreateInfo vertexInput{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 3,
+      .pVertexBindingDescriptions = bindings,
+      .vertexAttributeDescriptionCount = 3,
+      .pVertexAttributeDescriptions = attributes,
+  };
+  const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+  const VkPipelineViewportStateCreateInfo viewportState{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+  const VkPipelineRasterizationStateCreateInfo rasterization{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = toVk(info.cullMode),
+      .frontFace = toVk(info.frontFace),
+      .lineWidth = 1.0f,
+  };
+  const VkPipelineMultisampleStateCreateInfo multisample{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+  const VkPipelineDepthStencilStateCreateInfo depthStencil{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = info.depthTest ? VK_TRUE : VK_FALSE,
+      .depthWriteEnable = info.depthWrite ? VK_TRUE : VK_FALSE,
+      .depthCompareOp = toVk(info.depthCompare),
+      .minDepthBounds = 0.0f,
+      .maxDepthBounds = 1.0f,
+  };
+  const VkPipelineColorBlendAttachmentState blendAttachment{
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+  };
+  const VkPipelineColorBlendStateCreateInfo colorBlend{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = 1,
+      .pAttachments = &blendAttachment,
+  };
+
+  const VkGraphicsPipelineCreateInfo createInfo{
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .pNext = &renderingInfo,
+      .stageCount = 2,
+      .pStages = stages,
+      .pVertexInputState = &vertexInput,
+      .pInputAssemblyState = &inputAssembly,
+      .pViewportState = &viewportState,
+      .pRasterizationState = &rasterization,
+      .pMultisampleState = &multisample,
+      .pDepthStencilState = &depthStencil,
+      .pColorBlendState = &colorBlend,
+      .pDynamicState = &dynamicState,
+      .layout = layout,
+  };
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  if (!KE_VK(vkCreateGraphicsPipelines(device, m_cache,
+                                1, &createInfo, nullptr,
+                                &pipeline))) {
+    KENSHIN_ERROR("[vulkan] graphics pipeline creation failed");
+    vkDestroyShaderModule(device, vs, nullptr);
+    vkDestroyShaderModule(device, fs, nullptr);
+    vkDestroyPipelineLayout(device, layout, nullptr);
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
+  vkDestroyShaderModule(device, vs, nullptr);
+  vkDestroyShaderModule(device, fs, nullptr);
+
+  // Reuse a freed slot when one exists; handle = index + 1.
+  u32 handle = 0;
+  for (usize i = 0; i < m_slots.size(); ++i) {
+    if (m_slots[i].pipeline == VK_NULL_HANDLE) {
+      m_slots[i] = {layout, pipeline};
+      handle = static_cast<u32>(i + 1);
+      break;
+    }
+  }
+  if (handle == 0) {
+    m_slots.push_back({layout, pipeline});
+    handle = static_cast<u32>(m_slots.size());
+  }
+  char name[32];
+  snprintf(name, sizeof(name), "graphics-pipeline-%u", handle);
+  vkutil::setName(device, VK_OBJECT_TYPE_PIPELINE,
+                  (uint64_t)pipeline, name);
+  return handle;
+}
+
+}  // namespace backend
+
+KENSHIN_NS_END
