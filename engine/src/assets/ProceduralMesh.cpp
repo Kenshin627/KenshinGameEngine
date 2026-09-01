@@ -156,11 +156,14 @@ namespace assets
             // Transport the previous binormal onto this tangent plane...
             binormal = glm::normalize(binormal -
                                       tangent * glm::dot(tangent, binormal));
-            // ...and apply the distributed seam twist so ring tubeSegs
-            // coincides exactly with ring 0.
-            const f32 a = twistPerStep * static_cast<f32>(i);
+            // ...and apply the per-step seam twist increment so ring
+            // tubeSegs coincides exactly with ring 0 (total twist =
+            // tubeSegs * twistPerStep = -seamAngle). PER-STEP delta, not
+            // cumulative - a cumulative i*delta angle over-rotates
+            // quadratically and tears the seam open.
             const glm::vec3 side = glm::normalize(glm::cross(tangent, binormal));
-            binormal = glm::normalize(binormal * std::cos(a) + side * std::sin(a));
+            binormal = glm::normalize(binormal * std::cos(twistPerStep) +
+                                       side * std::sin(twistPerStep));
             const glm::vec3 normal = glm::cross(binormal, tangent);
 
             for (int j = 0; j <= ringSegs; ++j)
