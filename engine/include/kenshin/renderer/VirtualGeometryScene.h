@@ -9,9 +9,9 @@
 //
 // GPU struct layouts are std430: GpuCluster = 48B exact (vec4 + 8
 // scalars, struct stride 16-aligned), GpuGroup = 32B (vec4 + 2 floats +
-// 8B pad), GpuInstance = 80B (mat4 + meshId + 12B pad). The S4.2+
-// shaders must mirror these layouts exactly - they are declared once
-// here on purpose.
+// 8B pad), GpuInstance = 96B (mat4 + meshId + 12B pad + world bounds
+// vec4). The S4.x shaders must mirror these layouts exactly - they are
+// declared once here on purpose.
 
 #include <glm/glm.hpp>
 
@@ -38,12 +38,18 @@ struct VgMeshRange {
   u32 clusterEnd = 0;
   u32 groupBegin = 0;
   u32 groupEnd = 0;
+  glm::vec4 boundsSphere{0.0f, 0.0f, 0.0f, -1.0f};  // union of cluster
+                                                   // bounds (instance
+                                                   // cull input)
 };
 
-/// One drawn instance: which mesh + its world transform.
+/// One drawn instance: which mesh + its world transform. `boundsSphere`
+/// is the WORLD-space cull sphere (scene computes it from the mesh
+/// bounds and the transform at setInstances time).
 struct VgInstance {
   glm::mat4 model{1.0f};
   u32 meshId = 0;
+  glm::vec4 boundsSphere{0.0f, 0.0f, 0.0f, -1.0f};
 };
 
 class VirtualGeometryScene {

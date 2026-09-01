@@ -59,6 +59,7 @@ add_library(kenshin_engine STATIC
     src/renderer/BaselineForwardPipeline.cpp
     src/renderer/Renderer.cpp
     src/renderer/VirtualGeometryScene.cpp
+    src/renderer/InstanceCullPass.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpWriter.cpp

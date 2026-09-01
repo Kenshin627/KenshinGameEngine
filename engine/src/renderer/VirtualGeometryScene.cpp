@@ -1,5 +1,6 @@
 #include "kenshin/renderer/VirtualGeometryScene.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 
@@ -125,6 +126,27 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
   m_uvs.insert(m_uvs.end(), dag.uvs.begin(), dag.uvs.end());
   m_indices.insert(m_indices.end(), dag.indices.begin(), dag.indices.end());
 
+  // Mesh cull sphere: union of the level-0 (finest) clusters' bounds -
+  // the instance cull input (setInstances transforms it per instance).
+  {
+    glm::vec4 bounds(0.0f, 0.0f, 0.0f, -1.0f);
+    for (u32 c = 0; c < dag.clusters.size(); ++c) {
+      const glm::vec4 bs(dag.clusters[c].boundsSphere);
+      const glm::vec3 pa(bounds), pb(bs);
+      const f32 d = glm::distance(pa, pb);
+      if (bounds.w < 0.0f)
+        bounds = bs;
+      else if (d + bounds.w < bs.w)
+        bounds = bs;
+      else if (d + bs.w > bounds.w) {
+        const glm::vec3 dir = d > 0.0f ? (pb - pa) / d : glm::vec3(0.0f);
+        bounds = glm::vec4(pa + dir * (d + bounds.w - bs.w) * 0.5f,
+                           (bounds.w + bs.w + d) * 0.5f);
+      }
+    }
+    range.boundsSphere = bounds;
+  }
+
   m_meshRanges.push_back(range);
   m_poolsDirty = true;
   return static_cast<u32>(m_meshRanges.size() - 1);
@@ -134,13 +156,28 @@ void VirtualGeometryScene::setInstances(
     const std::vector<VgInstance>& instances) {
   if (m_backend == nullptr) return;
 
-  // std430 GpuInstance: mat4 (64B) + meshId (4B) + 12B pad = 80B.
-  std::vector<u8> data(instances.size() * 80);
+  // std430 GpuInstance (96B): mat4 (64B) + meshId (4B) + 12B pad +
+  // world bounds vec4 (16B, offset 80). When the caller passes a
+  // negative-radius sphere the scene derives it from the mesh bounds
+  // and the transform (center transformed, radius scaled by the max
+  // column length - conservative for non-uniform scales).
+  std::vector<u8> data(instances.size() * 96);
   for (usize i = 0; i < instances.size(); ++i) {
-    u8* ptr = data.data() + i * 80;
+    u8* ptr = data.data() + i * 96;
     std::memcpy(ptr + 0, &instances[i].model, 64);
     std::memcpy(ptr + 64, &instances[i].meshId, 4);
     std::memset(ptr + 68, 0, 12);
+    glm::vec4 world = instances[i].boundsSphere;
+    if (world.w < 0.0f) {
+      const VgMeshRange& mesh = m_meshRanges[instances[i].meshId];
+      const glm::mat4& m = instances[i].model;
+      const glm::vec3 c = glm::vec3(mesh.boundsSphere);
+      const f32 scale =
+          std::max({glm::length(m[0]), glm::length(m[1]), glm::length(m[2])});
+      world = glm::vec4(glm::vec3(m * glm::vec4(c, 1.0f)),
+                        mesh.boundsSphere.w * scale);
+    }
+    std::memcpy(ptr + 80, &world, 16);
   }
 
   if (m_instanceBuffer != backend::IRenderBackend::kInvalidBufferHandle)
