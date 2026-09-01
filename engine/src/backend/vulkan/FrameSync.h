@@ -22,12 +22,14 @@ constexpr u32 kMaxFramesInFlight = 2;
 struct FrameSlot {
   VkCommandPool commandPool = VK_NULL_HANDLE;
   VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+  // Binary on purpose: WSI requires binary semaphores for acquire/present
+  // (Khronos swapchain-semaphore-reuse guidance). All non-WSI frame sync
+  // rides the single device timeline semaphore below.
   VkSemaphore imageAvailable =
       VK_NULL_HANDLE;  // signaled by acquire, consumed by submit
-  VkFence inFlight = VK_NULL_HANDLE;
   GpuImage offscreen;
   // Deferred destroys queued while this slot was recording run when the
-  // slot is reused (its fence confirmed the frame completed by then).
+  // slot is reused (the timeline wait proves the frame completed by then).
   DeletionQueue deletionQueue;
   // ImGui descriptor set sampling `offscreen` (VkImage it was created for
   // tracked so a resize recreates the set). Opaque in this header.
@@ -43,8 +45,18 @@ struct FrameSync {
   u32 lastCompleted = 0xFFFFFFFFu;
   bool anyCompleted = false;
 
+  // CPU<->GPU frame pacing: ONE timeline semaphore, submit #k signals
+  // value k; a frame waits for (k - kMaxFramesInFlight) before reusing a
+  // slot's resources. Replaces the per-slot fences (Raptor shape).
+  VkSemaphore frameTimeline = VK_NULL_HANDLE;
+  u64 timelineValue = 0;      // value of the last signaled submit
+  u64 completedValue = 0;     // timeline value of `lastCompleted`
+
   bool init(const VulkanDevice& device);
   void shutdown(const VulkanDevice& device);
+
+  /// Block the host until the timeline reaches `value`.
+  bool waitTimeline(const VulkanDevice& device, u64 value) const;
 
   /// (Re)create offscreen targets for the given size/format when they
   /// do not match. Destroys old ones first.

@@ -37,25 +37,26 @@ bool FrameSync::init(const VulkanDevice& device) {
     if (!KE_VK(vkCreateSemaphore(device.device, &semInfo, nullptr,
                           &slot.imageAvailable)))
       return false;
-
-    const VkFenceCreateInfo fenceInfo{
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-        .flags = VK_FENCE_CREATE_SIGNALED_BIT,  // first wait is a no-op
-    };
-    if (!KE_VK(vkCreateFence(device.device, &fenceInfo, nullptr, &slot.inFlight)))
-      return false;
   }
-  return true;
+
+  // The single device timeline: submit #k signals value k (see FrameSync).
+  const VkSemaphoreTypeCreateInfo timelineType{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+      .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+      .initialValue = 0,
+  };
+  const VkSemaphoreCreateInfo timelineInfo{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      .pNext = &timelineType,
+  };
+  return KE_VK(vkCreateSemaphore(device.device, &timelineInfo, nullptr,
+                                 &frameTimeline));
 }
 
 void FrameSync::shutdown(const VulkanDevice& device) {
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
     FrameSlot& slot = slots[i];
     slot.offscreen.destroy(device.allocator, device.device);
-    if (slot.inFlight != VK_NULL_HANDLE) {
-      vkDestroyFence(device.device, slot.inFlight, nullptr);
-      slot.inFlight = VK_NULL_HANDLE;
-    }
     if (slot.imageAvailable != VK_NULL_HANDLE) {
       vkDestroySemaphore(device.device, slot.imageAvailable, nullptr);
       slot.imageAvailable = VK_NULL_HANDLE;
@@ -65,6 +66,20 @@ void FrameSync::shutdown(const VulkanDevice& device) {
       slot.commandPool = VK_NULL_HANDLE;
     }
   }
+  if (frameTimeline != VK_NULL_HANDLE) {
+    vkDestroySemaphore(device.device, frameTimeline, nullptr);
+    frameTimeline = VK_NULL_HANDLE;
+  }
+}
+
+bool FrameSync::waitTimeline(const VulkanDevice& device, u64 value) const {
+  const VkSemaphoreWaitInfo wait{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+      .semaphoreCount = 1,
+      .pSemaphores = &frameTimeline,
+      .pValues = &value,
+  };
+  return KE_VK(vkWaitSemaphores(device.device, &wait, UINT64_MAX));
 }
 
 bool FrameSync::ensureOffscreens(const VulkanDevice& device, u32 width,

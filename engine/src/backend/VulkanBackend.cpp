@@ -287,8 +287,13 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
 
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
 
-  KE_VK(vkWaitForFences(impl.device.device, 1, &slot.inFlight, VK_TRUE, UINT64_MAX));
-  KE_VK(vkResetFences(impl.device.device, 1, &slot.inFlight));
+  // Frame pacing: wait for the submit kMaxFramesInFlight frames ago - this
+  // slot's command buffer and deletion queue are then provably free. (The
+  // single timeline replaces the old per-slot fences.)
+  const u64 nextTimelineValue = impl.frameSync.timelineValue + 1;
+  if (nextTimelineValue > kMaxFramesInFlight)
+    impl.frameSync.waitTimeline(impl.device,
+                                nextTimelineValue - kMaxFramesInFlight);
 
   // (Re)create per-frame offscreen targets on size/format change.
   if (!impl.frameSync.ensureOffscreens(
@@ -486,24 +491,35 @@ void VulkanBackend::endFrame() {
       .semaphore = slot.imageAvailable,
       .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
   };
-  const VkSemaphoreSubmitInfo signalSubmit{
+  const VkSemaphoreSubmitInfo presentSignal{
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
       .semaphore = impl.swapchain.presentSemaphores[impl.swapchain.imageIndex],
       .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
   };
+  // Timeline signal = frame counter (replaces the per-submit fence).
+  const u64 signalValue = impl.frameSync.timelineValue + 1;
+  const VkSemaphoreSubmitInfo timelineSignal{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+      .semaphore = impl.frameSync.frameTimeline,
+      .value = signalValue,
+      .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+  };
+  const VkSemaphoreSubmitInfo signals[2] = {presentSignal, timelineSignal};
   const VkSubmitInfo2 submit{
       .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
       .waitSemaphoreInfoCount = 1,
       .pWaitSemaphoreInfos = &waitSubmit,
       .commandBufferInfoCount = 1,
       .pCommandBufferInfos = &cmdSubmit,
-      .signalSemaphoreInfoCount = 1,
-      .pSignalSemaphoreInfos = &signalSubmit,
+      .signalSemaphoreInfoCount = 2,
+      .pSignalSemaphoreInfos = signals,
   };
-  if (!KE_VK(vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, slot.inFlight))) {
+  if (!KE_VK(vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit,
+                            VK_NULL_HANDLE))) {
     KENSHIN_ERROR("[vulkan] vkQueueSubmit2 failed");
     return;
   }
+  impl.frameSync.timelineValue = signalValue;
 
   const VkSemaphore presentWait =
       impl.swapchain.presentSemaphores[impl.swapchain.imageIndex];
@@ -526,6 +542,7 @@ void VulkanBackend::endFrame() {
 
   impl.frameSync.lastCompleted = impl.frameSync.frameIndex;
   impl.frameSync.anyCompleted = true;
+  impl.frameSync.completedValue = signalValue;
   impl.frameSync.advance();
 }
 
@@ -538,7 +555,7 @@ bool VulkanBackend::readbackFrame(std::vector<u8>& rgbaOut, u32& width,
   width = slot.offscreen.width;
   height = slot.offscreen.height;
 
-  KE_VK(vkWaitForFences(impl.device.device, 1, &slot.inFlight, VK_TRUE, UINT64_MAX));
+  impl.frameSync.waitTimeline(impl.device, impl.frameSync.completedValue);
 
   // Staging buffer (host visible) for the copy.
   const VkBufferCreateInfo bufferInfo{
@@ -947,9 +964,7 @@ bool VulkanBackend::readbackFullFrame(std::vector<u8>& rgbaOut, u32& width,
                                       u32& height) {
   Impl& impl = *m_impl;
   if (!impl.fullCaptured || impl.captureStaging == VK_NULL_HANDLE) return false;
-  KE_VK(vkWaitForFences(impl.device.device, 1,
-                  &impl.frameSync.slots[impl.frameSync.lastCompleted].inFlight,
-                  VK_TRUE, UINT64_MAX));
+  impl.frameSync.waitTimeline(impl.device, impl.frameSync.completedValue);
 
   width = impl.captureWidth;
   height = impl.captureHeight;
