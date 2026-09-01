@@ -21,6 +21,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <fstream>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -78,6 +80,11 @@ struct VulkanBackend::Impl {
   VmaAllocation depthAlloc = VK_NULL_HANDLE;
   VkImageView depthView = VK_NULL_HANDLE;
   u32 depthWidth = 0, depthHeight = 0;
+
+  // GPU timestamps + pipeline disk cache
+  bool gpuTimestamps = false;
+  f32 timestampPeriodNs = 0.0f;
+  VkPipelineCache pipelineCache = VK_NULL_HANDLE;
 
   // Graphics pipelines created through createGraphicsPipeline
   // (renderer layer defines state, this layer translates). Handle =
@@ -203,9 +210,52 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
           ? (caps.presentSupported ? "present=ok" : "present=NOT supported")
           : "present=unchecked (no window)");
 
+  // GPU timestamp support: the graphics queue family's timestampValidBits
+  // (period comes from device limits).
+  {
+    u32 familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(m_impl->context.physicalDevice,
+                                             &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(m_impl->context.physicalDevice,
+                                             &familyCount, families.data());
+    m_impl->gpuTimestamps =
+        familyCount > m_impl->context.graphicsFamily &&
+        families[m_impl->context.graphicsFamily].timestampValidBits > 0;
+    m_impl->timestampPeriodNs = m_impl->context.props.limits.timestampPeriod;
+  }
+
+  // Pipeline disk cache: loads prior driver compilations, saved at
+  // shutdown next to the exe.
+  {
+    std::vector<char> cacheData;
+    wchar_t exePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    const auto cachePath = std::filesystem::path(exePath).parent_path() /
+                           "kenshin_pipeline.cache";
+    if (std::filesystem::exists(cachePath)) {
+      std::ifstream in(cachePath, std::ios::binary);
+      in.seekg(0, std::ios::end);
+      const std::streamsize size = in.tellg();
+      in.seekg(0, std::ios::beg);
+      if (size > 0) {
+        cacheData.resize(static_cast<usize>(size));
+        in.read(cacheData.data(), size);
+      }
+    }
+    const VkPipelineCacheCreateInfo cacheInfo{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+        .initialDataSize = cacheData.size(),
+        .pInitialData = cacheData.data(),
+    };
+    if (!KE_VK(vkCreatePipelineCache(m_impl->device.device, &cacheInfo,
+                                     nullptr, &m_impl->pipelineCache)))
+      return false;
+  }
+
   // Frame resources (command pools etc.) are device-level and needed by
   // windowless compute paths too.
-  if (!m_impl->frameSync.init(m_impl->device)) {
+  if (!m_impl->frameSync.init(m_impl->device, m_impl->gpuTimestamps)) {
     KENSHIN_ERROR("[vulkan] frame resources init failed");
     return false;
   }
@@ -264,6 +314,31 @@ void VulkanBackend::shutdown() {
                     m_impl->depthAlloc);
   }
   m_impl->swapchain.shutdown(m_impl->context.instance, m_impl->device.device);
+  // Persist the pipeline cache (this session's driver compilations) next
+  // to the exe; rebuilt pipelines hit the cache on the next launch.
+  if (m_impl->pipelineCache != VK_NULL_HANDLE) {
+    size_t bytes = 0;
+    if (KE_VK(vkGetPipelineCacheData(m_impl->device.device,
+                                     m_impl->pipelineCache, &bytes,
+                                     nullptr)) &&
+        bytes > 0) {
+      std::vector<char> data(bytes);
+      if (KE_VK(vkGetPipelineCacheData(m_impl->device.device,
+                                       m_impl->pipelineCache, &bytes,
+                                       data.data()))) {
+        wchar_t exePath[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        const auto cachePath =
+            std::filesystem::path(exePath).parent_path() /
+            "kenshin_pipeline.cache";
+        std::ofstream out(cachePath, std::ios::binary);
+        out.write(data.data(), static_cast<std::streamsize>(bytes));
+      }
+    }
+    vkDestroyPipelineCache(m_impl->device.device, m_impl->pipelineCache,
+                           nullptr);
+    m_impl->pipelineCache = VK_NULL_HANDLE;
+  }
   m_impl->device.shutdown();
   m_impl->context.shutdown();
 }
@@ -295,6 +370,23 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
     impl.frameSync.waitTimeline(impl.device,
                                 nextTimelineValue - kMaxFramesInFlight);
 
+  // Harvest this slot's previous timing queries (the wait above proves
+  // they completed). Guarded until every slot has recorded at least one
+  // frame: the in-frame vkCmdResetQueryPool is the first legal reset of a
+  // fresh pool, and reading never-reset queries is a validation error.
+  if (impl.gpuTimestamps && slot.timingQueries != VK_NULL_HANDLE &&
+      impl.frameSync.timelineValue >= kMaxFramesInFlight) {
+    u64 q[3] = {};
+    if (vkGetQueryPoolResults(impl.device.device, slot.timingQueries, 0, 3,
+                              sizeof(q), q, sizeof(u64),
+                              VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+      m_gpuTimings.frameMs =
+          f32(f64(q[2] - q[0]) * impl.timestampPeriodNs / 1e6);
+      m_gpuTimings.opaqueMs =
+          f32(f64(q[1] - q[0]) * impl.timestampPeriodNs / 1e6);
+    }
+  }
+
   // (Re)create per-frame offscreen targets on size/format change.
   if (!impl.frameSync.ensureOffscreens(
           impl.device, info.width, info.height, impl.swapchain.format,
@@ -325,6 +417,11 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   slot.deletionQueue.flush();
   impl.staging.beginFrame(impl.frameSync.frameIndex);
   impl.cmd.begin(slot.commandBuffer);
+  if (impl.gpuTimestamps && slot.timingQueries != VK_NULL_HANDLE) {
+    vkCmdResetQueryPool(impl.cmd.cmd(), slot.timingQueries, 0, 3);
+    vkCmdWriteTimestamp2(impl.cmd.cmd(), VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                        slot.timingQueries, 0);
+  }
 
   // Clear the offscreen target (the "rendering" of S1.3).
   CommandContext::pipelineBarrier(impl.cmd.cmd(),
@@ -389,6 +486,9 @@ void VulkanBackend::endFrame() {
   // before the UI scope opens - render passes never nest). endPass is also
   // called inside cmd.end() as a backstop; this call is the real one.
   impl.cmd.endPass();
+  if (impl.gpuTimestamps && slot.timingQueries != VK_NULL_HANDLE)
+    vkCmdWriteTimestamp2(impl.cmd.cmd(), VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                        slot.timingQueries, 1);
 
   // offscreen: COLOR_ATTACHMENT -> SHADER_READ_ONLY for the ImGui sample.
   CommandContext::pipelineBarrier(impl.cmd.cmd(),
@@ -476,6 +576,10 @@ void VulkanBackend::endFrame() {
                      VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                      VK_ACCESS_2_MEMORY_READ_BIT));
   }
+
+  if (impl.gpuTimestamps && slot.timingQueries != VK_NULL_HANDLE)
+    vkCmdWriteTimestamp2(impl.cmd.cmd(), VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                        slot.timingQueries, 2);
 
   if (!impl.cmd.end()) {
     KENSHIN_ERROR("[vulkan] vkEndCommandBuffer failed");
@@ -1331,8 +1435,8 @@ u32 VulkanBackend::createGraphicsPipeline(const GraphicsPipelineInfo& info) {
       .layout = layout,
   };
   VkPipeline pipeline = VK_NULL_HANDLE;
-  if (!KE_VK(vkCreateGraphicsPipelines(impl.device.device, VK_NULL_HANDLE, 1,
-                                &createInfo, nullptr,
+  if (!KE_VK(vkCreateGraphicsPipelines(impl.device.device, impl.pipelineCache,
+                                1, &createInfo, nullptr,
                                 &pipeline))) {
     KENSHIN_ERROR("[vulkan] graphics pipeline creation failed");
     vkDestroyShaderModule(impl.device.device, vs, nullptr);

@@ -8,7 +8,7 @@ KENSHIN_NS_BEGIN
 
 namespace backend {
 
-bool FrameSync::init(const VulkanDevice& device) {
+bool FrameSync::init(const VulkanDevice& device, bool timestamps) {
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
     FrameSlot& slot = slots[i];
 
@@ -37,6 +37,17 @@ bool FrameSync::init(const VulkanDevice& device) {
     if (!KE_VK(vkCreateSemaphore(device.device, &semInfo, nullptr,
                           &slot.imageAvailable)))
       return false;
+
+    if (timestamps) {
+      const VkQueryPoolCreateInfo queryInfo{
+          .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+          .queryType = VK_QUERY_TYPE_TIMESTAMP,
+          .queryCount = 3,
+      };
+      if (!KE_VK(vkCreateQueryPool(device.device, &queryInfo, nullptr,
+                            &slot.timingQueries)))
+        return false;
+    }
   }
 
   // The single device timeline: submit #k signals value k (see FrameSync).
@@ -64,6 +75,10 @@ void FrameSync::shutdown(const VulkanDevice& device) {
     if (slot.commandPool != VK_NULL_HANDLE) {
       vkDestroyCommandPool(device.device, slot.commandPool, nullptr);
       slot.commandPool = VK_NULL_HANDLE;
+    }
+    if (slot.timingQueries != VK_NULL_HANDLE) {
+      vkDestroyQueryPool(device.device, slot.timingQueries, nullptr);
+      slot.timingQueries = VK_NULL_HANDLE;
     }
   }
   if (frameTimeline != VK_NULL_HANDLE) {

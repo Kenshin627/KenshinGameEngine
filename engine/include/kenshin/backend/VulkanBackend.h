@@ -36,12 +36,14 @@ class VulkanBackend final : public IRenderBackend {
   u32 createGraphicsPipeline(const GraphicsPipelineInfo& info) override;
   void destroyGraphicsPipeline(u32 pipeline) override;
   void draw(u32 pipeline, u32 mesh, const DrawData& data) override;
+  GpuTimings gpuTimings() const override { return m_gpuTimings; }
 
  private:
   struct Impl;
   std::unique_ptr<Impl> m_impl;
   BackendCaps m_caps;
   bool m_shutdownDone = false;
+  GpuTimings m_gpuTimings;
 
   /// (Re)create ImGui descriptor sets when offscreen targets change.
   void ensureViewportTextures();

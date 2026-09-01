@@ -36,6 +36,11 @@ struct FrameSlot {
   void* imguiTexture = nullptr;
   VkImage imguiTextureImage = VK_NULL_HANDLE;
 
+  // GPU timing queries for this slot's frame: 0 = submission start,
+  // 1 = viewport scope close, 2 = submission end. VK_NULL_HANDLE when
+  // the queue family lacks timestamp support.
+  VkQueryPool timingQueries = VK_NULL_HANDLE;
+
   bool initialized() const { return commandPool != VK_NULL_HANDLE; }
 };
 
@@ -52,7 +57,7 @@ struct FrameSync {
   u64 timelineValue = 0;      // value of the last signaled submit
   u64 completedValue = 0;     // timeline value of `lastCompleted`
 
-  bool init(const VulkanDevice& device);
+  bool init(const VulkanDevice& device, bool timestamps);
   void shutdown(const VulkanDevice& device);
 
   /// Block the host until the timeline reaches `value`.

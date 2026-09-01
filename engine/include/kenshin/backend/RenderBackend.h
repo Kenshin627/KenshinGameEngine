@@ -188,6 +188,15 @@ class IRenderBackend {
   /// Record an opaque draw into the CURRENT frame's viewport target.
   /// Must be called between beginFrame() and endFrame(); depth-tested.
   virtual void draw(u32 pipeline, u32 mesh, const DrawData& data) = 0;
+
+  // ---- GPU timing (debug overlay readout) ---------------------------
+  /// Last completed frame's GPU timings. Zeroes when unsupported (queue
+  /// family without timestampValidBits).
+  struct GpuTimings {
+    f32 frameMs = 0.0f;   // whole submission (first to last timestamp)
+    f32 opaqueMs = 0.0f;  // first timestamp to viewport scope close
+  };
+  virtual GpuTimings gpuTimings() const = 0;
 };
 
 /// Factory implemented by the Vulkan backend (src/backend/).

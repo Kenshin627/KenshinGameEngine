@@ -33,6 +33,7 @@ bool DebugOverlay::onInit(Engine& engine) {
 
 bool DebugOverlay::init(backend::IRenderBackend* backend,
                         core::Window& window) {
+  m_backend = backend;
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
@@ -106,6 +107,10 @@ void DebugOverlay::drawStatsPanel(core::FrameStats<240>& stats) {
   ImGui::Text("std  %.3f ms", stats.stddevMs());
   ImGui::Text("max  %.3f ms", stats.maxMs());
   ImGui::Text("samples %zu", stats.count());
+  if (m_backend) {
+    const auto gpu = m_backend->gpuTimings();
+    ImGui::Text("gpu  %.3f ms (opaque %.3f)", gpu.frameMs, gpu.opaqueMs);
+  }
   ImGui::Separator();
   static float intervals[240] = {};
   kenshin::usize count = 0;

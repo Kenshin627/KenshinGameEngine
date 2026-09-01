@@ -61,6 +61,7 @@ class DebugOverlay {
 
   std::function<void()> m_extraPanel;
   glm::vec2 m_viewportSize{1280.0f, 720.0f};
+  backend::IRenderBackend* m_backend = nullptr;  // GPU timing readout
   bool m_viewportHovered = false;
 };
 
