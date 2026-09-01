@@ -22,6 +22,7 @@
 #include "kenshin/scene/Camera.h"
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include "kenshin/scene/CameraController.h"
 #include "kenshin/core/FrameStats.h"
 #include "kenshin/core/Timer.h"
@@ -59,6 +60,7 @@ namespace
         bool selftestShader = false;
         bool validation = true;   // dev default ON; --no-validation to disable
         int resizeAt = -1;                           // frame index to program-resize (S2.3)
+        bool depthProbe = false;                     // two-cube occlusion diagnostic
         std::string kgeo;                            // .kgeo virtual-geometry preview (S3.4)
         float lodThreshold = 1.0f;                   // initial LOD pixel-error threshold
         std::string cam;                             // parsed by Camera (S1.5)
@@ -92,6 +94,8 @@ namespace
                 args.mesh = argv[++i];
             else if (std::strcmp(argv[i], "--kgeo") == 0 && i + 1 < argc)
                 args.kgeo = argv[++i];
+            else if (std::strcmp(argv[i], "--depth-probe") == 0)
+                args.depthProbe = true;
             else if (std::strcmp(argv[i], "--lod-threshold") == 0 && i + 1 < argc)
                 args.lodThreshold = std::atof(argv[++i]);
             else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
@@ -836,8 +840,63 @@ int main(int argc, char** argv)
 
         // Baseline draw (S2.2): the mesh renders into the viewport target
         // between beginFrame and endFrame.
-        const kenshin::u32 activeMesh =
+        kenshin::u32 activeMesh =
             kgeoMode ? kgeoPreview.meshHandle : meshHandle;
+        // Depth diagnostic (--depth-probe): far red cube drawn AFTER a near
+        // blue cube; the near one must stay visible (LESS+clear1+ZO).
+        static kenshin::u32 probeNear = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
+        static kenshin::u32 probeFar = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
+        if (args.depthProbe && probeNear == kenshin::backend::IRenderBackend::kInvalidMeshHandle)
+        {
+            kenshin::assets::MeshData m;
+            std::string probeLog;
+            loadDemoMesh("cube", m, probeLog);
+            kenshin::backend::IRenderBackend::MeshUpload up;
+            up.positions = m.positions.data();
+            up.normals = m.normals.data();
+            up.uvs = m.uvs.data();
+            up.vertexCount = m.vertexCount();
+            up.indices = m.indices.data();
+            up.indexCount = static_cast<kenshin::u32>(m.indices.size());
+            probeNear = backend->createMeshBuffer(up);
+            probeFar = backend->createMeshBuffer(up);
+        }
+        if (args.depthProbe)
+        {
+            activeMesh = kenshin::backend::IRenderBackend::kInvalidMeshHandle;
+            for (int pass = 0; pass < 2; ++pass)
+            {
+                // near cube (z=+0.5 toward camera), far cube (z=-0.5)
+                const bool nearPass = pass == 0;
+                kenshin::scene::Camera probeCam = camera;
+                probeCam.position = nearPass
+                    ? glm::vec3(0.0f, 0.0f, 3.0f)
+                    : glm::vec3(0.0f, 0.0f, 3.0f);
+                // draw both with an identity-ish view from +Z looking at origin
+                probeCam.yawDeg = -90.0f;  // forward = (sin(-90),0,-cos(-90)) = (-1,0,0)?? no
+                // simpler: build viewProj manually: camera at (0,0,dist) looking -Z
+                const float dist = 4.0f;
+                glm::vec3 eye(0.0f, 0.0f, dist);
+                glm::vec3 fwd(0.0f, 0.0f, -1.0f);
+                glm::mat4 viewM = glm::lookAtRH(eye, eye + fwd, glm::vec3(0, 1, 0));
+                glm::mat4 projM = camera.projection(
+                    ui.viewportSize.x / glm::max(ui.viewportSize.y, 1.0f));
+                const float zOff = nearPass ? 0.75f : -0.75f;
+                glm::mat4 modelM = glm::translate(glm::mat4(1.0f), glm::vec3(nearPass ? -0.35f : 0.35f, 0.0f, zOff));
+                glm::mat4 mvp = glm::transpose(projM * viewM * modelM);
+                kenshin::backend::IRenderBackend::MeshDraw draw;
+                draw.mesh = nearPass ? probeNear : probeFar;
+                std::memcpy(draw.viewProj, &mvp, sizeof(draw.viewProj));
+                const kenshin::f32 kd[4] = {nearPass ? 0.1f : 0.9f, 0.2f,
+                                            nearPass ? 0.9f : 0.1f, 1.0f};
+                std::memcpy(draw.kd, kd, sizeof(draw.kd));
+                const kenshin::f32 light[4] = {0.0f, 0.0f, 1.0f, 0.0f};
+                std::memcpy(draw.lightDir, light, sizeof(draw.lightDir));
+                const kenshin::f32 cp[4] = {0.0f, 0.0f, dist, 0.0f};
+                std::memcpy(draw.camPos, cp, sizeof(draw.camPos));
+                backend->drawMesh(draw);
+            }
+        }
         if (activeMesh != kenshin::backend::IRenderBackend::kInvalidMeshHandle &&
             ui.viewportSize.x > 1.0f && ui.viewportSize.y > 1.0f)
         {

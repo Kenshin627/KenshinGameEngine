@@ -87,19 +87,23 @@ namespace assets
         if (p < 1 || q < 1 || tubeSegs < 3 || ringSegs < 3)
             return mesh;
 
-        // Canonical (p,q) torus knot on a torus of major radius R and
-        // minor radius r (Wikipedia parametrization): winds p times around
-        // the Y axis while crossing the tube q times. The earlier three.js
-        // transcription produced an elliptical rotating ring (constant x
-        // amplitude 0.5R, pulsing z 0.5..1.5R) - a distorted knot.
-        const f32 minorRadius = radius * 0.375f;
+        // TRUE three.js TorusKnotGeometry curve (transcribed verbatim this
+        // time; both earlier attempts misread it - quOverP varies with u,
+        // not a constant, and the main ring uses cos(u)/sin(u) with u
+        // spanning p full turns):
+        //   cu=cos(u); su=sin(u); quOverP=q/p*u; cs=cos(quOverP)
+        //   x = R*(2+cs)*0.5*cu; y = R*(2+cs)*0.5*su; z = R*sin(quOverP)*0.5
+        // NOTE: t here spans [0, p*2*pi].
         auto curve = [&](f32 t, glm::vec3& pos) {
-            const f32 cq = std::cos(q * t);
-            const f32 ring = radius + minorRadius * cq;
-            pos.x = ring * std::cos(p * t);
-            pos.y = minorRadius * std::sin(q * t);
-            pos.z = ring * std::sin(p * t);
+            const f32 cu = std::cos(t);
+            const f32 su = std::sin(t);
+            const f32 quOverP = static_cast<f32>(q) / p * t;
+            const f32 cs = std::cos(quOverP);
+            pos.x = radius * (2.0f + cs) * 0.5f * cu;
+            pos.y = radius * (2.0f + cs) * 0.5f * su;
+            pos.z = radius * std::sin(quOverP) * 0.5f;
         };
+        const f32 curveSpan = glm::pi<f32>() * 2.0f * static_cast<f32>(p);
 
         const usize vertexTotal = static_cast<usize>(tubeSegs + 1) * (ringSegs + 1);
         mesh.positions.reserve(vertexTotal * 3);
@@ -129,7 +133,7 @@ namespace assets
         glm::vec3 transported = prevBinormal;
         for (int i = 0; i < tubeSegs; ++i)
         {
-            const f32 t = static_cast<f32>(i) / tubeSegs * glm::pi<f32>() * 2.0f;
+            const f32 t = static_cast<f32>(i) / tubeSegs * curveSpan;
             glm::vec3 tangent;
             tangentAt(t, tangent);
             transported = glm::normalize(
@@ -143,7 +147,7 @@ namespace assets
         glm::vec3 binormal = prevBinormal;
         for (int i = 0; i <= tubeSegs; ++i)
         {
-            const f32 t = static_cast<f32>(i) / tubeSegs * glm::pi<f32>() * 2.0f;
+            const f32 t = static_cast<f32>(i) / tubeSegs * curveSpan;
 
             glm::vec3 p1;
             curve(t, p1);
