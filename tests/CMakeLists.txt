@@ -12,6 +12,7 @@ add_executable(kenshin_tests
     src/assets_tests.cpp
     src/clod_tests.cpp
     src/cpu_reference_cluster_cull.cpp
+    src/cpu_reference_raster.cpp
     src/cpu_reference_cull.cpp
     src/crc32_tests.cpp
     src/dag_tests.cpp
