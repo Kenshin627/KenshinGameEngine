@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <filesystem>
+#include <iterator>
 
 KENSHIN_NS_BEGIN
 
@@ -141,13 +142,30 @@ bool ShaderManager::compileFile(const std::string& path,
   // shader root); derive the module name from the file name.
   const std::string moduleName =
       std::filesystem::path(path).replace_extension().filename().string();
+  std::error_code ec;
+  std::filesystem::path resolved = path;
   if (!std::filesystem::exists(path)) {
-    std::error_code ec;
     const auto candidate = std::filesystem::path(m_shaderRoot) / path;
     if (!std::filesystem::exists(candidate, ec)) {
       log = "shader file not found: " + path;
       return false;
     }
+    resolved = candidate;
+  }
+  resolved = std::filesystem::weakly_canonical(resolved, ec);
+
+  // SPIR-V cache, keyed by (file, entry point, mtime): the one-shot chain
+  // re-compiles its four shaders on every view change, and skipping the
+  // Slang link/codegen takes that work off the interaction path. mtime in
+  // the key keeps a future hot-reload working for free; stale entries for
+  // the same file+entry are evicted on insert. Single-threaded app - no
+  // locking.
+  const i64 mtime =
+      std::filesystem::last_write_time(resolved, ec).time_since_epoch().count();
+  const auto key = SpirvCacheKey{resolved.string(), entryPoint, mtime};
+  if (const auto hit = m_spirvCache.find(key); hit != m_spirvCache.end()) {
+    spirvOut = hit->second;
+    return true;
   }
 
   slang::IBlob* diagnostics = nullptr;
@@ -223,6 +241,17 @@ bool ShaderManager::compileFile(const std::string& path,
   program->release();
   entryPointObj->release();
   if (diagnostics) diagnostics->release();
+  if (result == SLANG_OK) {
+    // Evict stale entries for the same file+entry (older mtime), then
+    // cache the fresh bytes.
+    for (auto it = m_spirvCache.begin(); it != m_spirvCache.end();) {
+      const bool stale = it->first.file == key.file &&
+                         it->first.entryPoint == key.entryPoint &&
+                         it->first.mtime != key.mtime;
+      it = stale ? m_spirvCache.erase(it) : std::next(it);
+    }
+    m_spirvCache[key] = spirvOut;
+  }
   return result == SLANG_OK;
 }
 

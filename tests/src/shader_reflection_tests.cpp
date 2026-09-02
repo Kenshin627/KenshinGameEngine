@@ -1,10 +1,9 @@
 // Slang compile + SPIR-V reflection integration (headless: Slang runs on
 // the CPU, reflection is pure parsing - no GPU or window needed).
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <kenshin/manager/ShaderManager.h>
 
+#include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
 
@@ -40,6 +39,32 @@ TEST_CASE("reflect descriptor bindings from compiled slang", "[shader]") {
 
   // Garbage input must fail cleanly, not crash.
   const std::vector<kenshin::u32> garbage{0x07230203, 0xdeadbeef};
-  REQUIRE_FALSE(
-      kenshin::manager::reflectDescriptorBindings(garbage, bindings));
+  REQUIRE_FALSE(kenshin::manager::reflectDescriptorBindings(garbage, bindings));
+}
+
+TEST_CASE("repeated compiles of one shader stay alive and cache cleanly",
+          "[shader]") {
+  // Regression for the module-cache use-after-free: loadModule caches by
+  // name without holding its own reference, so a release() per compile
+  // used to leave the NEXT compile walking freed memory. Compiling the
+  // same file repeatedly must be stable - and with the SPIR-V cache,
+  // repeats must return identical bytes.
+  kenshin::manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+
+  std::vector<kenshin::u32> first, again;
+  std::string log;
+  REQUIRE(shaders.compileFile("test_atomic.slang", first, log, "main"));
+  for (int i = 0; i < 5; ++i) {
+    REQUIRE(shaders.compileFile("test_atomic.slang", again, log, "main"));
+    REQUIRE(again == first);
+  }
+
+  // Two entry points from one file are distinct cache entries.
+  std::vector<kenshin::u32> vs, fs;
+  REQUIRE(shaders.compileFile("baseline.slang", vs, log, "vsMain"));
+  REQUIRE(shaders.compileFile("baseline.slang", fs, log, "fsMain"));
+  REQUIRE_FALSE(vs.empty());
+  REQUIRE_FALSE(fs.empty());
+  REQUIRE(vs != fs);
 }

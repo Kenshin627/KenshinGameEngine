@@ -70,7 +70,8 @@
 
 （随手记，格式：`- [ ] 事项 —— 备注/日期`）
 
-- [ ] one-shot 链入帧化（当前视角变化触发阻塞式 5 段 one-shot compute,交互帧率受限）—— S4.5 落地后,M2 后续
+- [ ] CommandContext 记 last-bound 状态（pipeline/顶点/索引缓冲），`draw()` 跳过重复绑定——当前每帧 draw 数个位数、驱动对冗余绑定有优化，纯属顺手加固；改动只在 backend 内部，不动 API —— 2026-09-02
+- [ ] one-shot 链入帧化（当前视角变化触发阻塞式 5 段 one-shot compute,交互帧率受限;运动中 VisBuffer 落后相机一帧导致剪影处闪烁/破洞,停止即恢复——链入帧+VisBuffer 按帧槽双缓冲可同时解决卡顿与错位;ShaderManager 的 SPIR-V 缓存已就位为前置）—— S4.5 落地后,M2 后续
 - [ ] 软光栅差分盲区对策：GPU/CPU 差分两边共享实现缺陷时不可见（S4.4 半像素行偏移、双重 view 两个 bug 都是 S4.5 对 HW 基线对比才暴露的）；后续可加一条 float64 独立地面真值 raster 校验 —— 2026-09-02
 - [ ] （示例）调研 clusterlod.h 的 clodConfig 各参数含义 —— 对应 S3.1
 - [ ] RenderView 抽象（多视口/多窗口时引入；Filament View=Scene+Camera、renderEngine RenderView 同位）—— 2026-09-01 Renderer/IRenderPipeline 落地时明确推迟
