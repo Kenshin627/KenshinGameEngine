@@ -42,7 +42,8 @@ struct GpuGroup
     float4 bounds;       // shared decision sphere (monotone-dominated)
     float maxError;
     float simplifyError; // FLT_MAX on terminal groups
-    float2 _pad8;
+    uint lodLevel;       // S4.6 debug views (packed into the old pad)
+    float _pad4;
 };
 
 struct GpuInstance

@@ -55,7 +55,7 @@ inline void packGpuCluster(std::vector<u8>& out, u32 group, f32 boundsX,
 
 inline void packGpuGroup(std::vector<u8>& out, f32 boundsX, f32 boundsY,
                          f32 boundsZ, f32 boundsW, f32 maxError,
-                         f32 simplifyError) {
+                         f32 simplifyError, u32 lodLevel) {
   const usize base = out.size();
   out.resize(base + 32);
   u8* p = out.data() + base;
@@ -63,7 +63,8 @@ inline void packGpuGroup(std::vector<u8>& out, f32 boundsX, f32 boundsY,
   std::memcpy(p + 0, bounds, 16);
   std::memcpy(p + 16, &maxError, 4);
   std::memcpy(p + 20, &simplifyError, 4);
-  std::memset(p + 24, 0, 8);
+  std::memcpy(p + 24, &lodLevel, 4);
+  std::memset(p + 28, 0, 4);
 }
 
 /// Mesh registry entry: where this mesh's clusters live in the shared
@@ -111,6 +112,7 @@ class VirtualGeometryScene {
   u32 clusterCount() const { return m_clusterCount; }
   u32 groupCount() const { return m_groupCount; }
   u32 instanceCount() const { return m_instanceCount; }
+  u32 maxLodLevel() const { return m_maxLodLevel; }
 
   // Buffer handles for the S4.2+ passes (bind as SSBOs).
   u32 clusterBuffer() const { return m_clusterBuffer; }
@@ -142,6 +144,7 @@ class VirtualGeometryScene {
   u32 m_clusterCount = 0;
   u32 m_groupCount = 0;
   u32 m_instanceCount = 0;
+  u32 m_maxLodLevel = 0;
 
   // Packed std430 staging accumulators (grown by addMesh, uploaded once
   // in flushPools - see the .cpp). Positions/normals are vec4 elements

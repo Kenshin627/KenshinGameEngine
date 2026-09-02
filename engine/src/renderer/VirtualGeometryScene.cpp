@@ -29,9 +29,12 @@ void appendGpuCluster(std::vector<u8>& out, const geometry::DagCluster& c) {
                  c.refinedGroup);
 }
 
-void appendGpuGroup(std::vector<u8>& out, const geometry::DagGroup& g) {
+void appendGpuGroup(std::vector<u8>& out, const geometry::DagGroup& g,
+                    u32& maxLodLevel) {
+  maxLodLevel = std::max(maxLodLevel, static_cast<u32>(g.lodLevel));
   packGpuGroup(out, g.boundsSphere.x, g.boundsSphere.y, g.boundsSphere.z,
-               g.boundsSphere.w, g.maxError, g.simplifyError);
+               g.boundsSphere.w, g.maxError, g.simplifyError,
+               static_cast<u32>(g.lodLevel));
 }
 
 /// Upload (or replace) one pool buffer; verify with a CRC round trip.
@@ -90,7 +93,8 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
 
   // Groups referenced by this mesh's clusters span [0, groups) of the
   // dag; the dag is self-contained, so the whole group table is copied.
-  for (const auto& group : dag.groups) appendGpuGroup(m_groupData, group);
+  for (const auto& group : dag.groups)
+    appendGpuGroup(m_groupData, group, m_maxLodLevel);
   m_groupCount += static_cast<u32>(dag.groups.size());
   range.groupEnd = m_groupCount;
 

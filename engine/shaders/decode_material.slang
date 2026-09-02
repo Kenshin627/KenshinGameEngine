@@ -42,13 +42,23 @@ struct GpuInstance
     float4 bounds;
 };
 
+struct GpuGroup
+{
+    float4 bounds;       // shared decision sphere
+    float maxError;
+    float simplifyError;
+    uint lodLevel;       // S4.6 debug views
+    float _pad4;
+};
+
 struct DecodePush
 {
     float4x4 viewProj;   // world -> NDC, the camera's own (Y-flipped) matrix
-    float4 camFlags;     // xyz camPos, w flags (bit0 checkerboard)
+    float4 camFlags;     // xyz camPos, w view mode (0 final, 1 LOD, 2 err,
+                         //             3 vis color, 4 checker)
     float4 lightDir;     // xyz TO light (world), w instanceCount
-    float4 kdScale;      // rgb kd, w checker scale
-    float4 viewport;     // w, h, clusterCount, indexCount
+    float4 kdScale;      // rgb kd, w max LOD level (mode 1 ramp)
+    float4 viewport;     // w, h, clusterCount, groupCount
 };
 
 [[vk::push_constant]] ConstantBuffer<DecodePush> push;
@@ -65,6 +75,7 @@ struct DecodePush
 [[vk::binding(4)]] StructuredBuffer<float4> normals;
 [[vk::binding(5)]] StructuredBuffer<float2> uvs;
 [[vk::binding(6)]] StructuredBuffer<uint> indices;
+[[vk::binding(7)]] StructuredBuffer<GpuGroup> groups;  // S4.6 debug views
 
 float2 worldToScreen(float3 w)
 {
@@ -133,6 +144,35 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     // 5b); clamp like the rest - see the clamping comment above.
     const uint instanceIdx = min(visLo & 0x1Fu, uint(push.lightDir.w) - 1u);
     const GpuCluster cluster = clusters[clusterIdx];
+    const uint viewMode = uint(push.camFlags.w + 0.5);
+
+    if (viewMode == 1u)
+    {
+        // LOD-level view: near = fine (low level) -> green, far = coarse
+        // (high level) -> red. The acceptance wants the near-far
+        // gradient visible at a glance.
+        const uint groupIdx =
+            min(cluster.group, uint(push.viewport.w) - 1u);
+        const float t = float(groups[groupIdx].lodLevel) /
+                        max(push.kdScale.w, 1.0);
+        return float4(t, 1.0 - t, 0.35 + 0.4 * t, 1.0);
+    }
+    if (viewMode == 2u)
+    {
+        // Error heatmap: log-scaled cluster error, blue (tiny) -> red.
+        const float e = clamp(log10(max(cluster.error, 1e-9)) / -6.0,
+                              0.0, 1.0);
+        return float4(1.0 - e, 0.2, 0.2 + 0.8 * e, 1.0);
+    }
+    if (viewMode == 3u)
+    {
+        // VisBuffer structure view: one hash color per triangle - seams
+        // and cluster boundaries are instantly visible.
+        uint h = (clusterIdx * 2654435761u) ^ (triIdx * 40503u);
+        h ^= h >> 13u;
+        return float4(float(h & 255u) / 255.0, float((h >> 8u) & 255u) / 255.0,
+                      float((h >> 16u) & 255u) / 255.0, 1.0);
+    }
 
     const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);
     const uint i0 = min(indices[cluster.indexOffset + tri3 + 0u],
@@ -229,7 +269,7 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const float2 dUVdy = (Ay * D - A * Dy) / (dSafe * dSafe);
 
     float3 kd = push.kdScale.rgb;
-    if (push.camFlags.w > 0.5)
+    if (viewMode == 4u)
     {
         // Checkerboard debug: analytic derivatives pick the mip-parity
         // scale (2 px cells at base) - seam integrity is then visible

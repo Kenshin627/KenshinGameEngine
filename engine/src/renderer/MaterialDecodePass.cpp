@@ -71,17 +71,19 @@ void MaterialDecodePass::draw(backend::IRenderBackend& backend,
   if (m_visCount != usize(width) * height) return;
   DecodePushC push;
   push.viewProj = viewProj;
-  push.camFlags = glm::vec4(params.camPos, params.checkerboard ? 1.0f : 0.0f);
+  push.camFlags =
+      glm::vec4(params.camPos, static_cast<f32>(static_cast<int>(params.view)));
   // w carries the instance count the shader clamps payload indices with.
   push.lightDir =
       glm::vec4(params.lightDir, static_cast<f32>(scene.instanceCount()));
-  push.kdScale = glm::vec4(params.kd, 8.0f);
-  // zw carries the pool counts the shader clamps payload indices with.
+  // w carries the max LOD level (mode 1 ramp denominator).
+  push.kdScale = glm::vec4(params.kd, static_cast<f32>(scene.maxLodLevel()));
+  // zw carry the table counts the shader clamps payload indices with.
   push.viewport = glm::vec4(static_cast<f32>(width), static_cast<f32>(height),
                             static_cast<f32>(scene.clusterCount()),
-                            static_cast<f32>(scene.indexCount()));
+                            static_cast<f32>(scene.groupCount()));
 
-  const u32 handles[7] = {
+  const u32 handles[8] = {
       m_visBuffer,
       scene.clusterBuffer(),
       scene.instanceBuffer(),
@@ -89,8 +91,9 @@ void MaterialDecodePass::draw(backend::IRenderBackend& backend,
       scene.normalBuffer(),
       scene.uvBuffer(),
       scene.indexBuffer(),
+      scene.groupBuffer(),  // S4.6 LOD-level view
   };
-  backend.drawFullscreen(m_pipeline, handles, 7, &push, sizeof(push));
+  backend.drawFullscreen(m_pipeline, handles, 8, &push, sizeof(push));
 }
 
 void MaterialDecodePass::onShutdown(backend::IRenderBackend& backend) {

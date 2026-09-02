@@ -26,11 +26,20 @@ class VirtualGeometryScene;
 
 namespace renderer {
 
+/// View mode selector (S4.6 debug views; camFlags.w carries it).
+enum class DecodeView : int {
+  Final = 0,      // Blinn-Phong, baseline-parity shading
+  LodLevel = 1,   // cluster LOD level ramp (near fine / far coarse)
+  ErrorHeat = 2,  // log-scaled cluster error heatmap
+  VisColor = 3,   // per-triangle hash color (VisBuffer structure)
+  Checker = 4,    // UV checkerboard (analytic-derivative debug)
+};
+
 struct DecodeParams {
   glm::vec3 camPos{0.0f};
   glm::vec3 lightDir{0.35f, 0.8f, 0.45f};  // TO light, world
   glm::vec3 kd{0.75f, 0.75f, 0.78f};
-  bool checkerboard = false;  // UV debug view
+  DecodeView view = DecodeView::Final;
 };
 
 class MaterialDecodePass {

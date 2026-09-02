@@ -15,6 +15,12 @@
 //                                                frames, so frame 1 only
 //                                                warms the VisBuffer)
 //   KENSHINDemo --kgeo path.kgeo --virtual --checker   UV checkerboard view
+//   KENSHINDemo --cam yaw,pitch,dist[,tx,ty,tz]    fixed camera pose in
+//                                                degrees/meters (S4.6
+//                                                acceptance screenshots)
+//   KENSHINDemo --view N                         decode view mode 0..4
+//                                                (0 final, 1 LOD, 2 error,
+//                                                 3 vis color, 4 checker)
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -45,6 +51,10 @@
 #include <Windows.h>
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
+
+#pragma warning(push, 0)
+#include <imgui.h>
+#pragma warning(pop)
 
 namespace {
 // Crash triage aid: log a symbolized stack on any unhandled SEH
@@ -99,6 +109,12 @@ struct Args {
   std::string screenshotUi;  // full window incl. ImGui
   bool virtualPath = false;  // S4.5: chain + decode instead of baseline draw
   bool checker = false;      // UV checkerboard debug view (decode path)
+  // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
+  // controller's interactive defaults.
+  bool hasCam = false;
+  float camYaw = 0, camPitch = 0, camDist = 0;
+  float camTarget[3] = {0, 0, 0};
+  int viewMode = -1;  // --view; -1 = leave the panel state at Final
 };
 
 Args parseArgs(int argc, char** argv) {
@@ -124,6 +140,14 @@ Args parseArgs(int argc, char** argv) {
       args.virtualPath = true;
     else if (std::strcmp(argv[i], "--checker") == 0)
       args.checker = true;
+    else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
+      args.viewMode = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc) {
+      const int n = sscanf_s(argv[++i], "%f,%f,%f,%f,%f,%f", &args.camYaw,
+                             &args.camPitch, &args.camDist, &args.camTarget[0],
+                             &args.camTarget[1], &args.camTarget[2]);
+      args.hasCam = n >= 3;  // target triple optional
+    }
   }
   if (args.width <= 0 || args.height <= 0) {
     args.width = 1600;
@@ -160,6 +184,25 @@ std::string findShaderRoot() {
   return "engine/shaders";
 }
 
+/// S4.6 debug state: view mode + the chain's last stats and histories
+/// (the panel reads it; runVisChain fills it per view change).
+struct VgDebugState {
+  int viewMode = 0;  // DecodeView as int (0..4)
+  kenshin::u32 visibleClusters = 0, cutTris = 0, pxWrites = 0;
+  kenshin::f32 coveragePct = 0.0f;
+  std::vector<float> clusterHist, triHist, coverHist;
+  void pushHistory() {
+    clusterHist.push_back(static_cast<float>(visibleClusters));
+    triHist.push_back(static_cast<float>(cutTris));
+    coverHist.push_back(coveragePct);
+    if (clusterHist.size() > 240) {
+      clusterHist.erase(clusterHist.begin());
+      triHist.erase(triHist.begin());
+      coverHist.erase(coverHist.begin());
+    }
+  }
+};
+
 /// S4.5 one-shot VisBuffer chain: instance cull -> work-item expand ->
 /// cluster cull (the LOD cut) -> software raster. Blocking (each stage
 /// is its own one-shot compute dispatch); runs BETWEEN frames. `visOut`
@@ -173,8 +216,8 @@ bool runVisChain(
     std::span<const kenshin::renderer::CullGpuInstance> instances,
     std::span<const kenshin::renderer::GpuMeshRangePair> meshRanges,
     const kenshin::scene::Camera& camera, float fovYDeg, float pixelThreshold,
-    kenshin::u32 width, kenshin::u32 height,
-    std::vector<kenshin::u64>& visOut) {
+    kenshin::u32 width, kenshin::u32 height, std::vector<kenshin::u64>& visOut,
+    VgDebugState& dbg) {
   using namespace kenshin;
   glm::vec4 planes[6];
   renderer::extractFrustumPlanes(camera.viewProjMatrix(), planes);
@@ -237,6 +280,11 @@ bool runVisChain(
                 scene.clusterData().data() + usize(pair.y) * 48 + 36, 4);
     cutTris += indexCount / 3;
   }
+  dbg.visibleClusters = static_cast<u32>(pairs.size());
+  dbg.cutTris = cutTris;
+  dbg.pxWrites = rasterStats[1];
+  dbg.coveragePct = f32(100.0 * f64(covered) / (f64(width) * f64(height)));
+  dbg.pushHistory();
   KENSHIN_INFO(
       "[vg] chain: {} inst visible / {} clusters cut ({} too-coarse, {} "
       "source-too-coarse, {} tris) / {} px writes / {} px covered ({:.1f}%)",
@@ -300,6 +348,11 @@ int main(int argc, char** argv) {
   std::vector<kenshin::renderer::GpuMeshRangePair> chainMeshRanges;
   kenshin::renderer::MaterialDecodePass decodePass;
   kenshin::renderer::DecodeParams decodeParams;
+  VgDebugState vgDebug;
+  if (args.viewMode >= 0 && args.viewMode <= 4)
+    vgDebug.viewMode = args.viewMode;
+  else if (args.checker)
+    vgDebug.viewMode = 4;  // checker = DecodeView::Checker
 
   // ---- .kgeo LOD preview (S3.4) ---------------------------------------
   demo::KgeoPreview kgeoPreview;
@@ -329,10 +382,31 @@ int main(int argc, char** argv) {
         inst.bounds = mesh.boundsSphere;
         chainInstances = {inst};
         chainMeshRanges.push_back({mesh.clusterBegin, mesh.clusterEnd});
-        decodeParams.checkerboard = args.checker;
       }
-      overlay.setExtraPanel(
-          [&kgeoPreview] { demo::drawLodPanel(kgeoPreview); });
+      overlay.setExtraPanel([&kgeoPreview, &vgDebug, &args] {
+        demo::drawLodPanel(kgeoPreview);
+        if (args.virtualPath) {
+          ImGui::Begin("Virtual Geometry");
+          const char* names[] = {"final", "LOD level", "error heat",
+                                 "vis color", "checker"};
+          for (int i = 0; i < 5; ++i)
+            ImGui::RadioButton(names[i], &vgDebug.viewMode, i);
+          ImGui::Separator();
+          ImGui::Text("clusters %u  tris %u  writes %u  cover %.1f%%",
+                      vgDebug.visibleClusters, vgDebug.cutTris,
+                      vgDebug.pxWrites, vgDebug.coveragePct);
+          ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
+                           int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
+                           1200.0f, ImVec2(240, 40));
+          ImGui::PlotLines("##tris", vgDebug.triHist.data(),
+                           int(vgDebug.triHist.size()), 0, nullptr, 0.0f,
+                           200000.0f, ImVec2(240, 40));
+          ImGui::PlotLines("##coverage", vgDebug.coverHist.data(),
+                           int(vgDebug.coverHist.size()), 0, nullptr, 0.0f,
+                           100.0f, ImVec2(240, 40));
+          ImGui::End();
+        }
+      });
       KENSHIN_INFO("[kgeo] loaded: {} clusters / {} groups / {} levels",
                    kgeoPreview.dag.clusters.size(),
                    kgeoPreview.dag.groups.size(), [&] {
@@ -356,6 +430,16 @@ int main(int argc, char** argv) {
     vgScene = &engine.get<kenshin::renderer::VirtualGeometryScene>();
     vgBackend = &engine.get<kenshin::backend::IRenderBackend>();
   }
+
+  // --cam: fixed initial pose for the S4.6 acceptance screenshots
+  // (deterministic; the loop's per-frame updateMatrices re-applies the
+  // live viewport aspect over this).
+  if (args.hasCam)
+    controller.setup(
+        args.camYaw, args.camPitch, args.camDist,
+        glm::vec3(args.camTarget[0], args.camTarget[1], args.camTarget[2]),
+        static_cast<kenshin::f32>(args.width) /
+            static_cast<kenshin::f32>(args.height));
 
   kenshin::core::FrameStats<240> stats;
   kenshin::Timer frameTimer;
@@ -459,6 +543,8 @@ int main(int argc, char** argv) {
       if (!decodeReady) decodeReady = decodePass.init(*vgBackend, shaders);
       if (decodeReady) {
         decodeParams.camPos = camera.position();
+        decodeParams.view =
+            static_cast<kenshin::renderer::DecodeView>(vgDebug.viewMode);
         // The camera's own (Y-flipped) viewProj - the same matrix the
         // chain rasterized with, so the decode's screen math lands on
         // the VisBuffer's rows exactly.
@@ -488,7 +574,7 @@ int main(int argc, char** argv) {
         std::vector<kenshin::u64> vis;
         if (!runVisChain(*vgBackend, shaders, *vgScene, chainInstances,
                          chainMeshRanges, camera, controller.fovYDeg,
-                         key.threshold, key.w, key.h, vis))
+                         key.threshold, key.w, key.h, vis, vgDebug))
           break;
         decodePass.updateVis(*vgBackend, std::move(vis));
       }
