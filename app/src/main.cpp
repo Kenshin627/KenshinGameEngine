@@ -21,6 +21,9 @@
 //   KENSHINDemo --view N                         decode view mode 0..4
 //                                                (0 final, 1 LOD, 2 error,
 //                                                 3 vis color, 4 checker)
+//   KENSHINDemo --kgeo X --virtual --multi       S4.6 acceptance scene:
+//                                                one mesh at near/mid/far
+//                                                instances along +x
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -109,6 +112,7 @@ struct Args {
   std::string screenshotUi;  // full window incl. ImGui
   bool virtualPath = false;  // S4.5: chain + decode instead of baseline draw
   bool checker = false;      // UV checkerboard debug view (decode path)
+  bool multi = false;        // S4.6 acceptance: near/mid/far instances
   // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
   // controller's interactive defaults.
   bool hasCam = false;
@@ -142,6 +146,8 @@ Args parseArgs(int argc, char** argv) {
       args.checker = true;
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--multi") == 0)
+      args.multi = true;
     else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc) {
       const int n = sscanf_s(argv[++i], "%f,%f,%f,%f,%f,%f", &args.camYaw,
                              &args.camPitch, &args.camDist, &args.camTarget[0],
@@ -375,13 +381,31 @@ int main(int argc, char** argv) {
           {kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}});
       if (args.virtualPath) {
         const kenshin::renderer::VgMeshRange& mesh = vgScene.meshes()[vgMeshId];
-        // One identity instance (the v1 decode payload carries no
-        // instance bits); world bounds == mesh bounds under identity.
-        kenshin::renderer::CullGpuInstance inst;
-        inst.meshId = vgMeshId;
-        inst.bounds = mesh.boundsSphere;
-        chainInstances = {inst};
-        chainMeshRanges.push_back({mesh.clusterBegin, mesh.clusterEnd});
+        const auto makeInst = [&](const glm::mat4& model) {
+          kenshin::renderer::CullGpuInstance inst;
+          inst.model = model;
+          inst.meshId = vgMeshId;
+          return inst;
+        };
+        if (args.multi) {
+          // S4.6 acceptance scene: the same mesh at near/mid/far along
+          // +x - one threshold, visibly different LOD levels per instance.
+          const std::vector<glm::vec3> offsets{
+              {0.0f, 0.0f, 0.0f}, {7.0f, 0.0f, 0.0f}, {59.0f, 0.0f, 0.0f}};
+          std::vector<kenshin::renderer::VgInstance> vgInsts;
+          for (const glm::vec3& o : offsets) {
+            const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
+            chainInstances.push_back(makeInst(m));
+            vgInsts.push_back({m, vgMeshId});
+          }
+          vgScene.setInstances(vgInsts);
+        } else {
+          chainInstances = {makeInst(glm::mat4(1.0f))};
+          vgScene.setInstances(
+              {kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}});
+        }
+        for (kenshin::u32 i = 0; i < chainInstances.size(); ++i)
+          chainMeshRanges.push_back({mesh.clusterBegin, mesh.clusterEnd});
       }
       overlay.setExtraPanel([&kgeoPreview, &vgDebug, &args] {
         demo::drawLodPanel(kgeoPreview);
