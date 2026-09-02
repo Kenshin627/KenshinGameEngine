@@ -97,11 +97,11 @@ struct CpuRaster {
                            static_cast<float>(frame.height));
         const auto rasterTri = [&](const glm::vec3& a, const glm::vec3& b,
                                    const glm::vec3& c) {
-          rasterTriangle(applyMat4(frame.proj, a, wh),
-                         applyMat4(frame.proj, b, wh),
-                         applyMat4(frame.proj, c, wh),
-                         applyMat4Z(frame.proj, a), applyMat4Z(frame.proj, b),
-                         applyMat4Z(frame.proj, c), pairs[p].y, t, stats);
+          rasterTriangle(
+              applyMat4(frame.proj, a, wh), applyMat4(frame.proj, b, wh),
+              applyMat4(frame.proj, c, wh), applyMat4Z(frame.proj, a),
+              applyMat4Z(frame.proj, b), applyMat4Z(frame.proj, c), pairs[p].y,
+              t, pairs[p].x, stats);
         };
         if (poly.size() == 3)
           rasterTri(poly[0], poly[1], poly[2]);
@@ -116,7 +116,7 @@ struct CpuRaster {
 
   void rasterTriangle(glm::vec2 s0, glm::vec2 s1, glm::vec2 s2, float z0,
                       float z1, float z2, u32 clusterIdx, u32 triIdx,
-                      u32* stats) {
+                      u32 instanceIdx, u32* stats) {
     // Cull-sign + canonicalization mirror rasterize_sw.slang: yFlip
     // (framebuffer-order rows) culls the CW-as-viewed half, then a
     // vertex swap restores the positive-area edge-equation path.
@@ -161,7 +161,8 @@ struct CpuRaster {
       float z = z00 + rb * ry;
       for (int x = x0; x < x1; ++x) {
         if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
-          const u64 packed = renderer::packVisPixel(z, clusterIdx, triIdx);
+          const u64 packed =
+              renderer::packVisPixel(z, clusterIdx, triIdx, instanceIdx);
           const usize idx = usize(y) * frame.width + x;
           if (packed > vis[idx]) vis[idx] = packed;  // max, no atomics
           ++stats[1];
@@ -216,60 +217,60 @@ TEST_CASE("software rasterizer GPU/CPU differential", "[gpu][swraster]") {
   frame.height = 48;
   renderer::CullGpuInstance identity;
 
-  const auto runCase = [&](const char* name, Scene& scene,
-                           const std::vector<glm::uvec2>& pairs) {
-    // end sentinel span so CPU knows each cluster's extent
-    scene.spans.emplace_back(static_cast<u32>(scene.positions.size()),
-                             static_cast<u32>(scene.indices.size()));
+  const auto runCase =
+      [&](const char* name, Scene& scene, const std::vector<glm::uvec2>& pairs,
+          const std::vector<renderer::CullGpuInstance>& insts) {
+        // end sentinel span so CPU knows each cluster's extent
+        scene.spans.emplace_back(static_cast<u32>(scene.positions.size()),
+                                 static_cast<u32>(scene.indices.size()));
 
-    CpuRaster cpu{frame, scene.positions, scene.indices, {}};
-    u32 cpuStats[4] = {};
-    cpu.run(pairs, {identity}, scene.spans, cpuStats);
+        CpuRaster cpu{frame, scene.positions, scene.indices, {}};
+        u32 cpuStats[4] = {};
+        cpu.run(pairs, insts, scene.spans, cpuStats);
 
-    std::vector<u64> gpuVis;
-    u32 gpuStats[4] = {};
-    const std::vector<renderer::CullGpuInstance> insts{identity};
-    REQUIRE(renderer::rasterizeOnGpu(*backend, shaders, frame, scene.positions,
-                                     scene.indices, scene.clusterData, insts,
-                                     pairs, gpuVis, gpuStats));
+        std::vector<u64> gpuVis;
+        u32 gpuStats[4] = {};
+        REQUIRE(renderer::rasterizeOnGpu(
+            *backend, shaders, frame, scene.positions, scene.indices,
+            scene.clusterData, insts, pairs, gpuVis, gpuStats));
 
-    // Depth bits may differ by a few float32 ulps on generic-slope
-    // triangles: the host and the SPIR-V contract FMAs differently.
-    // The S4.4 cases were authored with constant/nice-slope depths so
-    // rounding could not diverge; the S4.5 proj fix (params[4..7] is the
-    // PROJECTION, not world->NDC - a double-view bug this differential
-    // shared on both sides) made the near-clip quad generic-slope. The
-    // payload (cluster | triangle) must still match EXACTLY - only the
-    // depth bits get the tolerance.
-    const auto tolerantEqual = [](u64 a, u64 b) {
-      if (a == b) return true;
-      if ((a & 0xFFFFFFFFull) != (b & 0xFFFFFFFFull)) return false;
-      const u64 da = a >> 32, db = b >> 32;
-      return (da > db ? da - db : db - da) <= (1ull << 12);
-    };
-    u64 mismatches = 0;
-    std::string first;
-    for (usize i = 0; i < cpu.vis.size(); ++i)
-      if (!tolerantEqual(cpu.vis[i], gpuVis[i])) {
-        if (mismatches == 0)
-          first = "pixel " + std::to_string(i % frame.width) + "," +
-                  std::to_string(i / frame.width) + " cpu " +
-                  std::to_string(cpu.vis[i]) + " gpu " +
-                  std::to_string(gpuVis[i]);
-        ++mismatches;
-      }
-    INFO("[" << name << "] cpu writes " << cpuStats[1] << " gpu writes "
-             << gpuStats[1] << ", mismatches " << mismatches
-             << (first.empty() ? "" : " first: " + first));
-    REQUIRE(mismatches == 0);
-    // Pixel-write counts may differ by a couple at exact w == 0 ties
-    // (host vs SPIR-V FMA decides the tie differently) - the per-pixel
-    // VisBuffer compare above is the real gate.
-    REQUIRE(std::abs(static_cast<long long>(cpuStats[1]) -
-                     static_cast<long long>(gpuStats[1])) <= 2);
-    REQUIRE(cpuStats[2] == gpuStats[2]);
-    REQUIRE(cpuStats[3] == gpuStats[3]);
-  };
+        // Depth bits may differ by a few float32 ulps on generic-slope
+        // triangles: the host and the SPIR-V contract FMAs differently.
+        // The S4.4 cases were authored with constant/nice-slope depths so
+        // rounding could not diverge; the S4.5 proj fix (params[4..7] is the
+        // PROJECTION, not world->NDC - a double-view bug this differential
+        // shared on both sides) made the near-clip quad generic-slope. The
+        // payload (cluster | triangle) must still match EXACTLY - only the
+        // depth bits get the tolerance.
+        const auto tolerantEqual = [](u64 a, u64 b) {
+          if (a == b) return true;
+          if ((a & 0xFFFFFFFFull) != (b & 0xFFFFFFFFull)) return false;
+          const u64 da = a >> 32, db = b >> 32;
+          return (da > db ? da - db : db - da) <= (1ull << 12);
+        };
+        u64 mismatches = 0;
+        std::string first;
+        for (usize i = 0; i < cpu.vis.size(); ++i)
+          if (!tolerantEqual(cpu.vis[i], gpuVis[i])) {
+            if (mismatches == 0)
+              first = "pixel " + std::to_string(i % frame.width) + "," +
+                      std::to_string(i / frame.width) + " cpu " +
+                      std::to_string(cpu.vis[i]) + " gpu " +
+                      std::to_string(gpuVis[i]);
+            ++mismatches;
+          }
+        INFO("[" << name << "] cpu writes " << cpuStats[1] << " gpu writes "
+                 << gpuStats[1] << ", mismatches " << mismatches
+                 << (first.empty() ? "" : " first: " + first));
+        REQUIRE(mismatches == 0);
+        // Pixel-write counts may differ by a couple at exact w == 0 ties
+        // (host vs SPIR-V FMA decides the tie differently) - the per-pixel
+        // VisBuffer compare above is the real gate.
+        REQUIRE(std::abs(static_cast<long long>(cpuStats[1]) -
+                         static_cast<long long>(gpuStats[1])) <= 2);
+        REQUIRE(cpuStats[2] == gpuStats[2]);
+        REQUIRE(cpuStats[3] == gpuStats[3]);
+      };
 
   SECTION("smoke: full-screen triangle") {
     Scene s;
@@ -303,6 +304,24 @@ TEST_CASE("software rasterizer GPU/CPU differential", "[gpu][swraster]") {
     REQUIRE(mm == 0);
   }
 
+  SECTION("differential: multi-instance payload") {
+    // S4.6: the VisBuffer payload carries instance bits (cluster 20b |
+    // tri 7b | instance 5b). Two instances of ONE cluster, offset in
+    // world x so they overlap on screen with different depths - the
+    // overlap resolves per atomicMax and every pixel's payload must
+    // name the winning instance exactly on both sides.
+    Scene s;
+    s.frame = frame;
+    s.addCluster({{-2, -2, 0}, {2, -2, 0}, {2, 2, 0}, {-2, 2, 0}},
+                 {0, 1, 2, 0, 2, 3});
+    std::vector<renderer::CullGpuInstance> insts;
+    insts.push_back(identity);
+    renderer::CullGpuInstance moved;
+    moved.model = glm::translate(glm::mat4(1.0f), {0.8f, 0.0f, 1.0f});
+    insts.push_back(moved);
+    runCase("multiinst", s, {{0, 0}, {1, 0}}, insts);
+  }
+
   SECTION("differential: offscreen + shared edge + depth overlap") {
     Scene s;
     s.frame = frame;
@@ -314,7 +333,7 @@ TEST_CASE("software rasterizer GPU/CPU differential", "[gpu][swraster]") {
                  {0, 1, 2, 0, 2, 3});
     // c2: winding-flipped triangle -> backface culled on both sides
     s.addCluster({{-1, -1, -2}, {3, -1, -2}, {-1, 3, -2}}, {0, 2, 1});
-    runCase("diff3", s, {{0, 0}, {0, 1}, {0, 2}});
+    runCase("diff3", s, {{0, 0}, {0, 1}, {0, 2}}, {identity});
   }
 
   SECTION("near-plane: crossing triangle must not vanish") {
@@ -325,7 +344,7 @@ TEST_CASE("software rasterizer GPU/CPU differential", "[gpu][swraster]") {
     s.addCluster({{-3, -3, 0}, {3, -3, 0}, {0, 3, 8.5}}, {0, 1, 2});
     // Fully in front of the near plane (behind camera): must vanish.
     s.addCluster({{-1, -1, 8.5}, {1, -1, 8.5}, {0, 1, 8.4}}, {0, 1, 2});
-    runCase("nearclip", s, {{0, 0}, {0, 1}});
+    runCase("nearclip", s, {{0, 0}, {0, 1}}, {identity});
   }
 
   SECTION("tie: pixel center exactly on an edge") {
@@ -338,7 +357,7 @@ TEST_CASE("software rasterizer GPU/CPU differential", "[gpu][swraster]") {
     s.addCluster({{0, -3, 0}, {4, -3, 0}, {0, 3, 0}}, {0, 1, 2});
     // Adjacent triangle sharing that exact edge.
     s.addCluster({{0, -3, 0}, {0, 3, 0}, {-4, 3, 0}}, {0, 1, 2});
-    runCase("tie", s, {{0, 0}, {0, 1}});
+    runCase("tie", s, {{0, 0}, {0, 1}}, {identity});
   }
 
   backend->shutdown();

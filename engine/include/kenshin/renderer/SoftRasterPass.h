@@ -74,11 +74,15 @@ bool rasterizeOnGpu(backend::IRenderBackend& backend,
                     std::vector<u64>& visOut, u32 stats[4]);
 
 /// The u64 pixel packing, shared by the CPU reference (identical ops).
-inline u64 packVisPixel(f32 z, u32 clusterIdx, u32 triIdx) {
+/// Payload 32b = cluster 20b | triangle 7b | instance 5b.
+inline u64 packVisPixel(f32 z, u32 clusterIdx, u32 triIdx,
+                        u32 instanceIdx = 0) {
   z = glm::clamp(z, 0.0f, 1.0f);
   const u32 depthBits = static_cast<u32>((1.0f - z) * 4294967295.0f);
   return (static_cast<u64>(depthBits) << 32) |
-         (static_cast<u64>(clusterIdx) << 7) | static_cast<u64>(triIdx & 0x7Fu);
+         (static_cast<u64>(clusterIdx & 0xFFFFFu) << 12) |
+         (static_cast<u64>(triIdx & 0x7Fu) << 5) |
+         static_cast<u64>(instanceIdx & 0x1Fu);
 }
 
 }  // namespace renderer

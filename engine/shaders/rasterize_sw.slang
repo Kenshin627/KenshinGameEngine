@@ -7,9 +7,10 @@
 // in-thread per the staged plan), backface cull by doubled-area sign,
 // screen-space edge equations + affine depth gradient, then the
 // incremental half-space inner loop over the bounding rect.
-// Pixel write = pack(reversed depth, cluster, triangle) and
+// Pixel write = pack(reversed depth 32b + payload 32b) and
 // InterlockedMax on the u64 VisBuffer (Karis p.84: depth in the high
-// bits, payload <= 34 bits - ours is 32: cluster 25b, triangle 7b).
+// bits). Payload 32b = cluster 20b | triangle 7b | instance 5b
+// (S4.6: instance bits for the multi-instance demo scene).
 //
 // Bindings (SSBO set 0; buffers[i] -> binding i):
 //   0: float4 params[12] - [0..3] VIEW matrix columns (glm raw),
@@ -64,20 +65,23 @@ struct GpuInstance
 
 groupshared float3 sViewPos[256];
 
-uint64_t packPixel(float z, uint clusterIdx, uint triIdx)
+uint64_t packPixel(float z, uint clusterIdx, uint triIdx, uint instanceIdx)
 {
     // Reversed depth in the high 32 bits: near (z=0) -> large, far
     // (z=1) -> small, so InterlockedMax keeps the NEAREST surface.
     // CPU reference performs the identical float ops in the same order.
+    // Payload: cluster 20b | triangle 7b | instance 5b.
     z = clamp(z, 0.0, 1.0);
     const uint depthBits = uint((1.0 - z) * 4294967295.0);
-    return (uint64_t(depthBits) << 32) | (uint64_t(clusterIdx) << 7) |
-           uint64_t(triIdx & 0x7Fu);
+    return (uint64_t(depthBits) << 32) |
+           (uint64_t(clusterIdx & 0xFFFFFu) << 12) |
+           (uint64_t(triIdx & 0x7Fu) << 5) | uint64_t(instanceIdx & 0x1Fu);
 }
 
 void rasterizeTriangle(float2 s0, float2 s1, float2 s2,
                        float z0, float z1, float z2,
-                       uint2 widthHeight, uint clusterIdx, uint triIdx)
+                       uint2 widthHeight, uint clusterIdx, uint triIdx,
+                       uint instanceIdx)
 {
     // Doubled signed area = cross(s1-s0, s2-s0); cull by sign. The
     // culled half depends on the projection's Y orientation: y-up rows
@@ -165,7 +169,8 @@ void rasterizeTriangle(float2 s0, float2 s1, float2 s2,
             // same rule, so shared-edge pixels resolve identically.
             if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0)
             {
-                const uint64_t packed = packPixel(z, clusterIdx, triIdx);
+                const uint64_t packed =
+                    packPixel(z, clusterIdx, triIdx, instanceIdx);
                 InterlockedMax(visBuffer[uint(y) * widthHeight.x + uint(x)],
                                packed);
                 InterlockedAdd(counters[1], 1);
@@ -302,7 +307,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         rasterizeTriangle(sa, sb, sc, ndcZOf(pa, vpC0, vpC1, vpC2, vpC3),
                           ndcZOf(pb, vpC0, vpC1, vpC2, vpC3),
                           ndcZOf(pc, vpC0, vpC1, vpC2, vpC3),
-                          whU, pair.y, gtid.x);
+                          whU, pair.y, gtid.x, pair.x);
     }
     else  // quad (near-plane crossing): fan (0,1,2) + (0,2,3)
     {
@@ -315,7 +320,9 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         const float zb = ndcZOf(pb, vpC0, vpC1, vpC2, vpC3);
         const float zc = ndcZOf(pc, vpC0, vpC1, vpC2, vpC3);
         const float zd = ndcZOf(pd, vpC0, vpC1, vpC2, vpC3);
-        rasterizeTriangle(sa, sb, sc, za, zb, zc, whU, pair.y, gtid.x);
-        rasterizeTriangle(sa, sc, sd, za, zc, zd, whU, pair.y, gtid.x);
+        rasterizeTriangle(sa, sb, sc, za, zb, zc, whU, pair.y, gtid.x,
+                          pair.x);
+        rasterizeTriangle(sa, sc, sd, za, zc, zd, whU, pair.y, gtid.x,
+                          pair.x);
     }
 }

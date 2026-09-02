@@ -46,7 +46,7 @@ struct DecodePush
 {
     float4x4 viewProj;   // world -> NDC, the camera's own (Y-flipped) matrix
     float4 camFlags;     // xyz camPos, w flags (bit0 checkerboard)
-    float4 lightDir;     // TO light, world
+    float4 lightDir;     // xyz TO light (world), w instanceCount
     float4 kdScale;      // rgb kd, w checker scale
     float4 viewport;     // w, h, clusterCount, indexCount
 };
@@ -89,9 +89,9 @@ float clipW(float3 w)
     return c.w;
 }
 
-float3 applyModel(float3 lp)
+float3 applyModel(float3 lp, uint instanceIdx)
 {
-    const float4x4 model = instances[0].model;
+    const float4x4 model = instances[instanceIdx].model;
     return model[0].xyz * lp.x + model[1].xyz * lp.y
          + model[2].xyz * lp.z + model[3].xyz;
 }
@@ -127,10 +127,11 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     // repro); the clamps change the codegen enough to dodge it (and
     // make the bounds explicit for the compiler).
     const uint clusterIdx =
-        min((visLo >> 7) & 0x1FFFFFFu, uint(push.viewport.z) - 1u);
-    const uint triIdx = min(visLo & 0x7Fu, 0x7Fu);
-    // v1: one instance (instance 0) - the payload has no instance bits;
-    // multi-instance needs instance-expanded cluster ids or a wider pack.
+        min((visLo >> 12) & 0xFFFFFu, uint(push.viewport.z) - 1u);
+    const uint triIdx = min((visLo >> 5) & 0x7Fu, 0x7Fu);
+    // Instance 5b (payload 32b = cluster 20b | triangle 7b | instance
+    // 5b); clamp like the rest - see the clamping comment above.
+    const uint instanceIdx = min(visLo & 0x1Fu, uint(push.lightDir.w) - 1u);
     const GpuCluster cluster = clusters[clusterIdx];
 
     const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);
@@ -140,9 +141,12 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
                         cluster.vertexCount - 1u);
     const uint i2 = min(indices[cluster.indexOffset + tri3 + 2u],
                         cluster.vertexCount - 1u);
-    const float3 w0 = applyModel(positions[cluster.vertexOffset + i0].xyz);
-    const float3 w1 = applyModel(positions[cluster.vertexOffset + i1].xyz);
-    const float3 w2 = applyModel(positions[cluster.vertexOffset + i2].xyz);
+    const float3 w0 =
+        applyModel(positions[cluster.vertexOffset + i0].xyz, instanceIdx);
+    const float3 w1 =
+        applyModel(positions[cluster.vertexOffset + i1].xyz, instanceIdx);
+    const float3 w2 =
+        applyModel(positions[cluster.vertexOffset + i2].xyz, instanceIdx);
 
     // Near-plane-crossing guard: the VisBuffer pixel may come from the
     // rasterizer's CLIPPED fan, but this shader reconstructs the ORIGINAL

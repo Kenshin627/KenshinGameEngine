@@ -110,6 +110,7 @@ class VirtualGeometryScene {
   const std::vector<VgMeshRange>& meshes() const { return m_meshRanges; }
   u32 clusterCount() const { return m_clusterCount; }
   u32 groupCount() const { return m_groupCount; }
+  u32 instanceCount() const { return m_instanceCount; }
 
   // Buffer handles for the S4.2+ passes (bind as SSBOs).
   u32 clusterBuffer() const { return m_clusterBuffer; }
@@ -140,6 +141,7 @@ class VirtualGeometryScene {
   std::vector<VgMeshRange> m_meshRanges;
   u32 m_clusterCount = 0;
   u32 m_groupCount = 0;
+  u32 m_instanceCount = 0;
 
   // Packed std430 staging accumulators (grown by addMesh, uploaded once
   // in flushPools - see the .cpp). Positions/normals are vec4 elements

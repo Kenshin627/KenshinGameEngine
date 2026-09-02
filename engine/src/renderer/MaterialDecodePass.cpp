@@ -72,7 +72,9 @@ void MaterialDecodePass::draw(backend::IRenderBackend& backend,
   DecodePushC push;
   push.viewProj = viewProj;
   push.camFlags = glm::vec4(params.camPos, params.checkerboard ? 1.0f : 0.0f);
-  push.lightDir = glm::vec4(params.lightDir, 0.0f);
+  // w carries the instance count the shader clamps payload indices with.
+  push.lightDir =
+      glm::vec4(params.lightDir, static_cast<f32>(scene.instanceCount()));
   push.kdScale = glm::vec4(params.kd, 8.0f);
   // zw carries the pool counts the shader clamps payload indices with.
   push.viewport = glm::vec4(static_cast<f32>(width), static_cast<f32>(height),

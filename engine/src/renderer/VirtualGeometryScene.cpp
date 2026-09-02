@@ -146,6 +146,7 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
 void VirtualGeometryScene::setInstances(
     const std::vector<VgInstance>& instances) {
   if (m_backend == nullptr) return;
+  m_instanceCount = static_cast<u32>(instances.size());
 
   // std430 GpuInstance (96B): mat4 (64B) + meshId (4B) + 12B pad +
   // world bounds vec4 (16B, offset 80). When the caller passes a
