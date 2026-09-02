@@ -148,14 +148,22 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
 
     if (viewMode == 1u)
     {
-        // LOD-level view: near = fine (low level) -> green, far = coarse
-        // (high level) -> red. The acceptance wants the near-far
-        // gradient visible at a glance.
+        // LOD-level view: one hue PER LEVEL via a golden-ratio hash -
+        // adjacent levels always land far apart on the color wheel, so
+        // any visible level range contrasts strongly (a continuous
+        // ramp left adjacent levels in the same color family).
         const uint groupIdx =
             min(cluster.group, uint(push.viewport.w) - 1u);
-        const float t = float(groups[groupIdx].lodLevel) /
-                        max(push.kdScale.w, 1.0);
-        return float4(t, 1.0 - t, 0.35 + 0.4 * t, 1.0);
+        const float level = float(groups[groupIdx].lodLevel) + 0.5;
+        const float hue = frac(level * 0.618034) * 6.0;
+        const int seg = int(min(hue, 5.999));
+        const float f = hue - float(seg);
+        const float3 wheel[7] = {
+            float3(1.0, 0.0, 0.0), float3(1.0, 0.6, 0.0),
+            float3(0.8, 1.0, 0.0), float3(0.0, 1.0, 0.3),
+            float3(0.0, 1.0, 1.0), float3(0.3, 0.3, 1.0),
+            float3(1.0, 0.0, 0.0)};
+        return float4(lerp(wheel[seg], wheel[seg + 1], f), 1.0);
     }
     if (viewMode == 2u)
     {
@@ -188,15 +196,13 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const float3 w2 =
         applyModel(positions[cluster.vertexOffset + i2].xyz, instanceIdx);
 
-    // Near-plane-crossing guard: the VisBuffer pixel may come from the
-    // rasterizer's CLIPPED fan, but this shader reconstructs the ORIGINAL
-    // triangle - vertices behind the camera give clip w <= 0, and the
-    // w-divisions below then produce Inf/NaN that hard-crashes this
-    // driver (DEVICE_LOST; the S4.5 zoom-in repro). Drop such pixels
-    // BEFORE any division: the camera is inside the surface there, and
-    // crossing triangles belong to the M4 hardware path anyway.
-    if (clipW(w0) <= 0.0 || clipW(w1) <= 0.0 || clipW(w2) <= 0.0)
-        discard;
+    // NOTE: near-plane-crossing triangles (a vertex behind the camera)
+    // used to be discarded outright - with the camera close to the mesh
+    // that erased whole triangles and read as "clipped away". The
+    // clamped denominators below already keep every division finite
+    // (that, not the discard, is what keeps this driver alive), so
+    // crossing pixels now SHADE approximately instead of vanishing;
+    // proper crossing handling belongs to the M4 hardware path.
 
     // Raster-parity screen position of THIS pixel (framebuffer row
     // order, matching the flipped-proj rasterizer convention).
