@@ -10,6 +10,7 @@
 
 #include <vector>
 
+#include "FrameSync.h"
 #include "kenshin/Common.h"
 #include "kenshin/backend/RenderBackend.h"
 
@@ -24,6 +25,20 @@ class PipelineStore {
     VkPipeline pipeline = VK_NULL_HANDLE;
   };
 
+  /// Fullscreen entry: graphics pipeline + its SSBO descriptor sets.
+  /// Layout comes from FS reflection; one set per frame-in-flight slot,
+  /// re-written by that slot's draw (the slot's prior frame has
+  /// provably completed by then - a single shared set re-written every
+  /// frame would race in-flight command buffers).
+  struct Fullscreen {
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet sets[kMaxFramesInFlight] = {};
+    bool valid = false;
+  };
+
   /// Create the VkPipelineCache, loading prior data from disk.
   bool init(VkDevice device);
   /// Destroy every live pipeline, persist the cache, destroy it.
@@ -35,6 +50,15 @@ class PipelineStore {
   u32 create(VkDevice device, VkFormat colorFormat,
              const IRenderBackend::GraphicsPipelineInfo& info);
 
+  /// Fullscreen triangle + FS SSBO set (VisBuffer decode path). The
+  /// handle indexes the SAME slot table as create().
+  u32 createFullscreen(VkDevice device, VkFormat colorFormat,
+                       const IRenderBackend::FullscreenPipelineInfo& info);
+  const Fullscreen& fullscreen(u32 handle) const {
+    return m_fullscreen[handle - 1];
+  }
+  u32 fullscreenCount() const { return static_cast<u32>(m_fullscreen.size()); }
+
   /// Zero the slot and return its raw handles (for a deletion-queue
   /// lambda that destroys them when the frame completes).
   Pipeline detach(u32 handle);
@@ -45,6 +69,7 @@ class PipelineStore {
 
  private:
   std::vector<Pipeline> m_slots;
+  std::vector<Fullscreen> m_fullscreen;
   VkPipelineCache m_cache = VK_NULL_HANDLE;
 };
 

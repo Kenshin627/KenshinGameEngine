@@ -195,7 +195,11 @@ class IRenderBackend {
   /// Usage flags (bitfield). Storage = SSBO binding (the virtual geometry
   /// pipeline's currency); Uniform for small constant blocks; TransferSrc
   /// lets a buffer feed later copies.
-  enum BufferUsage : u32 { BufferStorage = 0x1, BufferUniform = 0x2, BufferTransferSrc = 0x4 };
+  enum BufferUsage : u32 {
+    BufferStorage = 0x1,
+    BufferUniform = 0x2,
+    BufferTransferSrc = 0x4
+  };
   struct BufferDesc {
     usize size = 0;
     u32 usage = BufferStorage;
@@ -212,6 +216,26 @@ class IRenderBackend {
   /// on failure.
   virtual bool readbackBuffer(u32 buffer, usize offset, usize bytes,
                               std::vector<u8>& out) = 0;
+
+  // ---- fullscreen pass (VisBuffer decode path, S4.5) ----------------
+  /// A fullscreen-triangle graphics pipeline: no vertex input (positions
+  /// generated in the VS), depth test/write OFF (the VisBuffer already
+  /// resolved visibility), and a descriptor set layout derived from the
+  /// FS's declared SSBO bindings (binding i <- buffer handle i).
+  /// Push constants: one 128-byte block visible to VS|FS.
+  struct FullscreenPipelineInfo {
+    const u32* vsSpirv = nullptr;
+    usize vsBytes = 0;
+    const u32* fsSpirv = nullptr;
+    usize fsBytes = 0;
+  };
+  virtual u32 createFullscreenPipeline(const FullscreenPipelineInfo& info) = 0;
+  /// Draw the fullscreen triangle in the CURRENT frame scope.
+  /// bufferHandles[i] binds to SSBO binding i (as declared by the FS);
+  /// `push` is copied into the 128-byte push block.
+  virtual void drawFullscreen(u32 pipeline, const u32* bufferHandles,
+                              u32 bufferCount, const void* push,
+                              usize pushBytes) = 0;
 
   // ---- GPU timing (debug overlay readout) ---------------------------
   /// Last completed frame's GPU timings. Zeroes when unsupported (queue

@@ -30,11 +30,11 @@
 - [ ] S3.4 LOD 切割面可视化验证（M1，无裂缝检查）
 
 **Phase 4 · 虚拟几何运行时 → M2 验收**
-- [ ] S4.1 GPU Scene 上传
-- [ ] S4.2 实例剔除 CS + CPU 差分
-- [ ] S4.3 簇剔除 CS（LOD 决策）+ 差分
-- [ ] S4.4 软光栅 CS（uint64 VisBuffer）+ 逐像素差分
-- [ ] S4.5 材质解码 pass（对照基线双路径截图）
+- [x] S4.1 GPU Scene 上传 ✅ 2026-09-02
+- [x] S4.2 实例剔除 CS + CPU 差分 ✅ 2026-09-02
+- [x] S4.3 簇剔除 CS（LOD 决策）+ 差分 ✅ 2026-09-02
+- [x] S4.4 软光栅 CS（uint64 VisBuffer）+ 逐像素差分 ✅ 2026-09-02
+- [x] S4.5 材质解码 pass（对照基线双路径截图）✅ 2026-09-02（`--kgeo X --virtual [--checker]`；交互崩溃三连修：① Slang 模块缓存 use-after-free（ShaderManager 现持有模块引用）② 软光栅半像素行偏移（修后 98.2% 逐字节一致、裂缝 10px 与基线持平）③ 近距缩放 DEVICE_LOST——驱动对 payload 依赖寻址链/u64 位算术喂地址的着色器模式会硬崩，decode 改 u32 读 vis + 全索引钳制 + 数值净化规避；顺带修 S4.4 双重 view 变换、decode vis 行序、剔除朝向、shaderInt64/shaderDrawParameters 特性、VMA_DYNAMIC_VULKAN_FUNCTIONS 显式关闭）
 - [ ] S4.6 调试视图 + 阈值滑条 + 计数曲线（M2）
 
 ## 里程碑验收
@@ -70,6 +70,8 @@
 
 （随手记，格式：`- [ ] 事项 —— 备注/日期`）
 
+- [ ] one-shot 链入帧化（当前视角变化触发阻塞式 5 段 one-shot compute,交互帧率受限）—— S4.5 落地后,M2 后续
+- [ ] 软光栅差分盲区对策：GPU/CPU 差分两边共享实现缺陷时不可见（S4.4 半像素行偏移、双重 view 两个 bug 都是 S4.5 对 HW 基线对比才暴露的）；后续可加一条 float64 独立地面真值 raster 校验 —— 2026-09-02
 - [ ] （示例）调研 clusterlod.h 的 clodConfig 各参数含义 —— 对应 S3.1
 - [ ] RenderView 抽象（多视口/多窗口时引入；Filament View=Scene+Camera、renderEngine RenderView 同位）—— 2026-09-01 Renderer/IRenderPipeline 落地时明确推迟
 - [ ] RenderGraph（pass 图 + 资源生命周期 + 调度；参照 Frostbite FrameGraph / UE RDG / Godot RDG；UI 合成届时从 backend endFrame 上移为真 pass）—— M2 多 pass 化时引入

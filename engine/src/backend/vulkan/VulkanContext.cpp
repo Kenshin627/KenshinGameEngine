@@ -1,7 +1,6 @@
 #include "VulkanContext.h"
 
 #include "Vk.h"
-
 #include "kenshin/core/Log.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -165,7 +164,7 @@ bool VulkanContext::createInstance(bool enableValidation, bool needSurface) {
         .pfnUserCallback = debugCallback,
     };
     if (!KE_VK(vkCreateDebugUtilsMessengerEXT(instance, &messengerInfo, nullptr,
-                                       &messenger)))
+                                              &messenger)))
       KENSHIN_WARN("[vulkan] debug messenger creation failed (non-fatal)");
     else
       vkutil::g_debugUtilsEnabled = true;  // object names/labels become live
@@ -240,7 +239,7 @@ bool VulkanContext::pickPhysicalDevice() {
     return false;
   }
 
-  // Query feature support on the selected device (1.2 + 1.3 chains)
+  // Query feature support on the selected device (1.1 + 1.2 + 1.3 chains)
   VkPhysicalDeviceVulkan13Features features13{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
   };
@@ -248,15 +247,20 @@ bool VulkanContext::pickPhysicalDevice() {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
       .pNext = &features13,
   };
+  VkPhysicalDeviceVulkan11Features features11{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+      .pNext = &features12,
+  };
   VkPhysicalDeviceFeatures2 features2{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-      .pNext = &features12,
+      .pNext = &features11,
   };
   vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
   supportsBufferInt64Atomics = features12.shaderBufferInt64Atomics != VK_FALSE;
   supportsTimelineSemaphore = features12.timelineSemaphore != VK_FALSE;
   supportsSynchronization2 = features13.synchronization2 != VK_FALSE;
   supportsDynamicRendering = features13.dynamicRendering != VK_FALSE;
+  supportsDrawParameters = features11.shaderDrawParameters != VK_FALSE;
 
   KENSHIN_INFO("[vulkan] GPU selected: {} (api {}.{})", props.deviceName,
                VK_API_VERSION_MAJOR(props.apiVersion),

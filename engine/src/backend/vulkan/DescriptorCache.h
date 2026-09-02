@@ -7,6 +7,8 @@
 
 #include <volk.h>
 
+#include <vector>
+
 #include "kenshin/Common.h"
 
 KENSHIN_NS_BEGIN
@@ -28,6 +30,26 @@ class DescriptorCache {
                                               VkDescriptorType type,
                                               u32 descriptorCount, u32 maxSets);
   static void destroyTransientPool(VkDevice device, VkDescriptorPool pool);
+
+  /// ---- reflection-driven SSBO set (shared by one-shot compute and the
+  /// fullscreen pass) -----------------------------------------------
+  /// A one-set-per-slot layout covering every STORAGE_BUFFER binding the
+  /// SPIR-V declares (binding slots from reflection, one descriptor
+  /// each - the ComputeOneShot-proven pattern). `bindingCountOut`
+  /// (optional) returns the binding count for sizing the pool.
+  static VkDescriptorSetLayout createStorageLayout(
+      VkDevice device, const u32* spirv, usize spirvWords,
+      u32* bindingCountOut = nullptr);
+  /// Pool for `setCount` sets over that layout; destroy via
+  /// destroyTransientPool.
+  static VkDescriptorPool createStoragePool(VkDevice device,
+                                            VkDescriptorSetLayout layout,
+                                            u32 bindingCount, u32 setCount);
+  /// Allocate `count` sets (per-frame-slot rotation: a set is re-written
+  /// only when its slot's prior frame has provably completed).
+  static bool allocateSets(VkDevice device, VkDescriptorPool pool,
+                           VkDescriptorSetLayout layout, VkDescriptorSet* out,
+                           u32 count);
 
  private:
   VkDescriptorPool m_imguiPool = VK_NULL_HANDLE;

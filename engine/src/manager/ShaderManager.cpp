@@ -114,6 +114,9 @@ bool ShaderManager::init(const std::string& shaderRoot) {
 }
 
 void ShaderManager::shutdown() {
+  for (void* raw : m_liveModules)
+    if (auto* module = static_cast<slang::IModule*>(raw)) module->release();
+  m_liveModules.clear();
   if (auto* session = static_cast<slang::ISession*>(m_session)) {
     session->release();
     m_session = nullptr;
@@ -150,6 +153,13 @@ bool ShaderManager::compileFile(const std::string& path,
   slang::IBlob* diagnostics = nullptr;
   slang::IModule* module =
       session->loadModule(moduleName.c_str(), &diagnostics);
+  // OWNERSHIP: the session caches modules by name but (observed with the
+  // vendored Slang 2026.3.1) does not keep its own strong reference - a
+  // release() here frees the CACHED module and the next loadModule of
+  // the same name walks freed memory (use-after-free crash on every
+  // repeated compile; caught by ASAN at the S4.5 interactive repro).
+  // Hold one ref per successful load; shutdown() releases them all.
+  if (module) m_liveModules.push_back(module);
   if (!module) {
     log = blobText(diagnostics);
     if (log.empty()) log = "loadModule('" + moduleName + "') failed";
@@ -165,7 +175,6 @@ bool ShaderManager::compileFile(const std::string& path,
     if (log.empty())
       log = std::string("entry point '") + entryPoint + "' not found";
     if (diagnostics) diagnostics->release();
-    module->release();
     return false;
   }
 
@@ -179,7 +188,6 @@ bool ShaderManager::compileFile(const std::string& path,
     if (linkDiag) linkDiag->release();
     if (diagnostics) diagnostics->release();
     entryPointObj->release();
-    module->release();
     return false;
   }
 
@@ -192,7 +200,6 @@ bool ShaderManager::compileFile(const std::string& path,
     program->release();
     if (diagnostics) diagnostics->release();
     entryPointObj->release();
-    module->release();
     return false;
   }
 
@@ -215,7 +222,6 @@ bool ShaderManager::compileFile(const std::string& path,
   linked->release();
   program->release();
   entryPointObj->release();
-  module->release();
   if (diagnostics) diagnostics->release();
   return result == SLANG_OK;
 }
@@ -233,6 +239,8 @@ bool ShaderManager::compileSource(const std::string& source,
   slang::IBlob* diagnostics = nullptr;
   slang::IModule* module = session->loadModuleFromSourceString(
       name.c_str(), name.c_str(), source.c_str(), &diagnostics);
+  // Same ownership rule as compileFile (see the comment there).
+  if (module) m_liveModules.push_back(module);
   if (!module) {
     log = blobText(diagnostics);
     if (diagnostics) diagnostics->release();
@@ -245,7 +253,6 @@ bool ShaderManager::compileSource(const std::string& source,
     log = blobText(diagnostics);
     if (log.empty()) log = "entry point 'main' not found";
     if (diagnostics) diagnostics->release();
-    module->release();
     return false;
   }
 
@@ -259,7 +266,6 @@ bool ShaderManager::compileSource(const std::string& source,
     log = "link failed";
     if (program) program->release();
     entryPoint->release();
-    module->release();
     if (diagnostics) diagnostics->release();
     return false;
   }
@@ -281,7 +287,6 @@ bool ShaderManager::compileSource(const std::string& source,
   linked->release();
   program->release();
   entryPoint->release();
-  module->release();
   if (diagnostics) diagnostics->release();
   return result == SLANG_OK;
 }

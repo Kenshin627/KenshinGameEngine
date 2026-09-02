@@ -13,10 +13,8 @@
 // vec4). The S4.x shaders must mirror these layouts exactly - they are
 // declared once here on purpose.
 
-#include <glm/glm.hpp>
-
 #include <cstring>
-
+#include <glm/glm.hpp>
 #include <vector>
 
 #include "kenshin/Common.h"
@@ -77,8 +75,8 @@ struct VgMeshRange {
   u32 groupBegin = 0;
   u32 groupEnd = 0;
   glm::vec4 boundsSphere{0.0f, 0.0f, 0.0f, -1.0f};  // union of cluster
-                                                   // bounds (instance
-                                                   // cull input)
+                                                    // bounds (instance
+                                                    // cull input)
 };
 
 /// One drawn instance: which mesh + its world transform. `boundsSphere`
@@ -122,6 +120,19 @@ class VirtualGeometryScene {
   u32 indexBuffer() const { return m_indexBuffer; }
   u32 instanceBuffer() const { return m_instanceBuffer; }
 
+  // Vertex/index counts (host-side pool sizes).
+  u32 vertexCount() const { return static_cast<u32>(m_pos4.size()); }
+  u32 indexCount() const { return static_cast<u32>(m_indices.size()); }
+
+  // Host mirrors of the GPU pools - inputs for the one-shot chain the
+  // app drives until the passes move in-frame (cluster cull wants the
+  // packed tables, the rasterizer the float4 positions + rebased
+  // indices).
+  const std::vector<u8>& clusterData() const { return m_clusterData; }
+  const std::vector<u8>& groupData() const { return m_groupData; }
+  const std::vector<glm::vec4>& positions4() const { return m_pos4; }
+  const std::vector<u32>& indices() const { return m_indices; }
+
   void onShutdown();
 
  private:
@@ -131,12 +142,13 @@ class VirtualGeometryScene {
   u32 m_groupCount = 0;
 
   // Packed std430 staging accumulators (grown by addMesh, uploaded once
-  // in flushPools - see the .cpp).
+  // in flushPools - see the .cpp). Positions/normals are vec4 elements
+  // (std430 vec3 arrays stride 16 - the shaders read float4).
   std::vector<u8> m_clusterData;
   std::vector<u8> m_groupData;
-  std::vector<f32> m_positions;
-  std::vector<f32> m_normals;
-  std::vector<f32> m_uvs;
+  std::vector<glm::vec4> m_pos4;
+  std::vector<glm::vec4> m_norm4;
+  std::vector<glm::vec2> m_uv2;
   std::vector<u32> m_indices;
   bool m_poolsDirty = false;
 

@@ -73,18 +73,40 @@ bool VulkanDevice::init(const VulkanContext& context) {
   enabledSynchronization2 = context.supportsSynchronization2;
   enabledDynamicRendering = context.supportsDynamicRendering;
 
+  // Chain: features2 (core) <- 1.2 <- 1.3 (declare tail-first; the
+  // device create info points at features2). Core Int64 rides with its
+  // atomics sibling: the S4.x shaders use uint64 VisBuffer pixels
+  // (SPIR-V CapabilityInt64) even where no atomic touches them - the
+  // validation layer rejects the module without the core feature, while
+  // Int64Atomics alone covers only the atomic ops.
   VkPhysicalDeviceVulkan13Features features13{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
       .synchronization2 = enabledSynchronization2 ? VK_TRUE : VK_FALSE,
       .dynamicRendering = enabledDynamicRendering ? VK_TRUE : VK_FALSE,
   };
-  const VkPhysicalDeviceVulkan12Features features12{
+  VkPhysicalDeviceVulkan12Features features12{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
       .pNext = &features13,
       .shaderBufferInt64Atomics =
           enabledBufferInt64Atomics ? VK_TRUE : VK_FALSE,
       .timelineSemaphore = enabledTimelineSemaphore ? VK_TRUE : VK_FALSE,
   };
+  // SV_VertexID (the decode pass's fullscreen triangle) lowers to
+  // SPIR-V CapabilityDrawParameters.
+  VkPhysicalDeviceVulkan11Features features11{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
+      .pNext = &features12,
+      .shaderDrawParameters =
+          context.supportsDrawParameters ? VK_TRUE : VK_FALSE,
+  };
+  VkPhysicalDeviceFeatures coreFeatures{};
+  vkGetPhysicalDeviceFeatures(context.physicalDevice, &coreFeatures);
+  VkPhysicalDeviceFeatures2 features2{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &features11,
+  };
+  features2.features.shaderInt64 =
+      coreFeatures.shaderInt64 ? VK_TRUE : VK_FALSE;
 
   const float priority = 1.0f;
   std::vector<VkDeviceQueueCreateInfo> queueInfos;
@@ -117,7 +139,7 @@ bool VulkanDevice::init(const VulkanContext& context) {
 
   const VkDeviceCreateInfo createInfo{
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-      .pNext = &features12,
+      .pNext = &features2,
       .queueCreateInfoCount = static_cast<u32>(queueInfos.size()),
       .pQueueCreateInfos = queueInfos.data(),
       .enabledExtensionCount = static_cast<u32>(deviceExtensions.size()),

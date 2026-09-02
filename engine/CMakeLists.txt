@@ -62,6 +62,7 @@ add_library(kenshin_engine STATIC
     src/renderer/InstanceCullPass.cpp
     src/renderer/ClusterCullPass.cpp
     src/renderer/SoftRasterPass.cpp
+    src/renderer/MaterialDecodePass.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpWriter.cpp
@@ -125,6 +126,10 @@ target_compile_definitions(kenshin_engine PRIVATE SPIRV_REFLECT_USE_SYSTEM_SPIRV
 target_compile_definitions(kenshin_engine PRIVATE
     VK_NO_PROTOTYPES           # volk supplies all vk entry points
     VK_USE_PLATFORM_WIN32_KHR  # Win32 surface for present support check
+    # Static VMA function table (filled explicitly from volk in
+    # VulkanDevice). Newer vcpkg VMA defaults this to 1 and then demands
+    # vkGetInstanceProcAddr/vkGetDeviceProcAddr in the table.
+    VMA_DYNAMIC_VULKAN_FUNCTIONS=0
 )
 
 # Slang (vendored binary release; SPIR-V runtime compilation)

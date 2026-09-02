@@ -33,7 +33,7 @@ struct ReflectedBinding {
 /// Returns false on parse failure. An empty result is valid (e.g.
 /// push-constant-only shaders like the baseline pass).
 bool reflectDescriptorBindings(const std::vector<u32>& spirv,
-                                std::vector<ReflectedBinding>& out);
+                               std::vector<ReflectedBinding>& out);
 
 class ShaderManager {
  public:
@@ -58,6 +58,10 @@ class ShaderManager {
  private:
   void* m_globalSession = nullptr;  // ISlangGlobalSession*
   void* m_session = nullptr;        // ISlangSession*
+  /// One slang::IModule* per successful loadModule call, kept alive for
+  /// the session's lifetime (the session's name cache does not hold its
+  /// own reference - see compileFile) and released in shutdown().
+  std::vector<void*> m_liveModules;
   std::string m_shaderRoot;
 };
 

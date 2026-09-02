@@ -66,8 +66,7 @@ u32 uploadVerified(backend::IRenderBackend* backend, const void* data,
     KENSHIN_ERROR("[vgscene] {} readback failed ({} bytes)", name, bytes);
     return handle;
   }
-  const u32 cpuCrc = util::crc32(
-      {static_cast<const u8*>(data), bytes});
+  const u32 cpuCrc = util::crc32({static_cast<const u8*>(data), bytes});
   const u32 gpuCrc = util::crc32(back);
   if (cpuCrc == gpuCrc)
     KENSHIN_INFO("[vgscene] {} crc ok {:08x} ({} bytes)", name, cpuCrc, bytes);
@@ -96,7 +95,7 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
   range.groupEnd = m_groupCount;
 
   // Clusters: offsets rebased into the SHARED vertex/index pools.
-  const u32 vertexBase = static_cast<u32>(m_positions.size() / 3);
+  const u32 vertexBase = static_cast<u32>(m_pos4.size());
   const u32 indexBase = static_cast<u32>(m_indices.size());
   for (const auto& cluster : dag.clusters) {
     geometry::DagCluster rebased = cluster;
@@ -107,10 +106,15 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
   m_clusterCount += static_cast<u32>(dag.clusters.size());
   range.clusterEnd = m_clusterCount;
 
-  m_positions.insert(m_positions.end(), dag.positions.begin(),
-                     dag.positions.end());
-  m_normals.insert(m_normals.end(), dag.normals.begin(), dag.normals.end());
-  m_uvs.insert(m_uvs.end(), dag.uvs.begin(), dag.uvs.end());
+  // vec4/vec2 pools (std430 vec3 arrays stride 16; shaders read float4).
+  for (usize v = 0; v < dag.positions.size() / 3; ++v)
+    m_pos4.emplace_back(dag.positions[v * 3], dag.positions[v * 3 + 1],
+                        dag.positions[v * 3 + 2], 0.0f);
+  for (usize v = 0; v < dag.normals.size() / 3; ++v)
+    m_norm4.emplace_back(dag.normals[v * 3], dag.normals[v * 3 + 1],
+                         dag.normals[v * 3 + 2], 0.0f);
+  for (usize v = 0; v < dag.uvs.size() / 2; ++v)
+    m_uv2.emplace_back(dag.uvs[v * 2], dag.uvs[v * 2 + 1]);
   m_indices.insert(m_indices.end(), dag.indices.begin(), dag.indices.end());
 
   // Mesh cull sphere: union of the level-0 (finest) clusters' bounds -
@@ -175,9 +179,9 @@ void VirtualGeometryScene::setInstances(
 
 void VirtualGeometryScene::onShutdown() {
   if (m_backend == nullptr) return;
-  for (const u32 handle : {m_clusterBuffer, m_groupBuffer, m_positionBuffer,
-                           m_normalBuffer, m_uvBuffer, m_indexBuffer,
-                           m_instanceBuffer})
+  for (const u32 handle :
+       {m_clusterBuffer, m_groupBuffer, m_positionBuffer, m_normalBuffer,
+        m_uvBuffer, m_indexBuffer, m_instanceBuffer})
     if (handle != backend::IRenderBackend::kInvalidBufferHandle)
       m_backend->destroyBuffer(handle);
   m_backend = nullptr;
@@ -194,28 +198,26 @@ u32 VirtualGeometryScene::flushPools() {
   f64 uploadMs = 0.0, verifyMs = 0.0;
   auto upload = [&](const void* data, usize bytes, const char* name) {
     f64 u = 0.0, v = 0.0;
-    const u32 handle =
-        uploadVerified(m_backend, data, bytes, name, &u, &v);
+    const u32 handle = uploadVerified(m_backend, data, bytes, name, &u, &v);
     uploadMs += u;
     verifyMs += v;
     return handle;
   };
-  m_clusterBuffer = upload(m_clusterData.data(), m_clusterData.size(),
-                           "vg-clusters");
+  m_clusterBuffer =
+      upload(m_clusterData.data(), m_clusterData.size(), "vg-clusters");
   m_groupBuffer = upload(m_groupData.data(), m_groupData.size(), "vg-groups");
-  m_positionBuffer = upload(m_positions.data(),
-                            m_positions.size() * sizeof(f32), "vg-positions");
-  m_normalBuffer = upload(m_normals.data(), m_normals.size() * sizeof(f32),
-                          "vg-normals");
-  m_uvBuffer =
-      upload(m_uvs.data(), m_uvs.size() * sizeof(f32), "vg-uvs");
-  m_indexBuffer = upload(m_indices.data(), m_indices.size() * sizeof(u32),
-                         "vg-indices");
+  m_positionBuffer =
+      upload(m_pos4.data(), m_pos4.size() * sizeof(glm::vec4), "vg-positions");
+  m_normalBuffer =
+      upload(m_norm4.data(), m_norm4.size() * sizeof(glm::vec4), "vg-normals");
+  m_uvBuffer = upload(m_uv2.data(), m_uv2.size() * sizeof(glm::vec2), "vg-uvs");
+  m_indexBuffer =
+      upload(m_indices.data(), m_indices.size() * sizeof(u32), "vg-indices");
   KENSHIN_INFO(
       "[vgscene] pools uploaded in {:.0f}ms (verify readback {:.0f}ms): "
       "{} clusters / {} groups / {} verts / {} indices",
-      uploadMs, verifyMs, m_clusterCount, m_groupCount,
-      m_positions.size() / 3, m_indices.size() / 3);
+      uploadMs, verifyMs, m_clusterCount, m_groupCount, m_pos4.size(),
+      m_indices.size() / 3);
   m_poolsDirty = false;
   return m_clusterBuffer;
 }

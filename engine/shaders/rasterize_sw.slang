@@ -13,8 +13,12 @@
 //
 // Bindings (SSBO set 0; buffers[i] -> binding i):
 //   0: float4 params[12] - [0..3] VIEW matrix columns (glm raw),
-//                          [4..7] viewProj columns (glm raw, Y UNflipped),
-//                          [8] = (width, height, pairCount, nearZ)
+//                          [4..7] PROJ columns (glm raw; applied to the
+//                          VIEW-space vertices of phase 1; may be the
+//                          camera's own Y-FLIPPED matrix - rows then
+//                          arrive in framebuffer order),
+//                          [8] = (width, height, pairCount, nearZ),
+//                          [9].x = yFlip flag (cull-sign selector)
 //   1: float3 positions[] - mesh-local vertex pool (world = model * local)
 //   2: uint   indices[]   - shared index pool
 //   3: GpuCluster clusters[] - 48B, mirrors packGpuCluster
@@ -75,22 +79,35 @@ void rasterizeTriangle(float2 s0, float2 s1, float2 s2,
                        float z0, float z1, float z2,
                        uint2 widthHeight, uint clusterIdx, uint triIdx)
 {
+    // Doubled signed area = cross(s1-s0, s2-s0); cull by sign. The
+    // culled half depends on the projection's Y orientation: y-up rows
+    // (unflipped proj, the S4.4 differential convention) cull area<0;
+    // y-down rows (the camera's flipped proj, framebuffer order) cull
+    // area>0 - the same CW-as-viewed half the HW path's CCW-front
+    // culling drops. The CPU reference implements the identical rule.
+    const float area2 = (s1.x - s0.x) * (s2.y - s0.y)
+                      - (s1.y - s0.y) * (s2.x - s0.x);
+    if (area2 == 0.0) return;
+    const float cullSign = params[9].x > 0.5 ? 1.0 : -1.0;
+    if (area2 * cullSign > 0.0)
+    {
+        InterlockedAdd(counters[2], 1);
+        return;
+    }
+    // Canonicalize to positive area so the edge equations below keep
+    // their w >= 0 inside test on both orientations: swap v1/v2 (the
+    // payload names the triangle by index, not by corner order).
+    if (area2 < 0.0)
+    {
+        float2 ts = s1; s1 = s2; s2 = ts;
+        float tz = z1; z1 = z2; z2 = tz;
+    }
+
     // Edge functions W_i(p) = cross(edge, p - v0): positive inside for a
     // consistently wound triangle; per-step deltas are the raw edge vecs.
     const float2 e0 = s1 - s0;
     const float2 e1 = s2 - s1;
     const float2 e2 = s0 - s2;
-    // Doubled signed area = cross(s1-s0, s2-s0); cull backfacing by sign
-    // (the CPU reference culls the same sign, so the differential pins
-    // orientation; matching the HW path's front-face convention happens
-    // at the S4.5 dual-path comparison).
-    const float area2 = e0.x * (s2.y - s0.y) - e0.y * (s2.x - s0.x);
-    if (area2 == 0.0) return;
-    if (area2 < 0.0)
-    {
-        InterlockedAdd(counters[2], 1);
-        return;
-    }
 
     // Screen-space affine depth: z = a*x + b*y + c through the three
     // vertices (NDC z is affine in screen space for a planar triangle).
@@ -131,7 +148,12 @@ void rasterizeTriangle(float2 s0, float2 s1, float2 s2,
         // Row-start values recomputed from the ORIGIN (p00) values with
         // a single multiply-add per edge/depth - no accumulation drift,
         // and the CPU reference mirrors the exact same expressions.
-        const float ry = float(y) - p00.y;
+        // NOTE: + 0.5 - the ROW's pixel centers sit at y + 0.5, same as
+        // p00 = (x0 + 0.5, y0 + 0.5); without it every row samples the
+        // pixel's TOP EDGE and near-edge pixels flip in/out (the S4.5
+        // crack bug - the differential missed it because the CPU mirror
+        // shared the same half-pixel offset).
+        const float ry = float(y) + 0.5 - p00.y;
         float w0 = w0r0 + e0.x * ry;
         float w1 = w1r0 + e1.x * ry;
         float w2 = w2r0 + e2.x * ry;

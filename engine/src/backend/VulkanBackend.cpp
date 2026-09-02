@@ -1,19 +1,18 @@
 #include "kenshin/backend/VulkanBackend.h"
 
-#include "vulkan/Vk.h"
-#include "vulkan/CommandContext.h"
-#include "vulkan/ComputeOneShot.h"
-#include "vulkan/Readback.h"
-#include "vulkan/PipelineStore.h"
-#include "vulkan/MeshStore.h"
-#include "vulkan/BufferStore.h"
-#include "vulkan/DescriptorCache.h"
-#include "vulkan/UploadEngine.h"
-
 #include "kenshin/core/Log.h"
 #include "kenshin/manager/ShaderManager.h"
+#include "vulkan/BufferStore.h"
+#include "vulkan/CommandContext.h"
+#include "vulkan/ComputeOneShot.h"
+#include "vulkan/DescriptorCache.h"
 #include "vulkan/FrameSync.h"
+#include "vulkan/MeshStore.h"
+#include "vulkan/PipelineStore.h"
+#include "vulkan/Readback.h"
 #include "vulkan/Swapchain.h"
+#include "vulkan/UploadEngine.h"
+#include "vulkan/Vk.h"
 #include "vulkan/VulkanContext.h"
 #include "vulkan/VulkanDevice.h"
 
@@ -327,15 +326,16 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   if (impl.gpuTimestamps && slot.timingQueries != VK_NULL_HANDLE) {
     vkCmdResetQueryPool(impl.cmd.cmd(), slot.timingQueries, 0, 3);
     vkCmdWriteTimestamp2(impl.cmd.cmd(), VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                        slot.timingQueries, 0);
+                         slot.timingQueries, 0);
   }
 
   // Clear the offscreen target (the "rendering" of S1.3).
-  CommandContext::pipelineBarrier(impl.cmd.cmd(),
-                CommandContext::imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_UNDEFINED,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                             VK_ACCESS_2_TRANSFER_WRITE_BIT));
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(
+          slot.offscreen.image, VK_IMAGE_LAYOUT_UNDEFINED,
+          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT));
   CommandContext::clearColorImage(impl.cmd.cmd(), slot.offscreen.image,
                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                   info.clearColor);
@@ -344,11 +344,12 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   // begin/end render here; endFrame moves it to SHADER_READ_ONLY).
   CommandContext::pipelineBarrier(
       impl.cmd.cmd(),
-      CommandContext::imageBarrier(slot.offscreen.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
-                       VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+      CommandContext::imageBarrier(
+          slot.offscreen.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+          VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
 
   // Depth companion target: reset to DEPTH_ATTACHMENT each frame.
   ensureViewportDepth(info.width, info.height);
@@ -395,15 +396,16 @@ void VulkanBackend::endFrame() {
   impl.cmd.endPass();
   if (impl.gpuTimestamps && slot.timingQueries != VK_NULL_HANDLE)
     vkCmdWriteTimestamp2(impl.cmd.cmd(), VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-                        slot.timingQueries, 1);
+                         slot.timingQueries, 1);
 
   // offscreen: COLOR_ATTACHMENT -> SHADER_READ_ONLY for the ImGui sample.
-  CommandContext::pipelineBarrier(impl.cmd.cmd(),
-                CommandContext::imageBarrier(slot.offscreen.image,
-                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                             VK_ACCESS_2_SHADER_READ_BIT));
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(slot.offscreen.image,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                   VK_ACCESS_2_SHADER_READ_BIT));
 
   ImDrawData* drawData = nullptr;
   if (impl.imguiInited) {
@@ -413,12 +415,13 @@ void VulkanBackend::endFrame() {
 
   // swapchain image: UNDEFINED -> COLOR_ATTACHMENT (ImGui draws the
   // whole window through dynamic rendering).
-  CommandContext::pipelineBarrier(impl.cmd.cmd(),
-                CommandContext::imageBarrier(dstImage, VK_IMAGE_LAYOUT_UNDEFINED,
-                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                             VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
-                                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(), CommandContext::imageBarrier(
+                          dstImage, VK_IMAGE_LAYOUT_UNDEFINED,
+                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
 
   const VkClearValue uiClear{};
   const VkRenderingAttachmentInfo colorAttachment{
@@ -449,14 +452,14 @@ void VulkanBackend::endFrame() {
   // when a full-frame screenshot was requested).
   if (impl.readback.captureRequested()) {
     impl.readback.ensureCaptureStaging(impl.device.allocator,
-                                   impl.swapchain.extent.width,
-                                   impl.swapchain.extent.height);
+                                       impl.swapchain.extent.width,
+                                       impl.swapchain.extent.height);
     CommandContext::pipelineBarrier(
         impl.cmd.cmd(),
-        CommandContext::imageBarrier(dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                     VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                     VK_ACCESS_2_TRANSFER_READ_BIT));
+        CommandContext::imageBarrier(
+            dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT));
     const VkBufferImageCopy captureRegion{
         .bufferOffset = 0,
         .bufferRowLength = 0,
@@ -468,26 +471,26 @@ void VulkanBackend::endFrame() {
     };
     vkCmdCopyImageToBuffer(impl.cmd.cmd(), dstImage,
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           impl.readback.captureStaging(), 1,
-                           &captureRegion);
-    CommandContext::pipelineBarrier(impl.cmd.cmd(),
-                  CommandContext::imageBarrier(dstImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                               VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                               VK_ACCESS_2_MEMORY_READ_BIT));
+                           impl.readback.captureStaging(), 1, &captureRegion);
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(),
+        CommandContext::imageBarrier(
+            dstImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT));
     impl.readback.markCaptured();
   } else {
     CommandContext::pipelineBarrier(
         impl.cmd.cmd(),
-        CommandContext::imageBarrier(dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                     VK_ACCESS_2_MEMORY_READ_BIT));
+        CommandContext::imageBarrier(
+            dstImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT));
   }
 
   if (impl.gpuTimestamps && slot.timingQueries != VK_NULL_HANDLE)
     vkCmdWriteTimestamp2(impl.cmd.cmd(), VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-                        slot.timingQueries, 2);
+                         slot.timingQueries, 2);
 
   if (!impl.cmd.end()) {
     KENSHIN_ERROR("[vulkan] vkEndCommandBuffer failed");
@@ -562,8 +565,8 @@ void VulkanBackend::endFrame() {
 
 bool VulkanBackend::runComputeOneshot(
     const Job& job, std::vector<u8> outputs[Job::kMaxBuffers]) {
-  return runComputeOneshotJob(m_impl->device, m_impl->frameSync.slots[0].commandPool,
-                              job, outputs);
+  return runComputeOneshotJob(
+      m_impl->device, m_impl->frameSync.slots[0].commandPool, job, outputs);
 }
 
 // ── ImGui integration (S1.5) ──────────────────────────────────
@@ -732,9 +735,10 @@ void VulkanBackend::ensureViewportDepth(u32 width, u32 height) {
       .format = VK_FORMAT_D32_SFLOAT,
       .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
   };
-  KE_VK(vkCreateImageView(impl.device.device, &viewInfo, nullptr, &impl.depthView));
-  vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE, (uint64_t)impl.depthImage,
-                  "viewport-depth");
+  KE_VK(vkCreateImageView(impl.device.device, &viewInfo, nullptr,
+                          &impl.depthView));
+  vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE,
+                  (uint64_t)impl.depthImage, "viewport-depth");
   vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE_VIEW,
                   (uint64_t)impl.depthView, "viewport-depth-view");
   impl.depthWidth = width;
@@ -742,8 +746,8 @@ void VulkanBackend::ensureViewportDepth(u32 width, u32 height) {
 }
 
 u32 VulkanBackend::createGraphicsPipeline(const GraphicsPipelineInfo& info) {
-  return m_impl->pipelines.create(m_impl->device.device, m_impl->swapchain.format,
-                                  info);
+  return m_impl->pipelines.create(m_impl->device.device,
+                                  m_impl->swapchain.format, info);
 }
 
 void VulkanBackend::destroyGraphicsPipeline(u32 pipeline) {
@@ -764,8 +768,8 @@ void VulkanBackend::destroyGraphicsPipeline(u32 pipeline) {
 // ── general buffer forwards ────────────────────────────────────
 
 u32 VulkanBackend::createBuffer(const BufferDesc& desc) {
-  return m_impl->buffers.create(
-      m_impl->device, m_impl->frameSync.slots[0].commandPool, desc);
+  return m_impl->buffers.create(m_impl->device,
+                                m_impl->frameSync.slots[0].commandPool, desc);
 }
 
 void VulkanBackend::destroyBuffer(u32 buffer) {
@@ -784,6 +788,69 @@ bool VulkanBackend::readbackBuffer(u32 buffer, usize offset, usize bytes,
       m_impl->device, m_impl->frameSync.slots[0].commandPool,
       {m_impl->buffers.buffer(buffer), {}, m_impl->buffers.size(buffer)},
       offset, bytes, out);
+}
+
+// ── fullscreen pass (VisBuffer decode) ─────────────────────────
+
+u32 VulkanBackend::createFullscreenPipeline(
+    const FullscreenPipelineInfo& info) {
+  return m_impl->pipelines.createFullscreen(m_impl->device.device,
+                                            m_impl->swapchain.format, info);
+}
+
+void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
+                                   u32 bufferCount, const void* push,
+                                   usize pushBytes) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.fullscreenCount())
+    return;
+  const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
+  if (!fs.valid) return;
+
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+
+  // Validate + collect the buffer infos FIRST - bailing out mid-way
+  // would leave the pass opened with nothing drawn.
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+
+  const vkutil::ScopedDebugLabel passLabel{impl.cmd.cmd(), "decode"};
+  if (!impl.cmd.passOpen())
+    impl.cmd.beginViewportPass(slot.offscreen.view, impl.depthView,
+                               slot.offscreen.width, slot.offscreen.height);
+
+  // Write THIS frame slot's set (the slot's prior frame has provably
+  // completed at beginFrame - its buffer contents may change freely).
+  const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+  std::vector<VkWriteDescriptorSet> writes(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i)
+    writes[i] = VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set,
+        .dstBinding = i,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &infos[i],
+    };
+  vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
+                         nullptr);
+
+  vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          fs.layout, 0, 1, &set, 0, nullptr);
+  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    fs.pipeline);
+  vkCmdPushConstants(impl.cmd.cmd(), fs.layout,
+                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                     0, static_cast<u32>(pushBytes), push);
+  vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
 }
 
 void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {

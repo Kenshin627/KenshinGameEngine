@@ -8,6 +8,13 @@
 //   KENSHINDemo --no-validation                 disable the validation layer (dev default: ON)
 //   KENSHINDemo --size WxH                       client size (default 1600x900)
 //   KENSHINDemo --screenshot path.bmp            capture the last rendered frame
+//   KENSHINDemo --kgeo path.kgeo --virtual       VisBuffer decode path (S4.5)
+//                                                instead of the baseline draw
+//                                                (needs --frames >= 2: the
+//                                                one-shot chain runs between
+//                                                frames, so frame 1 only
+//                                                warms the VisBuffer)
+//   KENSHINDemo --kgeo path.kgeo --virtual --checker   UV checkerboard view
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -24,7 +31,10 @@
 #include "kenshin/core/Window.h"
 #include "kenshin/manager/MeshPool.h"
 #include "kenshin/manager/ShaderManager.h"
+#include "kenshin/renderer/ClusterCullPass.h"
+#include "kenshin/renderer/MaterialDecodePass.h"
 #include "kenshin/renderer/Renderer.h"
+#include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/scene/Camera.h"
 #include "kenshin/scene/CameraController.h"
@@ -33,9 +43,45 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
 
+namespace {
+// Crash triage aid: log a symbolized stack on any unhandled SEH
+// exception (this is what caught the Slang module-cache use-after-free).
+LONG WINAPI crashLogFilter(EXCEPTION_POINTERS* ep) {
+  HANDLE proc = GetCurrentProcess();
+  SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+  SymInitialize(proc, nullptr, TRUE);
+  void* frames[64]{};
+  const USHORT n = CaptureStackBackTrace(0, 64, frames, nullptr);
+  fprintf(stderr, "=== UNHANDLED EXCEPTION code=%08lx addr=%p\n",
+          ep->ExceptionRecord->ExceptionCode,
+          ep->ExceptionRecord->ExceptionAddress);
+  for (USHORT i = 0; i < n; ++i) {
+    char buf[sizeof(SYMBOL_INFO) + 256]{};
+    auto* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+    sym->MaxNameLen = 255;
+    DWORD64 disp = 0;
+    if (SymFromAddr(proc, reinterpret_cast<DWORD64>(frames[i]), &disp, sym))
+      fprintf(stderr, "  #%02u %s+%llu\n", i, sym->Name,
+              static_cast<unsigned long long>(disp));
+    else
+      fprintf(stderr, "  #%02u %p\n", i, frames[i]);
+  }
+  fflush(stderr);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+}  // namespace
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -51,6 +97,8 @@ struct Args {
                               // torus | cylinder | cone | knot | <path.obj>
   std::string screenshot;
   std::string screenshotUi;  // full window incl. ImGui
+  bool virtualPath = false;  // S4.5: chain + decode instead of baseline draw
+  bool checker = false;      // UV checkerboard debug view (decode path)
 };
 
 Args parseArgs(int argc, char** argv) {
@@ -72,6 +120,10 @@ Args parseArgs(int argc, char** argv) {
       args.screenshot = argv[++i];
     else if (std::strcmp(argv[i], "--screenshot-ui") == 0 && i + 1 < argc)
       args.screenshotUi = argv[++i];
+    else if (std::strcmp(argv[i], "--virtual") == 0)
+      args.virtualPath = true;
+    else if (std::strcmp(argv[i], "--checker") == 0)
+      args.checker = true;
   }
   if (args.width <= 0 || args.height <= 0) {
     args.width = 1600;
@@ -107,9 +159,96 @@ std::string findShaderRoot() {
   }
   return "engine/shaders";
 }
+
+/// S4.5 one-shot VisBuffer chain: instance cull -> work-item expand ->
+/// cluster cull (the LOD cut) -> software raster. Blocking (each stage
+/// is its own one-shot compute dispatch); runs BETWEEN frames. `visOut`
+/// returns width*height u64 pixels. Frustum planes come from the
+/// FLIPPED viewProj (the extraction the S4.3 differential pins); the
+/// rasterizer itself runs UNFLIPPED-Y (raster parity, S4.4).
+bool runVisChain(
+    kenshin::backend::IRenderBackend& backend,
+    kenshin::manager::ShaderManager& shaders,
+    const kenshin::renderer::VirtualGeometryScene& scene,
+    std::span<const kenshin::renderer::CullGpuInstance> instances,
+    std::span<const kenshin::renderer::GpuMeshRangePair> meshRanges,
+    const kenshin::scene::Camera& camera, float fovYDeg, float pixelThreshold,
+    kenshin::u32 width, kenshin::u32 height,
+    std::vector<kenshin::u64>& visOut) {
+  using namespace kenshin;
+  glm::vec4 planes[6];
+  renderer::extractFrustumPlanes(camera.viewProjMatrix(), planes);
+  std::vector<u32> visible;
+  if (!renderer::cullInstancesOnGpu(backend, shaders, instances, planes,
+                                    visible)) {
+    KENSHIN_ERROR("[vg] instance cull failed");
+    return false;
+  }
+
+  std::vector<glm::uvec2> workItems;
+  if (!renderer::expandWorkItemsOnGpu(backend, shaders, visible, instances,
+                                      meshRanges, workItems)) {
+    KENSHIN_ERROR("[vg] work-item expand failed");
+    return false;
+  }
+
+  // Same metric the CPU cut uses (selectLodCut), so the GPU cut and the
+  // preview panel stay comparable: 2*tan(fov/2)/viewHeight.
+  const f32 worldPerPixel =
+      2.0f * std::tan(glm::radians(fovYDeg) * 0.5f) / static_cast<f32>(height);
+  std::vector<glm::uvec2> pairs;
+  u32 cullStats[3] = {};
+  if (!renderer::cullClustersOnGpu(backend, shaders, camera.position(),
+                                   pixelThreshold, worldPerPixel,
+                                   scene.clusterData(), scene.groupData(),
+                                   workItems, instances, pairs, cullStats)) {
+    KENSHIN_ERROR("[vg] cluster cull failed");
+    return false;
+  }
+
+  // Feed the rasterizer the camera's OWN (Y-flipped) projection: its
+  // row map then produces framebuffer row order (row 0 = top), which is
+  // exactly how the decode pass indexes the VisBuffer, and the yFlip
+  // flag makes the backface test cull the same half the HW path culls.
+  // (Flipping the row index inside the FS instead - uint(h)-1-y -
+  // deterministically device-losts on this driver; the flip is free
+  // here.)
+  const renderer::SoftRasterFrame frame{camera.viewMatrix(),
+                                        camera.projMatrix(),
+                                        camera.nearPlane(),
+                                        width,
+                                        height,
+                                        /*yFlip=*/true};
+  u32 rasterStats[4] = {};
+  if (!renderer::rasterizeOnGpu(backend, shaders, frame, scene.positions4(),
+                                scene.indices(), scene.clusterData(), instances,
+                                pairs, visOut, rasterStats)) {
+    KENSHIN_ERROR("[vg] software raster failed");
+    return false;
+  }
+
+  usize covered = 0;
+  for (const u64 v : visOut) covered += v != 0;
+  // Total triangles in the cut (parsed from the packed cluster table).
+  u32 cutTris = 0;
+  for (const auto& pair : pairs) {
+    u32 indexCount;
+    std::memcpy(&indexCount,
+                scene.clusterData().data() + usize(pair.y) * 48 + 36, 4);
+    cutTris += indexCount / 3;
+  }
+  KENSHIN_INFO(
+      "[vg] chain: {} inst visible / {} clusters cut ({} too-coarse, {} "
+      "source-too-coarse, {} tris) / {} px writes / {} px covered ({:.1f}%)",
+      visible.size(), pairs.size(), cullStats[1], cullStats[2], cutTris,
+      rasterStats[1], covered,
+      100.0 * f64(covered) / (f64(width) * f64(height)));
+  return true;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
+  SetUnhandledExceptionFilter(crashLogFilter);
   const Args args = parseArgs(argc, argv);
 
   kenshin::log::init();
@@ -154,6 +293,14 @@ int main(int argc, char** argv) {
                                  : std::vector<demo::SceneShape>{};
   demo::uploadScene(scene, meshPool);
 
+  // ---- S4.5 virtual path state (one-shot chain + decode) ---------------
+  // Only meaningful with --kgeo + --virtual; declared here so the fill
+  // inside the kgeo block below reaches the frame loop.
+  std::vector<kenshin::renderer::CullGpuInstance> chainInstances;
+  std::vector<kenshin::renderer::GpuMeshRangePair> chainMeshRanges;
+  kenshin::renderer::MaterialDecodePass decodePass;
+  kenshin::renderer::DecodeParams decodeParams;
+
   // ---- .kgeo LOD preview (S3.4) ---------------------------------------
   demo::KgeoPreview kgeoPreview;
   bool kgeoMode = false;
@@ -173,6 +320,17 @@ int main(int argc, char** argv) {
       vgScene.flushPools();
       vgScene.setInstances(
           {kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}});
+      if (args.virtualPath) {
+        const kenshin::renderer::VgMeshRange& mesh = vgScene.meshes()[vgMeshId];
+        // One identity instance (the v1 decode payload carries no
+        // instance bits); world bounds == mesh bounds under identity.
+        kenshin::renderer::CullGpuInstance inst;
+        inst.meshId = vgMeshId;
+        inst.bounds = mesh.boundsSphere;
+        chainInstances = {inst};
+        chainMeshRanges.push_back({mesh.clusterBegin, mesh.clusterEnd});
+        decodeParams.checkerboard = args.checker;
+      }
       overlay.setExtraPanel(
           [&kgeoPreview] { demo::drawLodPanel(kgeoPreview); });
       KENSHIN_INFO("[kgeo] loaded: {} clusters / {} groups / {} levels",
@@ -187,10 +345,34 @@ int main(int argc, char** argv) {
       KENSHIN_WARN("[kgeo] load failed: {} (continuing with --mesh)", kgeoLog);
   }
 
+  // ---- virtual path plumbing (S4.5) --------------------------------------
+  // The S4.x chain/decode APIs are engine-side renderer code that speaks
+  // the backend interface; resolved from the registry the same way the
+  // scene's own onInit does.
+  const bool virtualPath = kgeoMode && args.virtualPath;
+  kenshin::renderer::VirtualGeometryScene* vgScene = nullptr;
+  kenshin::backend::IRenderBackend* vgBackend = nullptr;
+  if (virtualPath) {
+    vgScene = &engine.get<kenshin::renderer::VirtualGeometryScene>();
+    vgBackend = &engine.get<kenshin::backend::IRenderBackend>();
+  }
+
   kenshin::core::FrameStats<240> stats;
   kenshin::Timer frameTimer;
   bool cameraChecked = false;
   std::vector<kenshin::renderer::DrawItem> items;
+
+  // Chain rerun gate: a static view recomputes identical floats, so the
+  // blocking one-shot chain only needs to rerun on actual changes.
+  struct ChainKey {
+    glm::vec3 pos, target;
+    float threshold;
+    kenshin::u32 w, h;
+    bool operator==(const ChainKey&) const = default;
+  };
+  ChainKey lastKey{};
+  bool chainRan = false;
+  bool decodeReady = false;  // pipeline is lazy: needs the swapchain format
   const auto writeScreenshot =
       [&renderer](const char* what, const std::string& path, bool fullFrame) {
         std::vector<kenshin::u8> rgba;
@@ -260,7 +442,7 @@ int main(int argc, char** argv) {
         items.push_back({shape.handle,
                          glm::translate(glm::mat4(1.0f), shape.offset),
                          shape.kd});
-    } else if (kgeoMode && drawable &&
+    } else if (kgeoMode && !virtualPath && drawable &&
                kgeoPreview.meshHandle != kenshin::assets::kInvalidMeshHandle) {
       items.push_back({kgeoPreview.meshHandle, glm::mat4(1.0f),
                        glm::vec3(0.75f, 0.75f, 0.78f)});
@@ -271,12 +453,47 @@ int main(int argc, char** argv) {
         glm::vec3(kStudioLight[0], kStudioLight[1], kStudioLight[2])};
     renderer.submit(view, items);
 
+    if (virtualPath && drawable) {
+      // Lazy pipeline init: createFullscreenPipeline reads the swapchain
+      // format, which only exists after the first beginFrame.
+      if (!decodeReady) decodeReady = decodePass.init(*vgBackend, shaders);
+      if (decodeReady) {
+        decodeParams.camPos = camera.position();
+        // The camera's own (Y-flipped) viewProj - the same matrix the
+        // chain rasterized with, so the decode's screen math lands on
+        // the VisBuffer's rows exactly.
+        decodePass.draw(*vgBackend, camera.viewProjMatrix(), *vgScene,
+                        decodeParams, static_cast<kenshin::u32>(vp.x),
+                        static_cast<kenshin::u32>(vp.y));
+      }
+    }
+
     // Full-frame capture must be flagged before endFrame records it.
     const bool exiting = isLastFrame || !window.isOpen();
     if (!args.screenshotUi.empty() && exiting) renderer.requestFrameCapture();
 
     renderer.endFrame();
     engine.endFrame();
+
+    // S4.5 chain: BETWEEN frames (each one-shot stage submits its own
+    // command buffer; the decode draw in the NEXT frame consumes the
+    // result - with a static camera the one-frame latency is invisible).
+    if (virtualPath && drawable) {
+      const ChainKey key{
+          camera.position(), camera.target(), kgeoPreview.pixelThreshold,
+          static_cast<kenshin::u32>(vp.x), static_cast<kenshin::u32>(vp.y)};
+      if (!chainRan || !(key == lastKey)) {
+        lastKey = key;
+        chainRan = true;
+        std::vector<kenshin::u64> vis;
+        if (!runVisChain(*vgBackend, shaders, *vgScene, chainInstances,
+                         chainMeshRanges, camera, controller.fovYDeg,
+                         key.threshold, key.w, key.h, vis))
+          break;
+        decodePass.updateVis(*vgBackend, std::move(vis));
+      }
+    }
+
     stats.push(dt * 1000.0f);
     if (frame > 0 && frame % 60 == 0)
       KENSHIN_INFO("[pacing] avg={:.3f}ms std={:.3f}ms max={:.3f}ms fps={:.1f}",
@@ -298,6 +515,7 @@ int main(int argc, char** argv) {
   }
 
   KENSHIN_INFO("main loop exited after {} frames", frame);
+  if (virtualPath) decodePass.onShutdown(*vgBackend);
   // Reverse registration order: overlay context, mesh pool (all GPU
   // meshes), renderer pipeline, shader manager, backend, window.
   engine.shutdown();

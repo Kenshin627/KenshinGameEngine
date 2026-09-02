@@ -10,27 +10,27 @@ KENSHIN_NS_BEGIN
 
 namespace renderer {
 
-std::vector<u8> packRasterParams(const SoftRasterFrame& frame,
-                                 u32 pairCount) {
+std::vector<u8> packRasterParams(const SoftRasterFrame& frame, u32 pairCount) {
   // float4[12]; glm columns copied raw (the shader combines them
   // explicitly - glm column-major, Slang mul reads rows).
   std::vector<u8> data(12 * sizeof(glm::vec4));
   std::memcpy(data.data() + 0 * sizeof(glm::vec4), &frame.view,
               sizeof(glm::mat4));
-  std::memcpy(data.data() + 4 * sizeof(glm::vec4), &frame.viewProj,
+  std::memcpy(data.data() + 4 * sizeof(glm::vec4), &frame.proj,
               sizeof(glm::mat4));
   const glm::vec4 tail(static_cast<f32>(frame.width),
                        static_cast<f32>(frame.height),
                        static_cast<f32>(pairCount), frame.nearZ);
-  std::memcpy(data.data() + 8 * sizeof(glm::vec4), &tail,
-              sizeof(glm::vec4));
+  std::memcpy(data.data() + 8 * sizeof(glm::vec4), &tail, sizeof(glm::vec4));
+  const glm::vec4 flags(frame.yFlip ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+  std::memcpy(data.data() + 9 * sizeof(glm::vec4), &flags, sizeof(glm::vec4));
   return data;
 }
 
 bool rasterizeOnGpu(backend::IRenderBackend& backend,
                     manager::ShaderManager& shaders,
                     const SoftRasterFrame& frame,
-                    std::span<const glm::vec3> positions,
+                    std::span<const glm::vec4> positions,
                     std::span<const u32> indices,
                     const std::vector<u8>& clusterData,
                     std::span<const CullGpuInstance> instances,
@@ -51,17 +51,12 @@ bool rasterizeOnGpu(backend::IRenderBackend& backend,
       packRasterParams(frame, static_cast<u32>(visiblePairs.size()));
   const u32 zeroStats[4] = {};
 
-  // std430: a vec3 array strides 16 (rounds up to vec4 alignment), so the
-  // shader reads float4 elements - repack the host's packed vec3s.
-  std::vector<glm::vec4> pos4(positions.size(), glm::vec4(0.0f));
-  for (usize i = 0; i < positions.size(); ++i)
-    pos4[i] = glm::vec4(positions[i], 0.0f);
-
   backend::IRenderBackend::Job job;
   job.spirv = spirv.data();
   job.spirvBytes = spirv.size() * sizeof(u32);
   job.buffers[0] = {params.data(), params.size(), false};
-  job.buffers[1] = {pos4.data(), pos4.size() * sizeof(glm::vec4), false};
+  job.buffers[1] = {positions.data(), positions.size() * sizeof(glm::vec4),
+                    false};
   job.buffers[2] = {indices.data(), indices.size() * sizeof(u32), false};
   job.buffers[3] = {clusterData.data(), clusterData.size(), false};
   job.buffers[4] = {instances.data(),

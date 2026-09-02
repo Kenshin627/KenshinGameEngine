@@ -23,6 +23,7 @@ struct VulkanContext {
   // Feature support (queried from the selected physical device)
   bool supportsBufferInt64Atomics = false;
   bool supportsTimelineSemaphore = false;
+  bool supportsDrawParameters = false;  // SV_VertexID (fullscreen passes)
   bool supportsSynchronization2 = false;
   bool supportsDynamicRendering = false;
 
