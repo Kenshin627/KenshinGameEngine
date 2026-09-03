@@ -385,6 +385,21 @@ int main(int argc, char** argv) {
           kenshin::renderer::CullGpuInstance inst;
           inst.model = model;
           inst.meshId = vgMeshId;
+          // WORLD bounds sphere (the cull input): center transformed,
+          // radius scaled by the max column length - the same derivation
+          // VirtualGeometryScene::setInstances applies. Without this the
+          // bounds stay (0,0,0,-1) and the frustum test degenerates to
+          // "does the view contain the world origin" - half the camera
+          // orientations wrongly culled everything (the S4.6 "clipped at
+          // certain angles" report).
+          const kenshin::f32 scale =
+              std::max({glm::length(model[0]), glm::length(model[1]),
+                        glm::length(model[2])});
+          inst.bounds =
+              glm::vec4(glm::vec3(model * glm::vec4(mesh.boundsSphere.x,
+                                                    mesh.boundsSphere.y,
+                                                    mesh.boundsSphere.z, 1.0f)),
+                        mesh.boundsSphere.w * scale);
           return inst;
         };
         if (args.multi) {
