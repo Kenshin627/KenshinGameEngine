@@ -5,6 +5,7 @@
 // any divergence here is a pyramid bug.
 
 #include <catch2/catch_test_macros.hpp>
+#include <cstdio>
 #include <cstring>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -27,21 +28,21 @@ using namespace kenshin;
 
 const char* kShaderRoot = KENSHIN_SOURCE_DIR "/engine/shaders";
 
-// CPU mirror of build_hzb.slang: identical clamped 2x2 min-reduce of
-// the vis depth words (mode-0 extraction included).
+// CPU mirror of build_hzb.slang (atomic climb): L0 = the RAW per-pixel
+// depth words (one texel per pixel, no reduction), levels 1+ are
+// clamped 2x2 min-reductions of the previous level. (The earlier
+// per-level kernel's "L0" was a min-of-2x2 - a different, coarser
+// convention both sides then shared.)
 std::vector<u32> hzbCpu(const std::vector<u64>& vis, u32 w, u32 h) {
   const auto layout = renderer::hzbLayout(w, h);
   std::vector<u32> pyr(layout.totalTexels, 0);
-  std::vector<u32> src;
-  for (u32 level = 0; level < layout.levelCount; ++level) {
-    const bool extract = level == 0;
-    if (extract) {
-      src.resize(vis.size() * 2);
-      std::memcpy(src.data(), vis.data(), vis.size() * 8);
-    }
-    const u32 srcW = extract ? w : layout.levelW[level - 1];
-    const u32 srcH = extract ? h : layout.levelH[level - 1];
-    const u32 srcOffset = extract ? 0 : layout.levelOffset[level - 1];
+  // L0: raw depth words.
+  for (u32 i = 0; i < vis.size(); ++i) pyr[i] = u32(vis[i] >> 32);
+  // Levels 1+: clamped 2x2 min of the previous level.
+  for (u32 level = 1; level < layout.levelCount; ++level) {
+    const u32 srcW = layout.levelW[level - 1];
+    const u32 srcH = layout.levelH[level - 1];
+    const u32 srcOffset = layout.levelOffset[level - 1];
     for (u32 t = 0; t < layout.levelW[level] * layout.levelH[level]; ++t) {
       const u32 dx = t % layout.levelW[level];
       const u32 dy = t / layout.levelW[level];
@@ -50,13 +51,10 @@ std::vector<u32> hzbCpu(const std::vector<u64>& vis, u32 w, u32 h) {
         for (int i = 0; i < 2; ++i) {
           const u32 sx = std::min(dx * 2 + u32(i), srcW - 1);
           const u32 sy = std::min(dy * 2 + u32(j), srcH - 1);
-          const u32 word = extract ? src[2 * (sy * srcW + sx) + 1]
-                                   : pyr[srcOffset + sy * srcW + sx];
-          m = std::min(m, word);
+          m = std::min(m, pyr[srcOffset + sy * srcW + sx]);
         }
       pyr[layout.levelOffset[level] + dy * layout.levelW[level] + dx] = m;
     }
-    // (the CPU chain works in-place on the accumulating pyramid)
   }
   return pyr;
 }
@@ -163,9 +161,7 @@ TEST_CASE("HZB pyramid GPU/CPU differential", "[gpu][hzb]") {
     perLevel += " L" + std::to_string(L) + "=" + std::to_string(lm);
   }
   INFO("levels " << layout.levelCount << ", texels " << pyrGpu.size()
-                 << ", mismatches " << mismatches << " |" << perLevel
-                 << " | first L1 diff gpu=" << pyrGpu[layout.levelOffset[1]]
-                 << " cpu=" << pyrCpu[layout.levelOffset[1]]);
+                 << ", mismatches " << mismatches << " |" << perLevel);
   REQUIRE(mismatches == 0);
 
   backend->shutdown();

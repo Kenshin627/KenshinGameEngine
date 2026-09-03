@@ -1,55 +1,44 @@
-// M3.1: HZB pyramid - one reduction step per dispatch.
-// The VisBuffer's winner depth bits ARE the per-pixel nearest-surface
-// depth (a standard depth buffer in reversed-bit form); the pyramid
-// min-reduces them 2x2 (min bits = FARTHEST depth), so a texel is a
-// conservative "nothing farther renders here" bound. Empty pixels
-// (word 0) reduce a tile to 0 = "occludes nothing" - the safe side.
+// M3.2: HZB pyramid - single dispatch, atomic climb.
+// Each thread owns one base-level texel: extract its depth word from
+// the vis and InterlockedMin it into EVERY ancestor up the 2x2 mip
+// chain (floor(x/2) mapping covers the same leaves a clamped-2x2
+// chain reads) - texels converge with no inter-level barriers. The
+// pyramid buffer must be PRE-FILLED with 0xFFFFFFFF.
 //
 // Bindings (SSBO set 0):
-//   0: float4 params[2] - [0] = (srcW, srcH, srcOffset, mode)
-//                          [1] = (dstOffset, dstW, dstH, unused)
-//                          mode 0: src = VisBuffer u64 words (depth is
-//                                  the HIGH word = uint index 2*i+1)
-//                          mode 1: src = pyramid u32 texels at srcOffset
-//   1: uint src[]
-//   2: uint pyr[]      - output pyramid texels
+//   0: float4 params[1] - (width, height, 0, 0)
+//   1: uint visWords[]  - the u64 VisBuffer (depth = HIGH word =
+//                         uint index 2*i+1)
+//   2: uint pyr[]       - RW pyramid (level offsets follow the same
+//                         ceil-division chain as hzbLayout())
 
 [[vk::binding(0)]] StructuredBuffer<float4> params;
-[[vk::binding(1)]] StructuredBuffer<uint>   src;
+[[vk::binding(1)]] StructuredBuffer<uint>   visWords;
 [[vk::binding(2)]] RWStructuredBuffer<uint> pyr;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void main(uint tid : SV_DispatchThreadID)
 {
-    const float4 p0 = params[0];
-    const float4 p1 = params[1];
-    const uint srcW = uint(p0.x), srcH = uint(p0.y);
-    const uint srcOffset = uint(p0.z);
-    const uint mode = uint(p0.w);
-    const uint dstOffset = uint(p1.x);
-    const uint dstW = uint(p1.y);
-    const uint dstH = uint(p1.z);
-    if (tid >= dstW * dstH) return;
+    const uint w = uint(params[0].x);
+    const uint h = uint(params[0].y);
+    if (tid >= w * h) return;
 
-    const uint dx = tid % dstW;
-    const uint dy = tid / dstW;
+    const uint m = visWords[2u * tid + 1u];
 
-    uint m = 0xFFFFFFFFu;
-    [unroll]
-    for (int j = 0; j < 2; ++j)
+    uint off = 0, lw = w, lh = h, lx = tid % w, ly = tid / w;
+    while (true)
     {
-        [unroll]
-        for (int i = 0; i < 2; ++i)
-        {
-            // Clamp reads at odd edges (replicate) - conservative.
-            const uint sx = min(dx * 2u + uint(i), srcW - 1u);
-            const uint sy = min(dy * 2u + uint(j), srcH - 1u);
-            const uint word = mode == 0u
-                ? src[2u * (sy * srcW + sx) + 1u]
-                : src[srcOffset + sy * srcW + sx];
-            m = min(m, word);
-        }
+        if (off == 0u)
+            pyr[ly * lw + lx] = m;         // L0: exactly one writer
+        else
+            InterlockedMin(pyr[off + ly * lw + lx], m);  // ancestors
+        if (lw == 1u && lh == 1u) break;
+        const uint nextOff = off + lw * lh;
+        lx >>= 1u;
+        ly >>= 1u;
+        lw = (lw + 1u) / 2u;
+        lh = (lh + 1u) / 2u;
+        off = nextOff;
     }
-    pyr[dstOffset + dy * dstW + dx] = m;
 }
