@@ -54,6 +54,8 @@ class VulkanBackend final : public IRenderBackend {
                                u32 bufferCount, u32 countBuffer,
                                usize countOffset) override;
   void* mappedPtr(u32 buffer) override;
+  u32 currentFrameSlot() const override;
+  u32 lastCompletedFrameSlot() const override;
 
  private:
   struct Impl;

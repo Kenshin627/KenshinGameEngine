@@ -267,6 +267,12 @@ class IRenderBackend {
                                        usize countOffset) = 0;
   /// Persistently mapped host pointer of a BufferHostVisible buffer.
   virtual void* mappedPtr(u32 buffer) = 0;
+  /// The frame slot currently being recorded (0..framesInFlight-1);
+  /// per-slot resources (chain intermediates, VisBuffer) key off it.
+  virtual u32 currentFrameSlot() const = 0;
+  /// The slot of the most recently ENDED frame (post-frame readbacks
+  /// must read THIS slot - currentFrameSlot has already advanced).
+  virtual u32 lastCompletedFrameSlot() const = 0;
 
   // ---- GPU timing (debug overlay readout) ---------------------------
   /// Last completed frame's GPU timings. Zeroes when unsupported (queue

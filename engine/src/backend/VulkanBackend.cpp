@@ -977,6 +977,29 @@ void VulkanBackend::dispatchComputeIndirect(u32 pipeline,
   const PipelineStore::Compute& c = impl.pipelines.compute(pipeline);
   if (!c.valid || !impl.buffers.valid(countBuffer)) return;
 
+  // The dispatch-count fetch happens at the DRAW_INDIRECT stage, not in
+  // a shader - a compute->compute barrier does NOT order it. Without
+  // this the fetch can see stale args (zero) and silently dispatch
+  // nothing while later readbacks (post-idle) look correct.
+  {
+    const VkBufferMemoryBarrier2 argsBarrier{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+        .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+        .buffer = impl.buffers.buffer(countBuffer),
+        .offset = 0,
+        .size = impl.buffers.size(countBuffer),
+    };
+    const VkDependencyInfo dep{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .bufferMemoryBarrierCount = 1,
+        .pBufferMemoryBarriers = &argsBarrier,
+    };
+    vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+  }
+
   std::vector<VkDescriptorBufferInfo> infos(bufferCount);
   for (u32 i = 0; i < bufferCount; ++i) {
     if (!impl.buffers.valid(bufferHandles[i])) return;
@@ -1009,6 +1032,14 @@ void VulkanBackend::dispatchComputeIndirect(u32 pipeline,
 void* VulkanBackend::mappedPtr(u32 buffer) {
   return m_impl->buffers.valid(buffer) ? m_impl->buffers.mapped(buffer)
                                        : nullptr;
+}
+
+u32 VulkanBackend::currentFrameSlot() const {
+  return m_impl->frameSync.frameIndex;
+}
+
+u32 VulkanBackend::lastCompletedFrameSlot() const {
+  return m_impl->frameSync.lastCompleted;
 }
 
 void VulkanBackend::bufferBarrier(u32 buffer, bool toFragment) {

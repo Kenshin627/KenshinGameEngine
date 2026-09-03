@@ -63,6 +63,7 @@ add_library(kenshin_engine STATIC
     src/renderer/ClusterCullPass.cpp
     src/renderer/SoftRasterPass.cpp
     src/renderer/MaterialDecodePass.cpp
+    src/renderer/VisBufferChain.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpWriter.cpp

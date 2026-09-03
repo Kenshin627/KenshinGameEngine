@@ -1,14 +1,15 @@
 // 链入帧化: convert a GPU-written work count into a dispatch command.
 // One thread: reads src[0] (count), writes dst = {ceil(count/groups),1,1}
-// (groups == 0 -> x = count, for one-workgroup-per-item passes) and
-// optionally forwards the raw count into fwd[0] for the next pass's
-// bound check.
+// (groups == 0 -> one group per item, for workgroup-per-item passes) and
+// forwards the raw count into fwd[cfg[1]] (the next pass's input guard
+// slot - its counters buffer is bound as fwd).
 //
 // Bindings (SSBO set 0):
-//   0: uint src[1]    - GPU-written count
+//   0: uint src[1]    - GPU-written count (read at slot 0)
 //   1: uint cfg[4]    - [0] = group size (0 = one group per item)
+//                       [1] = fwd write slot
 //   2: uint dst[4]    - VkDispatchIndirectCommand {x,y,z} + pad
-//   3: uint fwd[1]    - raw count forwarded (next pass's input guard)
+//   3: uint fwd[]     - the NEXT pass's counters buffer
 
 [[vk::binding(0)]] StructuredBuffer<uint> src;
 [[vk::binding(1)]] StructuredBuffer<uint> cfg;
@@ -24,5 +25,5 @@ void main(uint3 tid : SV_DispatchThreadID)
     dst[0] = groups;
     dst[1] = 1u;
     dst[2] = 1u;
-    fwd[0] = count;
+    fwd[cfg[1]] = count;
 }
