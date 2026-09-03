@@ -46,29 +46,18 @@ bool MaterialDecodePass::init(backend::IRenderBackend& backend,
   return true;
 }
 
-void MaterialDecodePass::updateVis(backend::IRenderBackend& backend,
-                                   std::vector<u64> vis) {
-  if (m_visBuffer != ~0u) backend.destroyBuffer(m_visBuffer);
-  backend::IRenderBackend::BufferDesc desc;
-  desc.size = vis.size() * sizeof(u64);
-  desc.usage = backend::IRenderBackend::BufferStorage;
-  desc.initialData = vis.data();
-  desc.debugName = "visbuffer";
-  m_visBuffer = backend.createBuffer(desc);
-  m_visCount = vis.size();
-}
-
 void MaterialDecodePass::draw(backend::IRenderBackend& backend,
                               const glm::mat4& viewProj,
                               const VirtualGeometryScene& scene,
-                              const DecodeParams& params, u32 width,
-                              u32 height) {
-  if (m_pipeline == ~0u || m_visBuffer == ~0u || width == 0 || height == 0)
+                              const DecodeParams& params, u32 width, u32 height,
+                              u32 visHandle) {
+  if (m_pipeline == ~0u || width == 0 || height == 0) return;
+  if (visHandle == backend::IRenderBackend::kInvalidBufferHandle) return;
+  // The decode and its VisBuffer are same-frame now; the size guard
+  // remains as a resize-transition backstop.
+  if (backend::IRenderBackend* b = &backend;
+      b->bufferSize(visHandle) != usize(width) * height * sizeof(u64))
     return;
-  // The vis is produced between frames at that frame's viewport size; a
-  // resize transition frame would read out of bounds - skip it (the
-  // chain re-runs at the new size right after this frame).
-  if (m_visCount != usize(width) * height) return;
   DecodePushC push;
   push.viewProj = viewProj;
   push.camFlags =
@@ -84,7 +73,7 @@ void MaterialDecodePass::draw(backend::IRenderBackend& backend,
                             static_cast<f32>(scene.groupCount()));
 
   const u32 handles[8] = {
-      m_visBuffer,
+      visHandle,
       scene.clusterBuffer(),
       scene.instanceBuffer(),
       scene.positionBuffer(),
@@ -97,11 +86,8 @@ void MaterialDecodePass::draw(backend::IRenderBackend& backend,
 }
 
 void MaterialDecodePass::onShutdown(backend::IRenderBackend& backend) {
-  if (m_visBuffer != ~0u) {
-    backend.destroyBuffer(m_visBuffer);
-    m_visBuffer = ~0u;
-  }
-  m_pipeline = ~0u;
+  (void)backend;
+  m_pipeline = ~0u;  // the pipeline dies with PipelineStore; nothing owned
 }
 
 }  // namespace renderer

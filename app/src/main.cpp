@@ -46,6 +46,7 @@
 #include "kenshin/renderer/Renderer.h"
 #include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
+#include "kenshin/renderer/VisBufferChain.h"
 #include "kenshin/scene/Camera.h"
 #include "kenshin/scene/CameraController.h"
 #include "kenshin/util/BmpWriter.h"
@@ -192,7 +193,7 @@ std::string findShaderRoot() {
 }
 
 /// S4.6 debug state: view mode + the chain's last stats and histories
-/// (the panel reads it; runVisChain fills it per view change).
+/// (the panel reads it; updated per frame from the chain stats).
 struct VgDebugState {
   int viewMode = 0;  // DecodeView as int (0..4)
   kenshin::u32 visibleClusters = 0, cutTris = 0, pxWrites = 0;
@@ -210,96 +211,6 @@ struct VgDebugState {
   }
 };
 
-/// S4.5 one-shot VisBuffer chain: instance cull -> work-item expand ->
-/// cluster cull (the LOD cut) -> software raster. Blocking (each stage
-/// is its own one-shot compute dispatch); runs BETWEEN frames. `visOut`
-/// returns width*height u64 pixels. Frustum planes come from the
-/// FLIPPED viewProj (the extraction the S4.3 differential pins); the
-/// rasterizer itself runs UNFLIPPED-Y (raster parity, S4.4).
-bool runVisChain(
-    kenshin::backend::IRenderBackend& backend,
-    kenshin::manager::ShaderManager& shaders,
-    const kenshin::renderer::VirtualGeometryScene& scene,
-    std::span<const kenshin::renderer::CullGpuInstance> instances,
-    std::span<const kenshin::renderer::GpuMeshRangePair> meshRanges,
-    const kenshin::scene::Camera& camera, float fovYDeg, float pixelThreshold,
-    kenshin::u32 width, kenshin::u32 height, std::vector<kenshin::u64>& visOut,
-    VgDebugState& dbg) {
-  using namespace kenshin;
-  glm::vec4 planes[6];
-  renderer::extractFrustumPlanes(camera.viewProjMatrix(), planes);
-  std::vector<u32> visible;
-  if (!renderer::cullInstancesOnGpu(backend, shaders, instances, planes,
-                                    visible)) {
-    KENSHIN_ERROR("[vg] instance cull failed");
-    return false;
-  }
-
-  std::vector<glm::uvec2> workItems;
-  if (!renderer::expandWorkItemsOnGpu(backend, shaders, visible, instances,
-                                      meshRanges, workItems)) {
-    KENSHIN_ERROR("[vg] work-item expand failed");
-    return false;
-  }
-
-  // Same metric the CPU cut uses (selectLodCut), so the GPU cut and the
-  // preview panel stay comparable: 2*tan(fov/2)/viewHeight.
-  const f32 worldPerPixel =
-      2.0f * std::tan(glm::radians(fovYDeg) * 0.5f) / static_cast<f32>(height);
-  std::vector<glm::uvec2> pairs;
-  u32 cullStats[3] = {};
-  if (!renderer::cullClustersOnGpu(backend, shaders, camera.position(),
-                                   pixelThreshold, worldPerPixel,
-                                   scene.clusterData(), scene.groupData(),
-                                   workItems, instances, pairs, cullStats)) {
-    KENSHIN_ERROR("[vg] cluster cull failed");
-    return false;
-  }
-
-  // Feed the rasterizer the camera's OWN (Y-flipped) projection: its
-  // row map then produces framebuffer row order (row 0 = top), which is
-  // exactly how the decode pass indexes the VisBuffer, and the yFlip
-  // flag makes the backface test cull the same half the HW path culls.
-  // (Flipping the row index inside the FS instead - uint(h)-1-y -
-  // deterministically device-losts on this driver; the flip is free
-  // here.)
-  const renderer::SoftRasterFrame frame{camera.viewMatrix(),
-                                        camera.projMatrix(),
-                                        camera.nearPlane(),
-                                        width,
-                                        height,
-                                        /*yFlip=*/true};
-  u32 rasterStats[4] = {};
-  if (!renderer::rasterizeOnGpu(backend, shaders, frame, scene.positions4(),
-                                scene.indices(), scene.clusterData(), instances,
-                                pairs, visOut, rasterStats)) {
-    KENSHIN_ERROR("[vg] software raster failed");
-    return false;
-  }
-
-  usize covered = 0;
-  for (const u64 v : visOut) covered += v != 0;
-  // Total triangles in the cut (parsed from the packed cluster table).
-  u32 cutTris = 0;
-  for (const auto& pair : pairs) {
-    u32 indexCount;
-    std::memcpy(&indexCount,
-                scene.clusterData().data() + usize(pair.y) * 48 + 36, 4);
-    cutTris += indexCount / 3;
-  }
-  dbg.visibleClusters = static_cast<u32>(pairs.size());
-  dbg.cutTris = cutTris;
-  dbg.pxWrites = rasterStats[1];
-  dbg.coveragePct = f32(100.0 * f64(covered) / (f64(width) * f64(height)));
-  dbg.pushHistory();
-  KENSHIN_INFO(
-      "[vg] chain: {} inst visible / {} clusters cut ({} too-coarse, {} "
-      "source-too-coarse, {} tris) / {} px writes / {} px covered ({:.1f}%)",
-      visible.size(), pairs.size(), cullStats[1], cullStats[2], cutTris,
-      rasterStats[1], covered,
-      100.0 * f64(covered) / (f64(width) * f64(height)));
-  return true;
-}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -486,16 +397,11 @@ int main(int argc, char** argv) {
   bool cameraChecked = false;
   std::vector<kenshin::renderer::DrawItem> items;
 
-  // Chain rerun gate: a static view recomputes identical floats, so the
-  // blocking one-shot chain only needs to rerun on actual changes.
-  struct ChainKey {
-    glm::vec3 pos, target;
-    float threshold;
-    kenshin::u32 w, h;
-    bool operator==(const ChainKey&) const = default;
-  };
-  ChainKey lastKey{};
-  bool chainRan = false;
+  // The in-frame chain (B3): every frame records cull->expand->cull->
+  // raster into the current command buffer; the decode below consumes
+  // the SAME frame's VisBuffer (camera lag and inter-frame stalls gone).
+  kenshin::renderer::VisBufferChain chain;
+  bool chainReady = false;
   bool decodeReady = false;  // pipeline is lazy: needs the swapchain format
   const auto writeScreenshot =
       [&renderer](const char* what, const std::string& path, bool fullFrame) {
@@ -578,19 +484,41 @@ int main(int argc, char** argv) {
     renderer.submit(view, items);
 
     if (virtualPath && drawable) {
-      // Lazy pipeline init: createFullscreenPipeline reads the swapchain
-      // format, which only exists after the first beginFrame.
+      // Lazy init (pools ready; vis buffers start 1x1, first execute
+      // resizes).
+      if (!chainReady) {
+        chainReady = chain.init(
+            *vgBackend, shaders, vgScene->positions4(), vgScene->indices(),
+            vgScene->clusterData(), vgScene->groupData(), chainInstances,
+            chainMeshRanges,
+            kenshin::u32(chainInstances.size()) * vgScene->clusterCount(), 1,
+            1);
+        if (chainReady) KENSHIN_INFO("[vgchain] in-frame chain ready");
+      }
       if (!decodeReady) decodeReady = decodePass.init(*vgBackend, shaders);
-      if (decodeReady) {
+      if (chainReady && decodeReady) {
+        // Same camera, same frame: the chain's inputs and the decode's
+        // matrices cannot disagree anymore.
+        kenshin::renderer::ChainInputs ci;
+        ci.view = camera.viewMatrix();
+        ci.proj = camera.projMatrix();
+        ci.nearZ = camera.nearPlane();
+        ci.camPos = camera.position();
+        ci.pixelThreshold = kgeoPreview.pixelThreshold;
+        ci.worldPerPixel = 2.0f *
+                           std::tan(glm::radians(controller.fovYDeg) * 0.5f) /
+                           static_cast<kenshin::f32>(vp.y);
+        ci.width = static_cast<kenshin::u32>(vp.x);
+        ci.height = static_cast<kenshin::u32>(vp.y);
+        kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
+                                                ci.planes);
+        chain.execute(*vgBackend, ci);
         decodeParams.camPos = camera.position();
         decodeParams.view =
             static_cast<kenshin::renderer::DecodeView>(vgDebug.viewMode);
-        // The camera's own (Y-flipped) viewProj - the same matrix the
-        // chain rasterized with, so the decode's screen math lands on
-        // the VisBuffer's rows exactly.
         decodePass.draw(*vgBackend, camera.viewProjMatrix(), *vgScene,
-                        decodeParams, static_cast<kenshin::u32>(vp.x),
-                        static_cast<kenshin::u32>(vp.y));
+                        decodeParams, ci.width, ci.height,
+                        chain.visBufferCurrent(*vgBackend));
       }
     }
 
@@ -600,25 +528,6 @@ int main(int argc, char** argv) {
 
     renderer.endFrame();
     engine.endFrame();
-
-    // S4.5 chain: BETWEEN frames (each one-shot stage submits its own
-    // command buffer; the decode draw in the NEXT frame consumes the
-    // result - with a static camera the one-frame latency is invisible).
-    if (virtualPath && drawable) {
-      const ChainKey key{
-          camera.position(), camera.target(), kgeoPreview.pixelThreshold,
-          static_cast<kenshin::u32>(vp.x), static_cast<kenshin::u32>(vp.y)};
-      if (!chainRan || !(key == lastKey)) {
-        lastKey = key;
-        chainRan = true;
-        std::vector<kenshin::u64> vis;
-        if (!runVisChain(*vgBackend, shaders, *vgScene, chainInstances,
-                         chainMeshRanges, camera, controller.fovYDeg,
-                         key.threshold, key.w, key.h, vis, vgDebug))
-          break;
-        decodePass.updateVis(*vgBackend, std::move(vis));
-      }
-    }
 
     stats.push(dt * 1000.0f);
     if (frame > 0 && frame % 60 == 0)
@@ -641,7 +550,10 @@ int main(int argc, char** argv) {
   }
 
   KENSHIN_INFO("main loop exited after {} frames", frame);
-  if (virtualPath) decodePass.onShutdown(*vgBackend);
+  if (virtualPath) {
+    decodePass.onShutdown(*vgBackend);
+    if (chainReady) chain.onShutdown(*vgBackend);
+  }
   // Reverse registration order: overlay context, mesh pool (all GPU
   // meshes), renderer pipeline, shader manager, backend, window.
   engine.shutdown();

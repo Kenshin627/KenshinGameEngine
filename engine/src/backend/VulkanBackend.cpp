@@ -1034,6 +1034,10 @@ void* VulkanBackend::mappedPtr(u32 buffer) {
                                        : nullptr;
 }
 
+usize VulkanBackend::bufferSize(u32 buffer) const {
+  return m_impl->buffers.valid(buffer) ? m_impl->buffers.size(buffer) : 0;
+}
+
 u32 VulkanBackend::currentFrameSlot() const {
   return m_impl->frameSync.frameIndex;
 }

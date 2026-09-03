@@ -199,7 +199,9 @@ class IRenderBackend {
     BufferStorage = 0x1,
     BufferUniform = 0x2,
     BufferTransferSrc = 0x4,
-    BufferHostVisible = 0x8  // persistently mapped (CPU-written params)
+    BufferHostVisible = 0x8,  // persistently mapped (CPU-written params)
+    BufferIndirect = 0x10,    // dispatch-indirect command source
+    BufferTransferDst = 0x20  // fillBuffer / copy target
   };
   struct BufferDesc {
     usize size = 0;
@@ -267,6 +269,8 @@ class IRenderBackend {
                                        usize countOffset) = 0;
   /// Persistently mapped host pointer of a BufferHostVisible buffer.
   virtual void* mappedPtr(u32 buffer) = 0;
+  /// Byte size of a live buffer (validation guards / parity checks).
+  virtual usize bufferSize(u32 buffer) const = 0;
   /// The frame slot currently being recorded (0..framesInFlight-1);
   /// per-slot resources (chain intermediates, VisBuffer) key off it.
   virtual u32 currentFrameSlot() const = 0;

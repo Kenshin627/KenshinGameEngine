@@ -71,7 +71,8 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
   if (!makePipe("expand_workitems.slang", m_pipeExpand)) return false;
   if (!makePipe("cull_clusters.slang", m_pipeCluster)) return false;
   if (!makePipe("rasterize_sw.slang", m_pipeRaster)) return false;
-  if (!makePipe("count_to_indirect.slang", m_pipeConvert)) return false;
+  for (u32 k = 0; k < 3; ++k)
+    if (!makePipe("count_to_indirect.slang", m_pipeConvert[k])) return false;
 
   m_instanceCount = static_cast<u32>(instances.size());
   m_maxPairs = maxPairs;
@@ -120,9 +121,19 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
     m_rasterParams[s] = makeHostBuffer(backend, 12 * sizeof(glm::vec4), nullptr,
                                        "chain-rasterParams");
     m_rasterCnt[s] = makeHostBuffer(backend, 16, nullptr, "chain-rasterCnt");
-    m_argsExpand[s] = makeDeviceBuffer(backend, 16, nullptr, "argsE");
-    m_argsCull[s] = makeDeviceBuffer(backend, 16, nullptr, "argsC");
-    m_argsRaster[s] = makeDeviceBuffer(backend, 16, nullptr, "argsR");
+    // Indirect dispatch reads these at the DRAW_INDIRECT stage: the
+    // usage bit is mandatory (validation rejects storage-only buffers).
+    const auto makeArgs = [&](const char* name) {
+      backend::IRenderBackend::BufferDesc d;
+      d.size = 16;
+      d.usage = backend::IRenderBackend::BufferStorage |
+                backend::IRenderBackend::BufferIndirect;
+      d.debugName = name;
+      return backend.createBuffer(d);
+    };
+    m_argsExpand[s] = makeArgs("argsE");
+    m_argsCull[s] = makeArgs("argsC");
+    m_argsRaster[s] = makeArgs("argsR");
   }
   resize(backend, width, height);
   return true;
@@ -134,8 +145,13 @@ void VisBufferChain::resize(backend::IRenderBackend& backend, u32 width,
   m_height = height;
   for (u32 s = 0; s < kSlots; ++s) {
     if (m_vis[s] != kInvalid && m_vis[s] != 0) backend.destroyBuffer(m_vis[s]);
-    m_vis[s] = makeDeviceBuffer(backend, usize(width) * height * sizeof(u64),
-                                nullptr, "chain-vis");
+    // fillBuffer (per-frame zeroing) requires TRANSFER_DST.
+    backend::IRenderBackend::BufferDesc vd;
+    vd.size = usize(width) * height * sizeof(u64);
+    vd.usage = backend::IRenderBackend::BufferStorage |
+               backend::IRenderBackend::BufferTransferDst;
+    vd.debugName = "chain-vis";
+    m_vis[s] = backend.createBuffer(vd);
   }
 }
 
@@ -187,7 +203,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   const u32 cv1[4] = {m_cntA[slot], m_cfgExpand, m_argsExpand[slot],
                       m_expCnt[slot]};
-  backend.dispatchCompute(m_pipeConvert, cv1, 4, 1, 1, 1);
+  backend.dispatchCompute(m_pipeConvert[0], cv1, 4, 1, 1, 1);
   b(m_argsExpand[slot]);
   b(m_expCnt[slot]);
 
@@ -201,7 +217,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   const u32 cv2[4] = {m_expCnt[slot], m_cfgCull, m_argsCull[slot],
                       m_cullCnt[slot]};
-  backend.dispatchCompute(m_pipeConvert, cv2, 4, 1, 1, 1);
+  backend.dispatchCompute(m_pipeConvert[1], cv2, 4, 1, 1, 1);
   b(m_argsCull[slot]);
   b(m_cullCnt[slot]);
 
@@ -215,7 +231,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   const u32 cv3[4] = {m_cullCnt[slot], m_cfgRaster, m_argsRaster[slot],
                       m_rasterCnt[slot]};
-  backend.dispatchCompute(m_pipeConvert, cv3, 4, 1, 1, 1);
+  backend.dispatchCompute(m_pipeConvert[2], cv3, 4, 1, 1, 1);
   b(m_argsRaster[slot]);
   b(m_rasterCnt[slot]);
 
@@ -228,10 +244,13 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   backend.bufferBarrier(m_vis[slot], true);
 }
 
+u32 VisBufferChain::visBufferCurrent(backend::IRenderBackend& backend) const {
+  return m_vis[backend.currentFrameSlot()];
+}
+
 u32 VisBufferChain::visBuffer(backend::IRenderBackend& backend) const {
-  // Post-frame callers (decode tests, readbacks) want the frame that
-  // just ENDED - currentFrameSlot has already flipped.
-  return m_vis[backend.lastCompletedFrameSlot()];
+  const u32 slot = backend.lastCompletedFrameSlot();
+  return slot == 0xFFFFFFFFu ? kInvalid : m_vis[slot];
 }
 
 bool VisBufferChain::readStats(backend::IRenderBackend& backend,
@@ -276,8 +295,9 @@ bool VisBufferChain::readIndirectArgs(backend::IRenderBackend& backend,
 }
 
 void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
-  const u32 pipes[5] = {m_pipeCull, m_pipeExpand, m_pipeCluster, m_pipeRaster,
-                        m_pipeConvert};
+  const u32 pipes[8] = {m_pipeCull,      m_pipeExpand,     m_pipeCluster,
+                        m_pipeRaster,    m_pipeConvert[0], m_pipeConvert[1],
+                        m_pipeConvert[2]};
   for (const u32 p : pipes)
     if (p != ~0u) backend.destroyComputePipeline(p);
   for (u32 s = 0; s < kSlots; ++s) {

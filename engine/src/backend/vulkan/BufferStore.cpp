@@ -21,6 +21,10 @@ u32 BufferStore::create(const VulkanDevice& device, VkCommandPool pool,
   if (desc.usage & IRenderBackend::BufferTransferSrc)
     usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
   if (desc.initialData) usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  if (desc.usage & IRenderBackend::BufferIndirect)
+    usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+  if (desc.usage & IRenderBackend::BufferTransferDst)
+    usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
   const VkBufferCreateInfo bufferInfo{
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,

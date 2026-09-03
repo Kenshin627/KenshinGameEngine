@@ -49,23 +49,19 @@ class MaterialDecodePass {
   /// (flushPools + setInstances).
   bool init(backend::IRenderBackend& backend, manager::ShaderManager& shaders);
 
-  /// Replace the VisBuffer contents (from the S4.4 one-shot chain).
-  void updateVis(backend::IRenderBackend& backend, std::vector<u64> vis);
-
   /// Record the fullscreen decode draw in the CURRENT frame scope. The
   /// viewProj must be the camera's OWN matrix (Y-flipped) - the same
   /// one the chain rasterized with, so the VisBuffer rows arrive in
-  /// framebuffer order.
+  /// framebuffer order. `visHandle` is the SAME frame's VisBuffer (the
+  /// in-frame chain's output; its pixel count must equal w*h).
   void draw(backend::IRenderBackend& backend, const glm::mat4& viewProj,
             const VirtualGeometryScene& scene, const DecodeParams& params,
-            u32 width, u32 height);
+            u32 width, u32 height, u32 visHandle);
 
   void onShutdown(backend::IRenderBackend& backend);
 
  private:
   u32 m_pipeline = ~0u;
-  u32 m_visBuffer = ~0u;
-  usize m_visCount = 0;
 };
 
 }  // namespace renderer

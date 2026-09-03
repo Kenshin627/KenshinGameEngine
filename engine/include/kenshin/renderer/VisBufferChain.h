@@ -70,8 +70,11 @@ class VisBufferChain {
   /// dispatches + count conversions, each behind barriers.
   void execute(backend::IRenderBackend& backend, const ChainInputs& in);
 
-  /// The CURRENT frame slot's VisBuffer (for the decode draw; the same
-  /// frame's chain produced it).
+  /// The CURRENT recording frame's VisBuffer - the in-frame decode
+  /// consumer's handle (the same frame's chain just produced it).
+  u32 visBufferCurrent(backend::IRenderBackend& backend) const;
+  /// The most recently ENDED frame's VisBuffer (post-frame readbacks;
+  /// before the first endFrame this is invalid).
   u32 visBuffer(backend::IRenderBackend& backend) const;
 
   /// Blocking stats readback (test/debug), per chain stage:
@@ -88,7 +91,11 @@ class VisBufferChain {
 
  private:
   u32 m_pipeCull = ~0u, m_pipeExpand = ~0u, m_pipeCluster = ~0u,
-      m_pipeRaster = ~0u, m_pipeConvert = ~0u;
+      m_pipeRaster = ~0u;
+  // Three SEPARATE conversion pipelines (same shader): a descriptor set
+  // updated mid-command-buffer invalidates already-recorded uses, so each
+  // conversion site needs its own set - hence its own pipeline.
+  u32 m_pipeConvert[3] = {~0u, ~0u, ~0u};
   u32 m_instanceBuffer = ~0u, m_meshRangeBuffer = ~0u;
   u32 m_clusterBuffer = ~0u, m_groupBuffer = ~0u;
   u32 m_positionBuffer = ~0u, m_indexBuffer = ~0u;
