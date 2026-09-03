@@ -116,11 +116,12 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
     m_expCnt[s] = makeHostBuffer(backend, 8, nullptr, "chain-expCnt");
     m_cullParams[s] = makeHostBuffer(backend, 2 * sizeof(glm::vec4), nullptr,
                                      "chain-cullParams");
-    m_cullCnt[s] = makeHostBuffer(backend, 16, nullptr, "chain-cullCnt");
+    m_cullCnt[s] = makeHostBuffer(backend, 20, nullptr, "chain-cullCnt");
     m_pairs[s] = makeDeviceBuffer(backend, pairBytes, nullptr, "chain-pairs");
     m_rasterParams[s] = makeHostBuffer(backend, 12 * sizeof(glm::vec4), nullptr,
                                        "chain-rasterParams");
     m_rasterCnt[s] = makeHostBuffer(backend, 16, nullptr, "chain-rasterCnt");
+    m_dummyHzb = makeDeviceBuffer(backend, 16, nullptr, "chain-dummyHzb");
     // Indirect dispatch reads these at the DRAW_INDIRECT stage: the
     // usage bit is mandatory (validation rejects storage-only buffers).
     const auto makeArgs = [&](const char* name) {
@@ -174,7 +175,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       glm::vec4(in.worldPerPixel, 0.0f, 0.0f, 0.0f)};
   std::memcpy(backend.mappedPtr(m_cullParams[slot]), cullParams,
               sizeof(cullParams));
-  std::memset(backend.mappedPtr(m_cullCnt[slot]), 0, 16);
+  std::memset(backend.mappedPtr(m_cullCnt[slot]), 0, 20);
   std::memset(backend.mappedPtr(m_rasterCnt[slot]), 0, 16);
   {
     // rasterize_sw's params (float4[12]): [0..3] view, [4..7] proj
@@ -258,7 +259,7 @@ bool VisBufferChain::readStats(backend::IRenderBackend& backend,
   const u32 slot = backend.lastCompletedFrameSlot();
   std::vector<u8> a(8), c(16), r(16);
   if (!backend.readbackBuffer(m_cntA[slot], 0, 8, a)) return false;
-  if (!backend.readbackBuffer(m_cullCnt[slot], 0, 16, c)) return false;
+  if (!backend.readbackBuffer(m_cullCnt[slot], 0, 20, c)) return false;
   if (!backend.readbackBuffer(m_rasterCnt[slot], 0, 16, r)) return false;
   std::vector<u8> e(8);
   if (!backend.readbackBuffer(m_expCnt[slot], 0, 8, e)) return false;

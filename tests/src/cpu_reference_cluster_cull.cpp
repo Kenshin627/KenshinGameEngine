@@ -6,11 +6,12 @@
 // must ALSO match the engine's CPU selectLodCut cluster-for-cluster
 // (the V3 "same count as S3.4" check, promoted to an assertion).
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstdio>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <map>
 #include <set>
 #include <vector>
@@ -24,9 +25,6 @@
 #include "kenshin/renderer/ClusterCullPass.h"
 #include "kenshin/renderer/InstanceCullPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
-
-#include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
 
 namespace {
 
@@ -64,26 +62,24 @@ std::vector<glm::uvec2> cullCpu(
   std::vector<glm::uvec2> out;
   for (const kenshin::u32 idx : visible) {
     const glm::mat4& m = instances[idx].model;
-    const float scale = std::max({glm::length(m[0]), glm::length(m[1]),
-                                  glm::length(m[2])});
+    const float scale =
+        std::max({glm::length(m[0]), glm::length(m[1]), glm::length(m[2])});
     const auto fireable = [&](kenshin::u32 g) {
       const auto& group = dag.groups[g];
       // w = 1 (a POINT): glm::vec4(boundsSphere) would smuggle the
       // RADIUS into w and scale the translation by it.
-      const glm::vec3 c(
-          m * glm::vec4(group.boundsSphere.x, group.boundsSphere.y,
-                        group.boundsSphere.z, 1.0f));
+      const glm::vec3 c(m * glm::vec4(group.boundsSphere.x,
+                                      group.boundsSphere.y,
+                                      group.boundsSphere.z, 1.0f));
       const float dist =
-          std::max(glm::distance(c, cam) - group.boundsSphere.w * scale,
-                   0.1f);
+          std::max(glm::distance(c, cam) - group.boundsSphere.w * scale, 0.1f);
       return group.simplifyError > pixelThreshold * worldPerPixel * dist;
     };
     for (const auto& cluster : dag.clusters) {
       if (!fireable(cluster.group)) continue;
-      if (cluster.refinedGroup >= 0 && fireable(cluster.refinedGroup))
-        continue;
-      out.emplace_back(idx, static_cast<kenshin::u32>(&cluster -
-                                                      dag.clusters.data()));
+      if (cluster.refinedGroup >= 0 && fireable(cluster.refinedGroup)) continue;
+      out.emplace_back(
+          idx, static_cast<kenshin::u32>(&cluster - dag.clusters.data()));
     }
   }
   return out;
@@ -99,8 +95,8 @@ PairKey key(const glm::uvec2& p) {
 TEST_CASE("cluster cull GPU/CPU differential", "[gpu][clustercull]") {
   using namespace kenshin;
   Built built;
-  REQUIRE(build(geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f),
-                built));
+  REQUIRE(
+      build(geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
   const auto& dag = built.dag;
 
   manager::ShaderManager shaders;
@@ -124,7 +120,7 @@ TEST_CASE("cluster cull GPU/CPU differential", "[gpu][clustercull]") {
     in.bounds = glm::vec4(c, r);
     instances.push_back(in);
   };
-  push(glm::mat4(1.0f), {0.0f, 0.0f, 0.0f}, 3.2f);  // 0 identity
+  push(glm::mat4(1.0f), {0.0f, 0.0f, 0.0f}, 3.2f);           // 0 identity
   push(glm::translate(glm::mat4(1.0f), {5.0f, 0.0f, 0.0f}),  // 1 moved
        {5.0f, 0.0f, 0.0f}, 3.2f);
   push(glm::scale(glm::mat4(1.0f), {2.0f, 2.0f, 2.0f}),  // 2 scaled
@@ -150,10 +146,10 @@ TEST_CASE("cluster cull GPU/CPU differential", "[gpu][clustercull]") {
   // Instance cull (S4.2) -> visible.
   glm::vec4 planes[6];
   {
-    const glm::mat4 view = glm::lookAtRH(
-        cam, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
-    glm::mat4 proj = glm::perspectiveRH_ZO(glm::radians(60.0f), 16.0f / 9.0f,
-                                           0.1f, 100.0f);
+    const glm::mat4 view =
+        glm::lookAtRH(cam, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    glm::mat4 proj =
+        glm::perspectiveRH_ZO(glm::radians(60.0f), 16.0f / 9.0f, 0.1f, 100.0f);
     proj[1][1] *= -1.0f;
     renderer::extractFrustumPlanes(proj * view, planes);
   }
@@ -164,15 +160,15 @@ TEST_CASE("cluster cull GPU/CPU differential", "[gpu][clustercull]") {
 
   // Expand -> cull on the GPU.
   std::vector<glm::uvec2> workItems;
-  REQUIRE(renderer::expandWorkItemsOnGpu(*backend, shaders, visible,
-                                         instances, meshRanges, workItems));
+  REQUIRE(renderer::expandWorkItemsOnGpu(*backend, shaders, visible, instances,
+                                         meshRanges, workItems));
   REQUIRE(workItems.size() == 3 * dag.clusters.size());
 
   std::vector<glm::uvec2> gpuPairs;
   u32 stats[3] = {};
   REQUIRE(renderer::cullClustersOnGpu(*backend, shaders, cam, pixelThreshold,
-                                     worldPerPixel, clusterData, groupData,
-                                     workItems, instances, gpuPairs, stats));
+                                      worldPerPixel, clusterData, groupData,
+                                      workItems, instances, gpuPairs, stats));
   REQUIRE(stats[0] == gpuPairs.size());
 
   // CPU reference, same inputs.
@@ -183,8 +179,8 @@ TEST_CASE("cluster cull GPU/CPU differential", "[gpu][clustercull]") {
   for (const auto& p : cpuPairs) cpuSet.insert(key(p));
   for (const auto& p : gpuPairs) gpuSet.insert(key(p));
   INFO("cpu visible " << cpuSet.size() << ", gpu visible " << gpuSet.size()
-                     << " (culled too-coarse " << stats[1]
-                     << ", source-too-coarse " << stats[2] << ")");
+                      << " (culled too-coarse " << stats[1]
+                      << ", source-too-coarse " << stats[2] << ")");
   {
     std::vector<PairKey> onlyCpu, onlyGpu;
     std::set_difference(cpuSet.begin(), cpuSet.end(), gpuSet.begin(),

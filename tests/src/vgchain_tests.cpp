@@ -112,7 +112,7 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
                                            instances, meshRanges, workItems));
     REQUIRE(workItems.size() == 2 * dag.clusters.size());
     std::vector<glm::uvec2> pairs;
-    u32 cullStats[3] = {};
+    u32 cullStats[4] = {};
     REQUIRE(renderer::cullClustersOnGpu(
         *backend, shaders, cam, threshold, worldPerPixel, clusterData,
         groupData, workItems, instances, pairs, cullStats));

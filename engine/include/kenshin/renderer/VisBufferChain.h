@@ -107,6 +107,7 @@ class VisBufferChain {
   // Static conversion configs + per-slot indirect args.
   u32 m_cfgExpand = ~0u, m_cfgCull = ~0u, m_cfgRaster = ~0u;
   u32 m_argsExpand[kSlots]{}, m_argsCull[kSlots]{}, m_argsRaster[kSlots]{};
+  u32 m_dummyHzb = ~0u;  // cull_clusters's binding 7 (occ off until M3.2b)
   u32 m_instanceCount = 0, m_maxPairs = 0, m_width = 0, m_height = 0;
 };
 

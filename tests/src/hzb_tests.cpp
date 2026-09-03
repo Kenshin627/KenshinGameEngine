@@ -9,11 +9,13 @@
 #include <cstring>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <set>
 #include <vector>
 
 #include "kenshin/backend/RenderBackend.h"
 #include "kenshin/geometry/ClusterDag.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
+#include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/renderer/ClusterCullPass.h"
@@ -127,7 +129,7 @@ TEST_CASE("HZB pyramid GPU/CPU differential", "[gpu][hzb]") {
   REQUIRE(renderer::expandWorkItemsOnGpu(*backend, shaders, visible, instances,
                                          meshRanges, workItems));
   std::vector<glm::uvec2> pairs;
-  u32 cullStats[3] = {};
+  u32 cullStats[4] = {};
   REQUIRE(renderer::cullClustersOnGpu(
       *backend, shaders, cam, 1.0f,
       2.0f * std::tan(glm::radians(60.0f) * 0.5f) / static_cast<f32>(H),
@@ -162,6 +164,135 @@ TEST_CASE("HZB pyramid GPU/CPU differential", "[gpu][hzb]") {
   }
   INFO("levels " << layout.levelCount << ", texels " << pyrGpu.size()
                  << ", mismatches " << mismatches << " |" << perLevel);
+  REQUIRE(mismatches == 0);
+
+  backend->shutdown();
+}
+
+TEST_CASE("M3.2 occlusion cull is conservative", "[gpu][hzb][occ]") {
+  using namespace kenshin;
+  geometry::ClusterDag dag;
+  {
+    const auto mesh = geometry::SphereGeometry::create(96, 48, 1.0f);
+    std::vector<geometry::ClusterGroup> groups;
+    geometry::BuildStats stats;
+    geometry::DagBuildStats dagStats;
+    std::string log;
+    const bool built = geometry::buildClusterLod(
+        mesh, [&](const geometry::ClusterGroup& g) { groups.push_back(g); },
+        stats, log);
+    REQUIRE(built);
+    REQUIRE(geometry::assembleClusterDag(mesh, groups, dag, dagStats, log));
+  }
+  manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+  auto backend = backend::createVulkanBackend();
+  backend::BackendInitParams params;
+  REQUIRE(backend->initialize(params));
+
+  std::vector<u8> clusterData, groupData;
+  for (const auto& c : dag.clusters)
+    renderer::packGpuCluster(clusterData, c.group, c.boundsSphere.x,
+                             c.boundsSphere.y, c.boundsSphere.z,
+                             c.boundsSphere.w, c.error, c.parentError,
+                             c.vertexOffset, c.vertexCount, c.indexOffset,
+                             c.indexCount, c.refinedGroup);
+  for (const auto& g : dag.groups)
+    renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
+                           g.boundsSphere.z, g.boundsSphere.w, g.maxError,
+                           g.simplifyError, static_cast<u32>(g.lodLevel));
+  std::vector<glm::vec4> positions4(dag.positions.size() / 3);
+  for (usize v = 0; v < positions4.size(); ++v)
+    positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
+                              dag.positions[v * 3 + 2], 0.0f);
+
+  const glm::vec3 cam(4.0f, 5.0f, 3.0f);
+  const glm::vec3 away = glm::normalize(cam);
+  std::vector<renderer::CullGpuInstance> instances;
+  instances.emplace_back();
+  {
+    renderer::CullGpuInstance back;
+    back.model = glm::translate(glm::mat4(1.0f), away * 3.0f);
+    instances.push_back(back);
+  }
+
+  const u32 W = 96, H = 72;
+  const f32 fov = 60.0f;
+  const f32 worldPerPixel =
+      2.0f * std::tan(glm::radians(fov) * 0.5f) / static_cast<f32>(H);
+  glm::mat4 view = glm::lookAtRH(cam, {0, 0, 0}, {0, 1, 0});
+  glm::mat4 proj =
+      glm::perspectiveRH_ZO(glm::radians(fov), 4.0f / 3.0f, 0.1f, 100.0f);
+  proj[1][1] *= -1.0f;
+  const glm::mat4 viewProj = proj * view;
+  glm::vec4 planes[6];
+  renderer::extractFrustumPlanes(viewProj, planes);
+  const renderer::SoftRasterFrame frame{view,          proj, 0.1f, W, H,
+                                        /*yFlip=*/true};
+
+  std::vector<u32> visible;
+  REQUIRE(renderer::cullInstancesOnGpu(*backend, shaders, instances, planes,
+                                       visible));
+  std::vector<glm::uvec2> workItems;
+  const std::vector<renderer::GpuMeshRangePair> meshRanges = {
+      {0u, static_cast<u32>(dag.clusters.size())}};
+  REQUIRE(renderer::expandWorkItemsOnGpu(*backend, shaders, visible, instances,
+                                         meshRanges, workItems));
+
+  std::vector<glm::uvec2> pairsFull;
+  u32 statsFull[4] = {};
+  REQUIRE(renderer::cullClustersOnGpu(
+      *backend, shaders, cam, 0.05f, worldPerPixel, clusterData, groupData,
+      workItems, instances, pairsFull, statsFull));
+  std::vector<u64> visFull;
+  u32 rasterFull[4] = {};
+  REQUIRE(renderer::rasterizeOnGpu(*backend, shaders, frame, positions4,
+                                   dag.indices, clusterData, instances,
+                                   pairsFull, visFull, rasterFull));
+
+  std::vector<u32> hzb;
+  REQUIRE(renderer::buildHzbOneshot(*backend, shaders, visFull, W, H, hzb));
+
+  renderer::OcclusionInputs occ;
+  occ.enabled = true;
+  occ.prevViewProj = viewProj;
+  occ.prevCamPos = cam;
+  occ.hzbTexels = hzb.data();
+  occ.hzbCount = static_cast<u32>(hzb.size());
+  occ.screenW = W;
+  occ.screenH = H;
+  occ.tanHalfFov = std::tan(glm::radians(fov) * 0.5f);
+  std::vector<glm::uvec2> pairsOcc;
+  u32 statsOcc[4] = {};
+  REQUIRE(renderer::cullClustersOnGpu(
+      *backend, shaders, cam, 0.05f, worldPerPixel, clusterData, groupData,
+      workItems, instances, pairsOcc, statsOcc, occ));
+
+  INFO("full " << pairsFull.size() << " occ " << pairsOcc.size()
+               << " occlusionCulled " << statsOcc[3]);
+  REQUIRE(statsOcc[3] > 0);
+  REQUIRE(pairsOcc.size() + statsOcc[3] == pairsFull.size());
+
+  {
+    std::multiset<u64> full;
+    for (const auto& p : pairsFull) full.insert((u64(p.x) << 32) | p.y);
+    for (const auto& p : pairsOcc) {
+      const u64 k = (u64(p.x) << 32) | p.y;
+      const auto it = full.find(k);
+      REQUIRE(it != full.end());
+      full.erase(it);
+    }
+  }
+
+  std::vector<u64> visOcc;
+  u32 rasterOcc[4] = {};
+  REQUIRE(renderer::rasterizeOnGpu(*backend, shaders, frame, positions4,
+                                   dag.indices, clusterData, instances,
+                                   pairsOcc, visOcc, rasterOcc));
+  usize mismatches = 0;
+  for (usize i = 0; i < visFull.size(); ++i)
+    if (visFull[i] != visOcc[i]) ++mismatches;
+  INFO("vis mismatches " << mismatches);
   REQUIRE(mismatches == 0);
 
   backend->shutdown();

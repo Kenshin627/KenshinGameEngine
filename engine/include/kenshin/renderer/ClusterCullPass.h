@@ -13,7 +13,6 @@
 //      math to the CPU selectLodCut; the differential test pins them.
 
 #include <glm/glm.hpp>
-
 #include <span>
 #include <vector>
 
@@ -54,14 +53,31 @@ bool expandWorkItemsOnGpu(backend::IRenderBackend& backend,
 /// computed on the CPU (2*tan(fov/2)/viewHeight) so both sides share
 /// identical values. On success `visiblePairs` holds the survivors and
 /// `stats[3]` = (visible, culledTooCoarse, culledSourceTooCoarse).
+///
+/// M3.2 occlusion inputs (optional; disabled by default): when enabled,
+/// the survivors additionally test against the PREV frame's HZB (built
+/// by buildHzbOneshot) projected with the prev frame's viewProj;
+/// occluded clusters drop out; stats is 4 wide with
+/// [3] = occlusion-culled (0 when disabled).
+struct OcclusionInputs {
+  bool enabled = false;
+  glm::mat4 prevViewProj{1.0f};  // the frame the HZB was built in
+  glm::vec3 prevCamPos{0.0f};
+  const u32* hzbTexels = nullptr;  // hzbLayout(w,h) packing
+  u32 hzbCount = 0;
+  u32 screenW = 0, screenH = 0;  // the HZB's frame dimensions
+  f32 tanHalfFov = 0.5f;
+};
+
 bool cullClustersOnGpu(backend::IRenderBackend& backend,
-                       manager::ShaderManager& shaders,
-                       const glm::vec3& camPos, f32 pixelThreshold,
-                       f32 worldPerPixel, const std::vector<u8>& clusterData,
+                       manager::ShaderManager& shaders, const glm::vec3& camPos,
+                       f32 pixelThreshold, f32 worldPerPixel,
+                       const std::vector<u8>& clusterData,
                        const std::vector<u8>& groupData,
                        std::span<const glm::uvec2> workItems,
                        std::span<const CullGpuInstance> instances,
-                       std::vector<glm::uvec2>& visiblePairs, u32 stats[3]);
+                       std::vector<glm::uvec2>& visiblePairs, u32 stats[4],
+                       const OcclusionInputs& occlusion = {});
 
 }  // namespace renderer
 
