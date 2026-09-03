@@ -23,6 +23,7 @@ add_executable(kenshin_tests
     src/shapes_tests.cpp
     src/smoke.cpp
     src/vgchain_tests.cpp
+    src/hzb_tests.cpp
 )
 
 target_link_libraries(kenshin_tests PRIVATE kenshin::engine Catch2::Catch2WithMain)

@@ -64,6 +64,7 @@ add_library(kenshin_engine STATIC
     src/renderer/SoftRasterPass.cpp
     src/renderer/MaterialDecodePass.cpp
     src/renderer/VisBufferChain.cpp
+    src/renderer/HzbPass.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpWriter.cpp
