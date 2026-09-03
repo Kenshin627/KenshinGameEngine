@@ -96,6 +96,14 @@ void PipelineStore::shutdown(VkDevice device) {
     vkDestroyDescriptorSetLayout(device, f.setLayout, nullptr);
   }
   m_fullscreen.clear();
+  for (const Compute& c : m_compute) {
+    if (!c.valid) continue;
+    vkDestroyPipeline(device, c.pipeline, nullptr);
+    vkDestroyPipelineLayout(device, c.layout, nullptr);
+    vkDestroyDescriptorPool(device, c.pool, nullptr);
+    vkDestroyDescriptorSetLayout(device, c.setLayout, nullptr);
+  }
+  m_compute.clear();
   if (m_cache != VK_NULL_HANDLE) {
     // Persist this session's driver compilations next to the exe;
     // rebuilt pipelines hit the cache on the next launch.
@@ -290,6 +298,86 @@ u32 PipelineStore::createFullscreen(
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) entry.sets[i] = sets[i];
   entry.valid = true;
   return static_cast<u32>(m_fullscreen.size());
+}
+
+u32 PipelineStore::createCompute(
+    VkDevice device, const IRenderBackend::ComputePipelineInfo& info) {
+  if (info.csSpirv == nullptr || info.csBytes == 0)
+    return IRenderBackend::kInvalidPipelineHandle;
+
+  const VkShaderModuleCreateInfo csInfo{
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = info.csBytes,
+      .pCode = info.csSpirv,
+  };
+  VkShaderModule module = VK_NULL_HANDLE;
+  if (!KE_VK(vkCreateShaderModule(device, &csInfo, nullptr, &module)))
+    return IRenderBackend::kInvalidPipelineHandle;
+
+  // SSBO set layout from reflection; one set per frame slot, re-written
+  // by that slot's dispatch.
+  u32 bindingCount = 0;
+  const VkDescriptorSetLayout setLayout = DescriptorCache::createStorageLayout(
+      device, info.csSpirv, info.csBytes / sizeof(u32), &bindingCount);
+  if (setLayout == VK_NULL_HANDLE) {
+    vkDestroyShaderModule(device, module, nullptr);
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
+  VkDescriptorPool pool = DescriptorCache::createStoragePool(
+      device, setLayout, bindingCount, kMaxFramesInFlight);
+  VkDescriptorSet sets[kMaxFramesInFlight] = {};
+  const bool setOk =
+      pool != VK_NULL_HANDLE &&
+      DescriptorCache::allocateSets(device, pool, setLayout, sets,
+                                    kMaxFramesInFlight);
+
+  const VkPipelineLayoutCreateInfo layoutInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &setLayout,
+  };
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  const bool layoutOk =
+      KE_VK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout));
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  bool pipeOk = false;
+  if (layoutOk) {
+    const VkComputePipelineCreateInfo createInfo{
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage =
+            VkPipelineShaderStageCreateInfo{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = module,
+                .pName = "main",
+            },
+        .layout = layout,
+    };
+    pipeOk = KE_VK(vkCreateComputePipelines(device, m_cache, 1, &createInfo,
+                                            nullptr, &pipeline));
+  }
+  vkDestroyShaderModule(device, module, nullptr);
+
+  if (!setOk || !layoutOk || !pipeOk) {
+    if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, pipeline, nullptr);
+    if (layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, layout, nullptr);
+    if (pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, pool, nullptr);
+    if (setLayout != VK_NULL_HANDLE)
+      vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
+    KENSHIN_ERROR("[vulkan] compute pipeline creation failed");
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
+
+  m_compute.emplace_back();
+  Compute& entry = m_compute.back();
+  entry.layout = layout;
+  entry.pipeline = pipeline;
+  entry.setLayout = setLayout;
+  entry.pool = pool;
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i) entry.sets[i] = sets[i];
+  entry.valid = true;
+  return static_cast<u32>(m_compute.size());
 }
 
 PipelineStore::Pipeline PipelineStore::detach(u32 handle) {

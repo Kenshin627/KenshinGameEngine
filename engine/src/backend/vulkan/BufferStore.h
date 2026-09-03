@@ -7,9 +7,8 @@
 // rides the frame slots' deletion queues (deferred) or destroyAll at
 // shutdown; readbackBuffer serves the CRC verification paths.
 
-#include <volk.h>
-
 #include <vma/vk_mem_alloc.h>
+#include <volk.h>
 
 #include <vector>
 
@@ -28,6 +27,7 @@ class BufferStore {
     VkBuffer buffer = VK_NULL_HANDLE;
     VmaAllocation alloc = VK_NULL_HANDLE;
     usize size = 0;
+    void* mapped = nullptr;  // host-visible buffers stay mapped
   };
 
   /// Device-local buffer (+ optional one-shot initial upload). Returns the
@@ -38,10 +38,14 @@ class BufferStore {
 
   bool valid(u32 handle) const {
     return handle != IRenderBackend::kInvalidBufferHandle && handle != 0 &&
-           handle <= m_slots.size() && m_slots[handle - 1].buffer != VK_NULL_HANDLE;
+           handle <= m_slots.size() &&
+           m_slots[handle - 1].buffer != VK_NULL_HANDLE;
   }
   VkBuffer buffer(u32 handle) const { return m_slots[handle - 1].buffer; }
   usize size(u32 handle) const { return m_slots[handle - 1].size; }
+  /// Persistently mapped host pointer (host-visible buffers; null for
+  /// device-local ones). CPU writes before submit are visible to the GPU.
+  void* mapped(u32 handle) const { return m_slots[handle - 1].mapped; }
 
   /// Zero the slot and return the raw entry (deletion-queue lambdas
   /// destroy it when the frame completes).

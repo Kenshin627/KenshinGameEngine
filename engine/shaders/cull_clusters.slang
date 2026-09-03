@@ -21,7 +21,9 @@
 //   3: uint2 workItems[]      - (instanceIdx, clusterIdx)
 //   4: GpuInstance instances[]- 96B, mirrors cull_instances.slang
 //   5: uint2 visiblePairs[]   - out: surviving (instanceIdx, clusterIdx)
-//   6: uint counters[4]       - [0] visible count (zero-init out);
+//   6: uint counters[4]       - [3] work item count (in; GPU-written by
+//                              the in-frame chain or pre-filled one-shot),
+//                              [0] visible count (zero-init out);
 //                               [1..3] zero-init debug stats
 
 struct GpuCluster
@@ -86,7 +88,7 @@ bool fireable(uint groupIdx, float4x4 model)
 [numthreads(64, 1, 1)]
 void main(uint tid : SV_DispatchThreadID)
 {
-    if (tid >= uint(params[1].y)) return;
+    if (tid >= counters[3]) return;
 
     const uint2 item = workItems[tid];
     const GpuCluster cluster = clusters[item.y];

@@ -1,10 +1,10 @@
 #include "kenshin/renderer/ClusterCullPass.h"
 
+#include <cstring>
+
 #include "kenshin/backend/RenderBackend.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/manager/ShaderManager.h"
-
-#include <cstring>
 
 KENSHIN_NS_BEGIN
 
@@ -69,15 +69,14 @@ bool expandWorkItemsOnGpu(backend::IRenderBackend& backend,
     return false;
   }
   // Work items were written in place (readBack buffers[0]); copy back.
-  std::memcpy(workItems.data(), outputs[0].data(),
-              total * sizeof(glm::uvec2));
+  std::memcpy(workItems.data(), outputs[0].data(), total * sizeof(glm::uvec2));
   return true;
 }
 
 bool cullClustersOnGpu(backend::IRenderBackend& backend,
-                       manager::ShaderManager& shaders,
-                       const glm::vec3& camPos, f32 pixelThreshold,
-                       f32 worldPerPixel, const std::vector<u8>& clusterData,
+                       manager::ShaderManager& shaders, const glm::vec3& camPos,
+                       f32 pixelThreshold, f32 worldPerPixel,
+                       const std::vector<u8>& clusterData,
                        const std::vector<u8>& groupData,
                        std::span<const glm::uvec2> workItems,
                        std::span<const CullGpuInstance> instances,
@@ -95,7 +94,8 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
   const glm::vec4 params1(worldPerPixel, static_cast<f32>(workItems.size()),
                           0.0f, 0.0f);
   const glm::vec4 params[2] = {params0, params1};
-  const u32 zeroStats[4] = {};
+  // [3] = work item count (the shader's input guard), rest zeroed outs.
+  const u32 zeroStats[4] = {0, 0, 0, static_cast<u32>(workItems.size())};
 
   backend::IRenderBackend::Job job;
   job.spirv = spirv.data();
@@ -103,8 +103,8 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
   job.buffers[0] = {params, sizeof(params), false};
   job.buffers[1] = {clusterData.data(), clusterData.size(), false};
   job.buffers[2] = {groupData.data(), groupData.size(), false};
-  job.buffers[3] = {workItems.data(),
-                    workItems.size() * sizeof(glm::uvec2), false};
+  job.buffers[3] = {workItems.data(), workItems.size() * sizeof(glm::uvec2),
+                    false};
   job.buffers[4] = {instances.data(),
                     instances.size() * sizeof(CullGpuInstance), false};
   job.buffers[5] = {visiblePairs.data(),
@@ -112,15 +112,13 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
   job.buffers[6] = {zeroStats, sizeof(zeroStats), true};
 
   std::vector<u8> outputs[backend::IRenderBackend::Job::kMaxBuffers];
-  const u32 groups =
-      (static_cast<u32>(workItems.size()) + 63u) / 64u;
+  const u32 groups = (static_cast<u32>(workItems.size()) + 63u) / 64u;
   if (!dispatch(backend, job, groups, outputs)) {
     KENSHIN_ERROR("[cluster-cull] cull dispatch failed");
     return false;
   }
 
-  const u32* counters =
-      reinterpret_cast<const u32*>(outputs[6].data());
+  const u32* counters = reinterpret_cast<const u32*>(outputs[6].data());
   stats[0] = counters[0];
   stats[1] = counters[1];
   stats[2] = counters[2];

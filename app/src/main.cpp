@@ -18,9 +18,10 @@
 //   KENSHINDemo --cam yaw,pitch,dist[,tx,ty,tz]    fixed camera pose in
 //                                                degrees/meters (S4.6
 //                                                acceptance screenshots)
-//   KENSHINDemo --view N                         decode view mode 0..4
+//   KENSHINDemo --view N                         decode view mode 0..5
 //                                                (0 final, 1 LOD, 2 error,
-//                                                 3 vis color, 4 checker)
+//                                                 3 triangles, 4 checker,
+//                                                 5 clusters)
 //   KENSHINDemo --kgeo X --virtual --multi       S4.6 acceptance scene:
 //                                                one mesh at near/mid/far
 //                                                instances along +x
@@ -355,7 +356,7 @@ int main(int argc, char** argv) {
   kenshin::renderer::MaterialDecodePass decodePass;
   kenshin::renderer::DecodeParams decodeParams;
   VgDebugState vgDebug;
-  if (args.viewMode >= 0 && args.viewMode <= 4)
+  if (args.viewMode >= 0 && args.viewMode <= 5)
     vgDebug.viewMode = args.viewMode;
   else if (args.checker)
     vgDebug.viewMode = 4;  // checker = DecodeView::Checker
@@ -426,9 +427,9 @@ int main(int argc, char** argv) {
         demo::drawLodPanel(kgeoPreview);
         if (args.virtualPath) {
           ImGui::Begin("Virtual Geometry");
-          const char* names[] = {"final", "LOD level", "error heat",
-                                 "vis color", "checker"};
-          for (int i = 0; i < 5; ++i)
+          const char* names[] = {"final",     "LOD level", "error heat",
+                                 "triangles", "checker",   "clusters"};
+          for (int i = 0; i < 6; ++i)
             ImGui::RadioButton(names[i], &vgDebug.viewMode, i);
           ImGui::Separator();
           ImGui::Text("clusters %u  tris %u  writes %u  cover %.1f%%",

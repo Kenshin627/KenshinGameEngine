@@ -44,6 +44,16 @@ class VulkanBackend final : public IRenderBackend {
   u32 createFullscreenPipeline(const FullscreenPipelineInfo& info) override;
   void drawFullscreen(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                       const void* push, usize pushBytes) override;
+  u32 createComputePipeline(const ComputePipelineInfo& info) override;
+  void destroyComputePipeline(u32 pipeline) override;
+  void dispatchCompute(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
+                       u32 groupsX, u32 groupsY, u32 groupsZ) override;
+  void bufferBarrier(u32 buffer, bool toFragment) override;
+  void fillBuffer(u32 buffer, u32 value) override;
+  void dispatchComputeIndirect(u32 pipeline, const u32* bufferHandles,
+                               u32 bufferCount, u32 countBuffer,
+                               usize countOffset) override;
+  void* mappedPtr(u32 buffer) override;
 
  private:
   struct Impl;

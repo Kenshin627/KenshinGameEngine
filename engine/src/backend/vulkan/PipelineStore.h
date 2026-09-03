@@ -25,6 +25,18 @@ class PipelineStore {
     VkPipeline pipeline = VK_NULL_HANDLE;
   };
 
+  /// Compute entry: persistent compute pipeline + per-frame-slot SSBO
+  /// descriptor sets (layout from SPIR-V reflection; the in-frame chain
+  /// dispatches these every frame).
+  struct Compute {
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet sets[kMaxFramesInFlight] = {};
+    bool valid = false;
+  };
+
   /// Fullscreen entry: graphics pipeline + its SSBO descriptor sets.
   /// Layout comes from FS reflection; one set per frame-in-flight slot,
   /// re-written by that slot's draw (the slot's prior frame has
@@ -54,6 +66,11 @@ class PipelineStore {
   /// handle indexes the SAME slot table as create().
   u32 createFullscreen(VkDevice device, VkFormat colorFormat,
                        const IRenderBackend::FullscreenPipelineInfo& info);
+  /// Persistent compute pipeline (in-frame chain passes).
+  u32 createCompute(VkDevice device,
+                    const IRenderBackend::ComputePipelineInfo& info);
+  const Compute& compute(u32 handle) const { return m_compute[handle - 1]; }
+  u32 computeCount() const { return static_cast<u32>(m_compute.size()); }
   const Fullscreen& fullscreen(u32 handle) const {
     return m_fullscreen[handle - 1];
   }
@@ -70,6 +87,7 @@ class PipelineStore {
  private:
   std::vector<Pipeline> m_slots;
   std::vector<Fullscreen> m_fullscreen;
+  std::vector<Compute> m_compute;
   VkPipelineCache m_cache = VK_NULL_HANDLE;
 };
 

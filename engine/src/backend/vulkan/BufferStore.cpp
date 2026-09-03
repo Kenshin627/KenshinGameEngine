@@ -28,27 +28,54 @@ u32 BufferStore::create(const VulkanDevice& device, VkCommandPool pool,
       .usage = usage,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
   };
-  const VmaAllocationCreateInfo allocInfo{
-      .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
-      .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-  };
-  // uploadDeviceBuffer is a create+upload helper (it allocates the device
-  // buffer itself into the out params) - calling vmaCreateBuffer first here
-  // would orphan that buffer. No-initial-data path allocates directly.
+  // Host-visible buffers (in-frame chain params, updated by CPU writes
+  // between submits) stay persistently mapped; everything else is
+  // device-local (AUTO_PREFER_DEVICE + one-shot initial upload).
+  const bool hostVisible =
+      (desc.usage & IRenderBackend::BufferHostVisible) != 0;
   Entry entry;
-  if (desc.initialData) {
-    if (!uploadDeviceBuffer(device.allocator, device.device,
-                            device.graphicsQueue, pool, desc.initialData,
-                            static_cast<VkDeviceSize>(desc.size), usage,
-                            entry.buffer, entry.alloc)) {
-      KENSHIN_ERROR("[buffer] initial upload failed ({} bytes)", desc.size);
+  if (hostVisible) {
+    const VmaAllocationCreateInfo hostAllocInfo{
+        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                 VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+    VmaAllocationInfo out{};
+    if (vmaCreateBuffer(device.allocator, &bufferInfo, &hostAllocInfo,
+                        &entry.buffer, &entry.alloc, &out) != VK_SUCCESS ||
+        out.pMappedData == nullptr) {
+      KENSHIN_ERROR("[buffer] host-visible creation failed ({} bytes)",
+                    desc.size);
       return IRenderBackend::kInvalidBufferHandle;
     }
-  } else if (vmaCreateBuffer(device.allocator, &bufferInfo, &allocInfo,
-                             &entry.buffer, &entry.alloc, nullptr) !=
-             VK_SUCCESS) {
-    KENSHIN_ERROR("[buffer] creation failed ({} bytes)", desc.size);
-    return IRenderBackend::kInvalidBufferHandle;
+    entry.mapped = out.pMappedData;
+    if (desc.initialData)
+      std::memcpy(entry.mapped, desc.initialData, desc.size);
+  } else {
+    const VmaAllocationCreateInfo allocInfo{
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    };
+    // uploadDeviceBuffer is a create+upload helper (it allocates the device
+    // buffer itself into the out params) - calling vmaCreateBuffer first
+    // here would orphan that buffer. No-initial-data path allocates
+    // directly.
+    if (desc.initialData) {
+      if (!uploadDeviceBuffer(device.allocator, device.device,
+                              device.graphicsQueue, pool, desc.initialData,
+                              static_cast<VkDeviceSize>(desc.size), usage,
+                              entry.buffer, entry.alloc)) {
+        KENSHIN_ERROR("[buffer] initial upload failed ({} bytes)", desc.size);
+        return IRenderBackend::kInvalidBufferHandle;
+      }
+    } else if (vmaCreateBuffer(device.allocator, &bufferInfo, &allocInfo,
+                               &entry.buffer, &entry.alloc,
+                               nullptr) != VK_SUCCESS) {
+      KENSHIN_ERROR("[buffer] creation failed ({} bytes)", desc.size);
+      return IRenderBackend::kInvalidBufferHandle;
+    }
   }
   entry.size = desc.size;
   if (desc.debugName)

@@ -26,8 +26,10 @@
 //   4: GpuInstance instances[] - 96B (model transform)
 //   5: uint2  visiblePairs[] - (instanceIdx, clusterIdx), one per group
 //   6: uint64 visBuffer[width*height] - ZERO-INITIALIZED; max wins
-//   7: uint   counters[4] - [0] coverage, [1] pixel writes, [2] backface
-//                            culls, [3] near-clipped triangles
+//   7: uint   counters[4] - [0] pair count (in; GPU-written by the
+//                            in-frame chain or pre-filled one-shot);
+//                            [1] pixel writes, [2] backface culls,
+//                            [3] near-clipped triangles (out)
 
 struct GpuCluster
 {
@@ -238,7 +240,7 @@ float ndcZOf(float3 p, float4 c0, float4 c1, float4 c2, float4 c3)
 void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
     const uint pairIdx = gid.x;
-    if (pairIdx >= uint(params[8].z)) return;
+    if (pairIdx >= counters[0]) return;
     const uint2 pair = visiblePairs[pairIdx];
     const GpuCluster cluster = clusters[pair.y];
     const GpuInstance inst = instances[pair.x];

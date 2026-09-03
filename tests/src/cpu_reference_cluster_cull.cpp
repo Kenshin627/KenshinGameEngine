@@ -143,7 +143,7 @@ TEST_CASE("cluster cull GPU/CPU differential", "[gpu][clustercull]") {
   for (const auto& g : dag.groups)
     renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
                            g.boundsSphere.z, g.boundsSphere.w, g.maxError,
-                           g.simplifyError);
+                           g.simplifyError, static_cast<u32>(g.lodLevel));
   const std::vector<renderer::GpuMeshRangePair> meshRanges = {
       {0u, static_cast<u32>(dag.clusters.size())}};
 

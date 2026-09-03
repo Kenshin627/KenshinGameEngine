@@ -198,7 +198,8 @@ class IRenderBackend {
   enum BufferUsage : u32 {
     BufferStorage = 0x1,
     BufferUniform = 0x2,
-    BufferTransferSrc = 0x4
+    BufferTransferSrc = 0x4,
+    BufferHostVisible = 0x8  // persistently mapped (CPU-written params)
   };
   struct BufferDesc {
     usize size = 0;
@@ -236,6 +237,36 @@ class IRenderBackend {
   virtual void drawFullscreen(u32 pipeline, const u32* bufferHandles,
                               u32 bufferCount, const void* push,
                               usize pushBytes) = 0;
+
+  // ---- in-frame compute (链入帧化) ------------------------------------
+  /// A persistent compute pipeline: descriptor layout derived from the
+  /// SPIR-V's declared SSBO bindings (binding i <- buffer handle i in
+  /// dispatchCompute). Created once, dispatched every frame.
+  struct ComputePipelineInfo {
+    const u32* csSpirv = nullptr;
+    usize csBytes = 0;
+  };
+  virtual u32 createComputePipeline(const ComputePipelineInfo& info) = 0;
+  virtual void destroyComputePipeline(u32 pipeline) = 0;
+  /// Record a dispatch into the CURRENT frame's command buffer. Writes
+  /// this frame slot's descriptor set (like drawFullscreen) - safe to
+  /// re-dispatch with changing buffer contents every frame.
+  virtual void dispatchCompute(u32 pipeline, const u32* bufferHandles,
+                               u32 bufferCount, u32 groupsX, u32 groupsY,
+                               u32 groupsZ) = 0;
+  /// Barrier a buffer from compute writes to its next consumer (compute
+  /// or fragment reads); call between passes that hand data over.
+  virtual void bufferBarrier(u32 buffer, bool toFragment) = 0;
+  /// vkCmdFillBuffer in the current frame (e.g. VisBuffer zeroing).
+  virtual void fillBuffer(u32 buffer, u32 value) = 0;
+  /// GPU-sized dispatch: the command's (x,y,z) come from `countBuffer`
+  /// at `offset` (VkDispatchIndirectCommand = 3 x u32, written by a
+  /// previous pass). The Nanite-style GPU-driven chain.
+  virtual void dispatchComputeIndirect(u32 pipeline, const u32* bufferHandles,
+                                       u32 bufferCount, u32 countBuffer,
+                                       usize countOffset) = 0;
+  /// Persistently mapped host pointer of a BufferHostVisible buffer.
+  virtual void* mappedPtr(u32 buffer) = 0;
 
   // ---- GPU timing (debug overlay readout) ---------------------------
   /// Last completed frame's GPU timings. Zeroes when unsupported (queue

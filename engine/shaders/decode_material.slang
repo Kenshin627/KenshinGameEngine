@@ -174,12 +174,23 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     }
     if (viewMode == 3u)
     {
-        // VisBuffer structure view: one hash color per triangle - seams
-        // and cluster boundaries are instantly visible.
+        // Triangle-density view: one hash color per triangle - the point
+        // is seeing how close triangles sit to pixel size (the Nanite
+        // goal), not telling them apart.
         uint h = (clusterIdx * 2654435761u) ^ (triIdx * 40503u);
         h ^= h >> 13u;
         return float4(float(h & 255u) / 255.0, float((h >> 8u) & 255u) / 255.0,
                       float((h >> 16u) & 255u) / 255.0, 1.0);
+    }
+    if (viewMode == 5u)
+    {
+        // Cluster view: one hash color per CLUSTER - cut boundaries and
+        // cluster sizes at a glance.
+        uint h = clusterIdx * 2654435761u;
+        h ^= h >> 13u;
+        return float4(0.25 + 0.75 * float(h & 255u) / 255.0,
+                      0.25 + 0.75 * float((h >> 8u) & 255u) / 255.0,
+                      0.25 + 0.75 * float((h >> 16u) & 255u) / 255.0, 1.0);
     }
 
     const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);

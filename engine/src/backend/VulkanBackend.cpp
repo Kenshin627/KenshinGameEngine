@@ -259,7 +259,11 @@ std::unique_ptr<IRenderBackend> createVulkanBackend() {
 
 bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   Impl& impl = *m_impl;
-  if (impl.swapchain.swapchain == VK_NULL_HANDLE) {
+  // Headless (no window): no swapchain - record offscreen-only frames
+  // (in-frame compute tests, CI). Everything else (pacing, offscreen
+  // targets, per-slot recording) runs unchanged.
+  const bool headless = impl.hwnd == nullptr;
+  if (!headless && impl.swapchain.swapchain == VK_NULL_HANDLE) {
     if (!impl.swapchain.init(impl.context.instance, impl.context.physicalDevice,
                              impl.device.device, impl.hwnd, info.width,
                              info.height))
@@ -294,27 +298,33 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   }
 
   // (Re)create per-frame offscreen targets on size/format change.
+  const VkFormat targetFormat =
+      headless ? VK_FORMAT_B8G8R8A8_UNORM : impl.swapchain.format;
   if (!impl.frameSync.ensureOffscreens(
-          impl.device, info.width, info.height, impl.swapchain.format,
+          impl.device, info.width, info.height, targetFormat,
           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
     return false;
   ensureViewportTextures();
 
-  // Acquire; rebuild once on out-of-date (e.g. window resize).
-  VkResult acquireResult =
-      impl.swapchain.acquire(impl.device.device, slot.imageAvailable);
-  if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
-    if (!impl.swapchain.recreate(impl.context.physicalDevice,
-                                 impl.device.device, info.width, info.height))
-      return false;
+  // Acquire; rebuild once on out-of-date (e.g. window resize). The
+  // headless path has nothing to acquire.
+  VkResult acquireResult = VK_SUCCESS;
+  if (!headless) {
     acquireResult =
         impl.swapchain.acquire(impl.device.device, slot.imageAvailable);
-  }
-  if (acquireResult < 0) {
-    KENSHIN_ERROR("[vulkan] acquire failed ({})",
-                  static_cast<int>(acquireResult));
-    return false;
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
+      if (!impl.swapchain.recreate(impl.context.physicalDevice,
+                                   impl.device.device, info.width, info.height))
+        return false;
+      acquireResult =
+          impl.swapchain.acquire(impl.device.device, slot.imageAvailable);
+    }
+    if (acquireResult < 0) {
+      KENSHIN_ERROR("[vulkan] acquire failed ({})",
+                    static_cast<int>(acquireResult));
+      return false;
+    }
   }
 
   // Begin this slot's recording; destroys queued on this slot's last use
@@ -388,7 +398,9 @@ void VulkanBackend::endFrame() {
   impl.frameActive = false;
 
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
-  const VkImage dstImage = impl.swapchain.images[impl.swapchain.imageIndex];
+  const VkImage dstImage =
+      impl.hwnd == nullptr ? VK_NULL_HANDLE
+                           : impl.swapchain.images[impl.swapchain.imageIndex];
 
   // Close the frame's viewport scope before transitioning its target (and
   // before the UI scope opens - render passes never nest). endPass is also
@@ -397,6 +409,45 @@ void VulkanBackend::endFrame() {
   if (impl.gpuTimestamps && slot.timingQueries != VK_NULL_HANDLE)
     vkCmdWriteTimestamp2(impl.cmd.cmd(), VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
                          slot.timingQueries, 1);
+
+  // Headless: no swapchain to composite into - end the recording, submit
+  // with only the timeline signal and advance. (The offscreen stays in
+  // COLOR_ATTACHMENT layout; readbackFrame handles its own transitions.)
+  if (impl.hwnd == nullptr) {
+    if (!impl.cmd.end()) {
+      KENSHIN_ERROR("[vulkan] vkEndCommandBuffer failed (headless)");
+      return;
+    }
+    const VkCommandBufferSubmitInfo cmdSubmit{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+        .commandBuffer = impl.cmd.cmd(),
+    };
+    const u64 signalValue = impl.frameSync.timelineValue + 1;
+    const VkSemaphoreSubmitInfo timelineSignal{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = impl.frameSync.frameTimeline,
+        .value = signalValue,
+        .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+    };
+    const VkSubmitInfo2 submit{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .commandBufferInfoCount = 1,
+        .pCommandBufferInfos = &cmdSubmit,
+        .signalSemaphoreInfoCount = 1,
+        .pSignalSemaphoreInfos = &timelineSignal,
+    };
+    if (KE_VK(vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit,
+                             VK_NULL_HANDLE))) {
+      impl.frameSync.timelineValue = signalValue;
+      impl.frameSync.lastCompleted = impl.frameSync.frameIndex;
+      impl.frameSync.anyCompleted = true;
+      impl.frameSync.completedValue = signalValue;
+      impl.frameSync.advance();
+    } else {
+      KENSHIN_ERROR("[vulkan] headless submit failed");
+    }
+    return;
+  }
 
   // offscreen: COLOR_ATTACHMENT -> SHADER_READ_ONLY for the ImGui sample.
   CommandContext::pipelineBarrier(
@@ -851,6 +902,144 @@ void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                      0, static_cast<u32>(pushBytes), push);
   vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+}
+
+// ── in-frame compute (链入帧化) ────────────────────────────────
+
+u32 VulkanBackend::createComputePipeline(const ComputePipelineInfo& info) {
+  return m_impl->pipelines.createCompute(m_impl->device.device, info);
+}
+
+void VulkanBackend::destroyComputePipeline(u32 pipeline) {
+  Impl& impl = *m_impl;
+  if (pipeline == 0 || pipeline > impl.pipelines.computeCount()) return;
+  PipelineStore::Compute& c =
+      const_cast<PipelineStore::Compute&>(impl.pipelines.compute(pipeline));
+  if (!c.valid) return;
+  vkDestroyPipeline(impl.device.device, c.pipeline, nullptr);
+  vkDestroyPipelineLayout(impl.device.device, c.layout, nullptr);
+  vkDestroyDescriptorPool(impl.device.device, c.pool, nullptr);
+  vkDestroyDescriptorSetLayout(impl.device.device, c.setLayout, nullptr);
+  c = {};
+}
+
+void VulkanBackend::dispatchCompute(u32 pipeline, const u32* bufferHandles,
+                                    u32 bufferCount, u32 groupsX, u32 groupsY,
+                                    u32 groupsZ) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.computeCount() || groupsX == 0)
+    return;
+  const PipelineStore::Compute& c = impl.pipelines.compute(pipeline);
+  if (!c.valid) return;
+
+  // Validate + collect BEFORE recording (bail-out must not leave partial
+  // state; no pass is opened here so there is nothing to unwind).
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+  // Write THIS frame slot's set (the slot's prior frame has provably
+  // completed at beginFrame - the fullscreen-draw discipline).
+  const VkDescriptorSet set = c.sets[impl.frameSync.frameIndex];
+  std::vector<VkWriteDescriptorSet> writes(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i)
+    writes[i] = VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set,
+        .dstBinding = i,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &infos[i],
+    };
+  vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
+                         nullptr);
+
+  vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE,
+                          c.layout, 0, 1, &set, 0, nullptr);
+  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
+  vkCmdDispatch(impl.cmd.cmd(), groupsX, groupsY, groupsZ);
+}
+
+void VulkanBackend::dispatchComputeIndirect(u32 pipeline,
+                                            const u32* bufferHandles,
+                                            u32 bufferCount, u32 countBuffer,
+                                            usize countOffset) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.computeCount())
+    return;
+  const PipelineStore::Compute& c = impl.pipelines.compute(pipeline);
+  if (!c.valid || !impl.buffers.valid(countBuffer)) return;
+
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+  const VkDescriptorSet set = c.sets[impl.frameSync.frameIndex];
+  std::vector<VkWriteDescriptorSet> writes(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i)
+    writes[i] = VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set,
+        .dstBinding = i,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &infos[i],
+    };
+  vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
+                         nullptr);
+  vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE,
+                          c.layout, 0, 1, &set, 0, nullptr);
+  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
+  vkCmdDispatchIndirect(impl.cmd.cmd(), impl.buffers.buffer(countBuffer),
+                        static_cast<VkDeviceSize>(countOffset));
+}
+
+void* VulkanBackend::mappedPtr(u32 buffer) {
+  return m_impl->buffers.valid(buffer) ? m_impl->buffers.mapped(buffer)
+                                       : nullptr;
+}
+
+void VulkanBackend::bufferBarrier(u32 buffer, bool toFragment) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || !impl.buffers.valid(buffer)) return;
+  const VkPipelineStageFlags2 dstStage =
+      toFragment ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                 : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+  const VkBufferMemoryBarrier2 barrier{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+      .dstStageMask = dstStage,
+      .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+      .buffer = impl.buffers.buffer(buffer),
+      .offset = 0,
+      .size = impl.buffers.size(buffer),
+  };
+  const VkDependencyInfo dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1,
+      .pBufferMemoryBarriers = &barrier,
+  };
+  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+}
+
+void VulkanBackend::fillBuffer(u32 buffer, u32 value) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || !impl.buffers.valid(buffer)) return;
+  vkCmdFillBuffer(impl.cmd.cmd(), impl.buffers.buffer(buffer), 0, VK_WHOLE_SIZE,
+                  value);
 }
 
 void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {

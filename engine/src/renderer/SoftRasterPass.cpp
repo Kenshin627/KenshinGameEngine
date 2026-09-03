@@ -49,7 +49,8 @@ bool rasterizeOnGpu(backend::IRenderBackend& backend,
 
   const std::vector<u8> params =
       packRasterParams(frame, static_cast<u32>(visiblePairs.size()));
-  const u32 zeroStats[4] = {};
+  // [0] = pair count (the shader's input guard), rest zeroed outs.
+  const u32 zeroStats[4] = {static_cast<u32>(visiblePairs.size()), 0, 0, 0};
 
   backend::IRenderBackend::Job job;
   job.spirv = spirv.data();
