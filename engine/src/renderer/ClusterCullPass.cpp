@@ -1,5 +1,6 @@
 #include "kenshin/renderer/ClusterCullPass.h"
 
+#include <cfloat>
 #include <cstring>
 
 #include "kenshin/backend/RenderBackend.h"
@@ -134,8 +135,19 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
                                                  false}
           : backend::IRenderBackend::Job::Buffer{kDummyHzb, sizeof(kDummyHzb),
                                                  false};
+  // binding 8 (cluster AABBs) same discipline as 7.
+  static const glm::vec4 kDummyAabb[2] = {};
+  job.buffers[8] =
+      occlusion.enabled
+          ? backend::IRenderBackend::Job::Buffer{occlusion.clusterAabbs,
+                                                 clusterData.size() / 48 * 2 *
+                                                     sizeof(glm::vec4),
+                                                 false}
+          : backend::IRenderBackend::Job::Buffer{kDummyAabb, sizeof(kDummyAabb),
+                                                 false};
   if (occlusion.enabled &&
-      (occlusion.hzbTexels == nullptr || occlusion.hzbCount == 0))
+      (occlusion.hzbTexels == nullptr || occlusion.hzbCount == 0 ||
+       occlusion.clusterAabbs == nullptr))
     return false;
 
   std::vector<u8> outputs[backend::IRenderBackend::Job::kMaxBuffers];
@@ -155,6 +167,26 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
   std::memcpy(visiblePairs.data(), outputs[5].data(),
               stats[0] * sizeof(glm::uvec2));
   return true;
+}
+
+std::vector<glm::vec4> computeClusterAabbs(
+    std::span<const glm::vec4> positions4, const std::vector<u8>& clusterData) {
+  std::vector<glm::vec4> aabbs(clusterData.size() / 48 * 2);
+  for (usize c = 0; c < clusterData.size() / 48; ++c) {
+    const u8* e = clusterData.data() + c * 48;
+    u32 vertexOffset, vertexCount;
+    std::memcpy(&vertexOffset, e + 24, 4);
+    std::memcpy(&vertexCount, e + 28, 4);
+    glm::vec3 mn(FLT_MAX), mx(-FLT_MAX);
+    for (u32 v = 0; v < vertexCount; ++v) {
+      const glm::vec3 p(positions4[vertexOffset + v]);
+      mn = glm::min(mn, p);
+      mx = glm::max(mx, p);
+    }
+    aabbs[c * 2 + 0] = glm::vec4(mn, 0.0f);
+    aabbs[c * 2 + 1] = glm::vec4(mx, 0.0f);
+  }
+  return aabbs;
 }
 
 }  // namespace renderer

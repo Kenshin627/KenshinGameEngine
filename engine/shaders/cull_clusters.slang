@@ -27,6 +27,10 @@
 //   5: uint2 visiblePairs[]   - out: surviving (instanceIdx, clusterIdx)
 //   7: uint hzb[]             - the PREV frame's HZB pyramid (M3.2;
 //                              only read when occEnabled)
+//   8: float4 aabbs[]         - 2 per cluster (min.xyz, max.xyz);
+//                              cluster-local, instance-transformed in
+//                              the test (M3.2b - derived at runtime,
+//                              not serialized)
 //   6: uint counters[5]       - [4] occlusion-culled count (out);
 //                              [3] work item count (in; GPU-written by
 //                              the in-frame chain or pre-filled one-shot),
@@ -70,6 +74,7 @@ struct GpuInstance {
 [[vk::binding(5)]] RWStructuredBuffer<uint2> visiblePairs;
 [[vk::binding(6)]] RWStructuredBuffer<uint> counters;
 [[vk::binding(7)]] StructuredBuffer<uint> hzb;
+[[vk::binding(8)]] StructuredBuffer<float4> aabbs;
 
 bool fireable(uint groupIdx, float4x4 model) {
   const GpuGroup g = groups[groupIdx];
@@ -89,77 +94,86 @@ bool fireable(uint groupIdx, float4x4 model) {
   return g.simplifyError > t;
 }
 
-bool occluded(uint2 item, float4x4 model) {
-  const GpuCluster cluster = clusters[item.y];
-  const uint W = uint(params[6].y), H = uint(params[6].z);
+bool occluded(uint2 item, float4x4 model)
+{
+    const uint W = uint(params[6].y), H = uint(params[6].z);
+    const float3 mn = aabbs[2u * item.y + 0u].xyz;
+    const float3 mx = aabbs[2u * item.y + 1u].xyz;
 
-  // Instance-transformed bounds sphere (fireable's convention).
-  const float3 c = model[0].xyz * cluster.bounds.x +
-                   model[1].xyz * cluster.bounds.y +
-                   model[2].xyz * cluster.bounds.z + model[3].xyz;
-  const float scale = max(length(model[0].xyz),
-                          max(length(model[1].xyz), length(model[2].xyz)));
-  const float r = cluster.bounds.w * scale;
+    // 8 cluster-local corners -> world (explicit glm-column
+    // combination per corner), projected with the PREV viewProj
+    // (Y-flipped: row = framebuffer row, the HZB's space).
+    float4 clip[8];
+    for (uint k = 0; k < 8u; ++k)
+    {
+        const float3 lc = float3((k & 1u) != 0u ? mx.x : mn.x,
+                                 (k & 2u) != 0u ? mx.y : mn.y,
+                                 (k & 4u) != 0u ? mx.z : mn.z);
+        const float3 wc = model[0].xyz * lc.x + model[1].xyz * lc.y
+                        + model[2].xyz * lc.z + model[3].xyz;
+        clip[k] = params[2] * wc.x + params[3] * wc.y
+                + params[4] * wc.z + params[5];
+        if (clip[k].w <= 0.0) return false;  // a corner behind the
+                                             // prev camera: keep
+    }
 
-  // Nearest sphere point toward the PREV camera.
-  const float3 toCam = params[7].xyz - c;
-  const float d = length(toCam);
-  if (d <= r) return false;  // prev cam inside: keep
-  const float3 q = c + toCam * (r / d);
+    // The cluster's nearest possible depth = the corner with the
+    // smallest NDC z (largest reversed bits); pack with packPixel's
+    // formula so both sides share the bit layout. AABB corners bound
+    // the box exactly (perspective maps the box to a convex polygon
+    // whose extremes are corner projections).
+    float zMin = clip[0].z / clip[0].w;
+    float rx0 = 1e30f, rx1 = -1e30f, ry0 = 1e30f, ry1 = -1e30f;
+    for (uint k = 0; k < 8u; ++k)
+    {
+        const float2 ndc = clip[k].xy / clip[k].w;
+        const float sx = (ndc.x * 0.5 + 0.5) * float(W);
+        const float sy = (ndc.y * 0.5 + 0.5) * float(H);
+        rx0 = min(rx0, sx); rx1 = max(rx1, sx);
+        ry0 = min(ry0, sy); ry1 = max(ry1, sy);
+        zMin = min(zMin, clip[k].z / clip[k].w);
+    }
+    zMin = clamp(zMin, 0.0, 1.0);
+    const uint nearBits = uint((1.0 - zMin) * 4294967295.0);
 
-  // Project with the PREV viewProj (Y-flipped: row = framebuffer
-  // row, the HZB's space). Explicit glm-column combination.
-  const float4 clip =
-      params[2] * q.x + params[3] * q.y + params[4] * q.z + params[5];
-  if (clip.w <= 0.0) return false;  // behind prev camera: keep
+    // Fully-on-screen only; partially-off rects keep (the M3.3 post
+    // pass revisits). The rect is outer-inclusive.
+    const int x0 = int(floor(rx0)), x1 = int(ceil(rx1));
+    const int y0 = int(floor(ry0)), y1 = int(ceil(ry1));
+    if (x0 < 0 || y0 < 0 || x1 >= int(W) || y1 >= int(H)) return false;
 
-  const float2 ndc = clip.xy / clip.w;
-  const float sx = (ndc.x * 0.5 + 0.5) * float(W);
-  const float sy = (ndc.y * 0.5 + 0.5) * float(H);
-  const float z = clamp(clip.z / clip.w, 0.0, 1.0);
-  const uint nearBits = uint((1.0 - z) * 4294967295.0);
+    // Pick the lowest mip whose coverage of the rect is <= 4x4 texels,
+    // walking the SAME ceil-division dims as hzbLayout.
+    uint m = 0, lw = W, lh = H;
+    while (((uint(x1) >> m) - (uint(x0) >> m) >= 4u ||
+            (uint(y1) >> m) - (uint(y0) >> m) >= 4u) &&
+           lw > 1u && lh > 1u)
+    {
+        ++m;
+        lw = (lw + 1u) / 2u;
+        lh = (lh + 1u) / 2u;
+    }
+    uint off = 0, ww = W, hh = H;
+    for (uint k = 0; k < m; ++k)
+    {
+        off += ww * hh;
+        ww = (ww + 1u) / 2u;
+        hh = (hh + 1u) / 2u;
+    }
 
-  // Screen bbox: the sphere's pixel radius (vertical == horizontal
-  // under tanHalfFov: W/(aspect) == H).
-  const float tanHalf = params[6].w;
-  const float R = (r / max(d - r, 0.1)) * (float(H) / (2.0 * tanHalf));
-  const int x0 = int(floor(sx - R)), x1 = int(ceil(sx + R));
-  const int y0 = int(floor(sy - R)), y1 = int(ceil(sy + R));
-  // Fully-on-screen only; partially-off rects keep (the post pass
-  // in M3.3 revisits).
-  if (x0 < 0 || y0 < 0 || x1 >= int(W) || y1 >= int(H)) return false;
+    const uint tx0 = uint(x0) >> m, tx1 = uint(x1) >> m;
+    const uint ty0 = uint(y0) >> m, ty1 = uint(y1) >> m;
+    uint tileMin = 0xFFFFFFFFu;
+    for (uint ty = ty0; ty <= ty1; ++ty)
+        for (uint tx = tx0; tx <= tx1; ++tx)
+            tileMin =
+                min(tileMin,
+                    hzb[off + min(ty, lh - 1u) * lw + min(tx, lw - 1u)]);
 
-  // Pick the lowest mip whose coverage of the rect is <= 4x4 texels,
-  // walking the SAME ceil-division dims as hzbLayout.
-  uint m = 0, lw = W, lh = H;
-  while (((uint(x1) >> m) - (uint(x0) >> m) >= 4u ||
-          (uint(y1) >> m) - (uint(y0) >> m) >= 4u) &&
-         lw > 1u && lh > 1u) {
-    ++m;
-    lw = (lw + 1u) / 2u;
-    lh = (lh + 1u) / 2u;
-  }
-  // Texel offset of level m (walk again summing sizes).
-  uint off = 0, ww = W, hh = H;
-  for (uint k = 0; k < m; ++k) {
-    const uint sz = ww * hh;
-    off += sz;
-    ww = (ww + 1u) / 2u;
-    hh = (hh + 1u) / 2u;
-  }
-
-  const uint tx0 = uint(x0) >> m, tx1 = uint(x1) >> m;
-  const uint ty0 = uint(y0) >> m, ty1 = uint(y1) >> m;
-  uint tileMin = 0xFFFFFFFFu;
-  for (uint ty = ty0; ty <= ty1; ++ty)
-    for (uint tx = tx0; tx <= tx1; ++tx)
-      tileMin =
-          min(tileMin, hzb[off + min(ty, lh - 1u) * lw + min(tx, lw - 1u)]);
-
-  // Reversed bits: near = large. Occluded iff even the cluster's
-  // NEAREST point is farther (smaller bits) than the tile's
-  // farthest rendered geometry (min bits).
-  return nearBits < tileMin;
+    // Reversed bits: near = large. Occluded iff even the cluster's
+    // NEAREST point is farther (smaller bits) than the tile's
+    // farthest rendered geometry (min bits).
+    return nearBits < tileMin;
 }
 
 [shader("compute")][numthreads(64, 1, 1)] void main(

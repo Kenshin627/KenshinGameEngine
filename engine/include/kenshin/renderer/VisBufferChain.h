@@ -80,8 +80,8 @@ class VisBufferChain {
   /// Blocking stats readback (test/debug), per chain stage:
   /// [0] visible instances, [1] work items, [2] visible pairs (clusters
   /// cut), [3] too-coarse, [4] source-too-coarse, [5] px writes,
-  /// [6] backface, [7] near-clipped.
-  bool readStats(backend::IRenderBackend& backend, u32 out[8]) const;
+  /// [6] backface, [7] near-clipped, [8] occlusion-culled.
+  bool readStats(backend::IRenderBackend& backend, u32 out[9]) const;
   /// Debug probe: the three indirect dispatch commands as written by
   /// the conversions (x = group count).
   bool readIndirectArgs(backend::IRenderBackend& backend, u32 expandX[3],
@@ -107,8 +107,19 @@ class VisBufferChain {
   // Static conversion configs + per-slot indirect args.
   u32 m_cfgExpand = ~0u, m_cfgCull = ~0u, m_cfgRaster = ~0u;
   u32 m_argsExpand[kSlots]{}, m_argsCull[kSlots]{}, m_argsRaster[kSlots]{};
-  u32 m_dummyHzb = ~0u;  // cull_clusters's binding 7 (occ off until M3.2b)
-  u32 m_instanceCount = 0, m_maxPairs = 0, m_width = 0, m_height = 0;
+  // M3.2b occlusion: per-slot HZB pyramids (built at the START of a
+  // frame from the SAME slot's VisBuffer - written two frames ago,
+  // provably complete) + the matrices that pyramid was rendered with.
+  // m_hzbValid gates the first run per slot (and a resize reset).
+  u32 m_pipeHzb = ~0u;
+  u32 m_hzb[kSlots]{};
+  u32 m_hzbParams[kSlots]{};  // (w,h) upload for build_hzb
+  bool m_hzbValid[kSlots]{};
+  glm::mat4 m_prevVP[kSlots]{};
+  glm::vec3 m_prevCam[kSlots]{};
+  u32 m_aabbBuffer = ~0u;  // runtime-derived per-cluster AABBs (static)
+  u32 m_instanceCount = 0, m_maxPairs = 0;
+  u32 m_width = 0, m_height = 0;
 };
 
 }  // namespace renderer

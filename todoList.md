@@ -74,7 +74,7 @@
 - [ ] one-shot 链入帧化（当前视角变化触发阻塞式 5 段 one-shot compute,交互帧率受限;运动中 VisBuffer 落后相机一帧导致剪影处闪烁/破洞,停止即恢复——链入帧+VisBuffer 按帧槽双缓冲可同时解决卡顿与错位;ShaderManager 的 SPIR-V 缓存已就位为前置）—— S4.5 落地后,M2 后续
 - [ ] 软光栅差分盲区对策：GPU/CPU 差分两边共享实现缺陷时不可见（S4.4 半像素行偏移、双重 view 两个 bug 都是 S4.5 对 HW 基线对比才暴露的）；后续可加一条 float64 独立地面真值 raster 校验 —— 2026-09-02
 - [ ] M3.4 后退役 CPU 割切割渲染路径（分三步,依赖图 2026-09-04 盘点）：① M3.4 验收后 --virtual 转正为 kgeo 默认,基线路径降级为 --baseline 开关（A/B 参照价值在 M3.4 用完）；② M4 期间面板改读链统计（readStats 补"切割三角形数"）+ pixelThreshold 滑条状态搬离 KgeoPreview；③ 删 updateCut/rebuildCutMesh/meshHandle 网格重建半边。**永留**：loadKgeo+dag（GPU 路径数据源头）、selectLodCut（LOD 语义地面真值——M5 换遍历结构时"新遍历集合==selectLodCut 集合"是最便宜的语义回归）
-- [ ] M3.2b 遮挡包围体收紧（提前，随链内遮挡接线一起做）：簇遮挡屏幕矩形当前用包围球的 ±R 方形（保守侧，零误剔但松），Nanite 用簇包围盒 8 顶点投影紧矩形——换盒投影（DAG 装配期从簇顶点算 AABB，GpuCluster 48B→64B 存 extent）；RECT 收紧是高价值部分（背景污染是主导损失），最近点是次要收紧；验收=遮挡计数上升+VisBuffer 仍逐位一致 —— 2026-09-03 记，09-04 用户裁定提前
+- [x] M3.2b 遮挡包围体收紧（提前，随链内遮挡接线一起做）✅ 2026-09-05（簇 AABB 8 顶点投影紧矩形替换球的 ±R 方形；AABB 运行时从簇顶点导出（每簇 2×vec4，.kgeo/GpuCluster 不动）；HZB 接入帧内链——每槽金字塔建于帧首、源是同槽滞后两帧的 VisBuffer（可证完备），首帧/resize 由 m_hzbValid 门控；occ-culled 计数入 readStats[8] 与调试面板；fillBuffer 自带 TRANSFER→COMPUTE 屏障。修：readStats/readIndirectArgs 首帧前无守卫致 app frame-0 崩溃、host 统计缓冲 + vis 缺 TRANSFER_SRC。验收：单测帧内遮挡保守精确（VisBuffer 逐位一致 + pair 守恒）；app 实心球沿轴机位 occ-culled 0→1；球/结两场景与无遮挡 HEAD 同参截图逐字节一致；校验层零错误（顺带消除 HEAD 的 binding-7 未更新遗留）。注：结类镂空几何 HZB mip 混洞深度、遮挡收益天然低，量化 RECT 收紧收益待 M3.3 后用大遮挡体场景测）
 - [ ] （示例）调研 clusterlod.h 的 clodConfig 各参数含义 —— 对应 S3.1
 - [ ] RenderView 抽象（多视口/多窗口时引入；Filament View=Scene+Camera、renderEngine RenderView 同位）—— 2026-09-01 Renderer/IRenderPipeline 落地时明确推迟
 - [ ] RenderGraph（pass 图 + 资源生命周期 + 调度；参照 Frostbite FrameGraph / UE RDG / Godot RDG；UI 合成届时从 backend endFrame 上移为真 pass）—— M2 多 pass 化时引入

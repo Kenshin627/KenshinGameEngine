@@ -54,6 +54,13 @@ bool expandWorkItemsOnGpu(backend::IRenderBackend& backend,
 /// identical values. On success `visiblePairs` holds the survivors and
 /// `stats[3]` = (visible, culledTooCoarse, culledSourceTooCoarse).
 ///
+/// Per-cluster AABBs (M3.2b occlusion bound): derived at runtime from
+/// the cluster table's vertex spans + the shared position pool (48B
+/// entries, offsets rebased) - two vec4s per cluster (min.xyz, max.xyz).
+/// Not serialized: the .kgeo format and GpuCluster stay untouched.
+std::vector<glm::vec4> computeClusterAabbs(
+    std::span<const glm::vec4> positions4, const std::vector<u8>& clusterData);
+
 /// M3.2 occlusion inputs (optional; disabled by default): when enabled,
 /// the survivors additionally test against the PREV frame's HZB (built
 /// by buildHzbOneshot) projected with the prev frame's viewProj;
@@ -67,6 +74,7 @@ struct OcclusionInputs {
   u32 hzbCount = 0;
   u32 screenW = 0, screenH = 0;  // the HZB's frame dimensions
   f32 tanHalfFov = 0.5f;
+  const glm::vec4* clusterAabbs = nullptr;  // 2 vec4 per cluster (min,max)
 };
 
 bool cullClustersOnGpu(backend::IRenderBackend& backend,
