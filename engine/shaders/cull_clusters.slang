@@ -19,7 +19,8 @@
 //                          [2..5] PREV frame viewProj columns (glm raw,
 //                          Y-flipped - the space the HZB lives in)
 //                          [6]=(occEnabled, screenW, screenH, tanHalfFov)
-//                          [7]=prevCamPos.xyz (nearest-point ray)
+//                          [7] reserved (was prevCamPos; the AABB test
+//                          needs no nearest-point ray)
 //   1: GpuCluster clusters[]  - 48B, mirrors packGpuCluster
 //   2: GpuGroup groups[]      - 32B, mirrors packGpuGroup
 //   3: uint2 workItems[]      - (instanceIdx, clusterIdx)
@@ -31,11 +32,16 @@
 //                              cluster-local, instance-transformed in
 //                              the test (M3.2b - derived at runtime,
 //                              not serialized)
-//   6: uint counters[5]       - [4] occlusion-culled count (out);
+//   9: uint2 pendingPairs[]   - out (M3.3): occluded items, kept for
+//                              the post pass's retest instead of being
+//                              dropped
+//   6: uint counters[6]       - [4] occlusion-culled count (out),
+//                              [5] post-revived count (written by the
+//                              POST cull, zero here);
 //                              [3] work item count (in; GPU-written by
 //                              the in-frame chain or pre-filled one-shot),
 //                              [0] visible count (zero-init out);
-//                               [1..3] zero-init debug stats
+//                               [1..2] zero-init debug stats
 
 struct GpuCluster {
   float4 bounds;  // xyz center, w radius
@@ -75,6 +81,7 @@ struct GpuInstance {
 [[vk::binding(6)]] RWStructuredBuffer<uint> counters;
 [[vk::binding(7)]] StructuredBuffer<uint> hzb;
 [[vk::binding(8)]] StructuredBuffer<float4> aabbs;
+[[vk::binding(9)]] RWStructuredBuffer<uint2> pendingPairs;
 
 bool fireable(uint groupIdx, float4x4 model) {
   const GpuGroup g = groups[groupIdx];
@@ -201,8 +208,15 @@ bool occluded(uint2 item, float4x4 model)
   // in the covered tile(s) last frame. Conservative by construction;
   // any doubt (off-screen rect, camera inside the sphere, behind the
   // prev camera, test disabled) keeps the cluster.
+  // M3.3: the occluded item lands in pendingPairs for the post
+  // pass's same-frame retest (Karis Slide 75) instead of being
+  // dropped - disoccluded geometry gets revived within the frame.
+  // One atomic add yields both the counter increment and the write
+  // slot (counters[4] doubles as the pending count).
   if (params[6].x > 0.5 && occluded(item, model)) {
-    InterlockedAdd(counters[4], 1);
+    uint pend = 0;
+    InterlockedAdd(counters[4], 1, pend);
+    pendingPairs[pend] = item;
     return;
   }
 

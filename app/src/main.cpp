@@ -198,6 +198,8 @@ struct VgDebugState {
   int viewMode = 0;  // DecodeView as int (0..4)
   kenshin::u32 visibleClusters = 0, cutTris = 0, pxWrites = 0;
   kenshin::u32 occCulled = 0;
+  kenshin::u32 revived = 0;
+  bool occlusion = true;
   kenshin::f32 coveragePct = 0.0f;
   std::vector<float> clusterHist, triHist, coverHist;
   void pushHistory() {
@@ -344,9 +346,12 @@ int main(int argc, char** argv) {
           for (int i = 0; i < 6; ++i)
             ImGui::RadioButton(names[i], &vgDebug.viewMode, i);
           ImGui::Separator();
-          ImGui::Text("clusters %u  writes %u  occ-culled %u  cover %.1f%%",
-                      vgDebug.visibleClusters, vgDebug.pxWrites,
-                      vgDebug.occCulled, vgDebug.coveragePct);
+          ImGui::Text(
+              "clusters %u  writes %u  cover %.1f%%\n"
+              "occ-culled %u  revived %u",
+              vgDebug.visibleClusters, vgDebug.pxWrites, vgDebug.coveragePct,
+              vgDebug.occCulled, vgDebug.revived);
+          ImGui::Checkbox("occlusion", &vgDebug.occlusion);
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
                            int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
                            1200.0f, ImVec2(240, 40));
@@ -513,19 +518,21 @@ int main(int argc, char** argv) {
         ci.height = static_cast<kenshin::u32>(vp.y);
         kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
                                                 ci.planes);
+        ci.occlusionEnabled = vgDebug.occlusion;
         chain.execute(*vgBackend, ci);
 
         // Panel stats: sample the chain counters every 8th frame (the
         // readback is blocking - per-frame would reintroduce stalls).
         if (frame % 8 == 0) {
-          kenshin::u32 cs[9];
+          kenshin::u32 cs[11];
           if (chainReady && chain.readStats(*vgBackend, cs)) {
             vgDebug.visibleClusters = cs[2];
-            vgDebug.pxWrites = cs[5];
+            vgDebug.pxWrites = cs[5] + cs[10];  // main + post raster
             vgDebug.occCulled = cs[8];
-            const kenshin::f32 cover = 100.0f *
-                                       static_cast<kenshin::f32>(cs[5]) /
-                                       (ci.width * ci.height);
+            vgDebug.revived = cs[9];
+            const kenshin::f32 cover =
+                100.0f * static_cast<kenshin::f32>(cs[5] + cs[10]) /
+                (ci.width * ci.height);
             vgDebug.coveragePct = cover;
             vgDebug.pushHistory();
           }

@@ -1073,6 +1073,27 @@ void VulkanBackend::bufferBarrier(u32 buffer, bool toFragment) {
 void VulkanBackend::fillBuffer(u32 buffer, u32 value) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || !impl.buffers.valid(buffer)) return;
+  const VkBufferMemoryBarrier2 warBarrier{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      // Order any prior compute read/write of the buffer (e.g. the
+      // post cull consuming the pyramid) BEFORE this fill's write.
+      // Barrier scopes span the whole queue's submission order, so
+      // this also covers the other in-flight frame's reads.
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+      .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+      .buffer = impl.buffers.buffer(buffer),
+      .offset = 0,
+      .size = impl.buffers.size(buffer),
+  };
+  const VkDependencyInfo warDep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1,
+      .pBufferMemoryBarriers = &warBarrier,
+  };
+  vkCmdPipelineBarrier2(impl.cmd.cmd(), &warDep);
   const VkBufferMemoryBarrier2 barrier{
       .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
       .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -1091,9 +1112,10 @@ void VulkanBackend::fillBuffer(u32 buffer, u32 value) {
   };
   vkCmdFillBuffer(impl.cmd.cmd(), impl.buffers.buffer(buffer), 0, VK_WHOLE_SIZE,
                   value);
-  // Self-contained: the fill's TRANSFER write is ordered before any
-  // subsequent compute read/write of the buffer (callers never need a
-  // manual barrier after a fill).
+  // Self-contained: the fill's TRANSFER write is ordered after every
+  // prior compute access and before any subsequent compute
+  // read/write of the buffer (callers never need a manual barrier
+  // around a fill).
   vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
 }
 

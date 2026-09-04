@@ -382,7 +382,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   for (int p = 0; p < 6; ++p) inputs.planes[p] = planes[p];
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
-  auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[9]) {
+  auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[11]) {
     REQUIRE(backend->beginFrame(frameInfo));
     chain.execute(*backend, inputs);
     backend->endFrame();
@@ -394,25 +394,168 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
     REQUIRE(chain.readStats(*backend, statsOut));
   };
 
+  // M3.3 semantics: each frame ends by building the slot's FINAL HZB
+  // (even warmup frames - the bootstrap), so the Main cull is active
+  // from frame 2 on, testing against the PREVIOUS frame's complete
+  // visibility - one frame stale, not two.
   std::vector<u64> vis1, vis2, vis3;
-  u32 st1[9], st3[9];
-  runFrame(vis1, st1);  // slot 0, occ off (no HZB yet)
-  runFrame(vis2, st1);  // slot 1, occ off (same reason)
-  runFrame(vis3, st3);  // slot 0 AGAIN: occ ON vs frame 1's HZB
+  u32 st1[11], st2[11], st3[11];
+  runFrame(vis1, st1);  // slot 0, occ off (no HZB yet) - the reference
+  runFrame(vis2, st2);  // slot 1, occ ON vs frame 1's final HZB
+  runFrame(vis3, st3);  // slot 0, occ ON vs frame 2's final HZB
 
-  INFO("frames 1/3 stats: occCulled " << st1[8] << " -> " << st3[8]
-                                      << ", pairs " << st1[2] << " -> "
-                                      << st3[2]);
-  REQUIRE(st1[8] == 0);                // warmup frames culled nothing
-  REQUIRE(st3[8] > 0);                 // frame 3 occlusion actually fired
-  REQUIRE(st3[2] + st3[8] == st1[2]);  // only occlusion removed pairs
+  INFO("stats: occCulled " << st1[8] << "/" << st2[8] << "/" << st3[8]
+                           << " revived " << st1[9] << "/" << st2[9] << "/"
+                           << st3[9] << ", pairs " << st1[2] << "/" << st2[2]
+                           << "/" << st3[2]);
+  REQUIRE(st1[8] == 0);  // warmup frame culled nothing
+  REQUIRE(st2[8] > 0);   // occlusion active from frame 2
+  REQUIRE(st2[9] == 0);  // static camera: nothing revived
+  REQUIRE(st3[9] == 0);
+  REQUIRE(st2[2] + st2[8] == st1[2]);  // only occlusion removed pairs
+  REQUIRE(st3[2] + st3[8] == st1[2]);
 
-  usize mismatches = 0;
-  for (usize i = 0; i < vis1.size(); ++i)
-    if (vis1[i] != vis3[i]) ++mismatches;
-  INFO("vis mismatches frame1 vs frame3: " << mismatches);
-  REQUIRE(mismatches == 0);  // conservative: identical VisBuffer
+  usize mismatch2 = 0, mismatch3 = 0;
+  for (usize i = 0; i < vis1.size(); ++i) {
+    if (vis1[i] != vis2[i]) ++mismatch2;
+    if (vis1[i] != vis3[i]) ++mismatch3;
+  }
+  INFO("vis mismatches: frame2 " << mismatch2 << ", frame3 " << mismatch3);
+  REQUIRE(mismatch2 == 0);  // conservative: identical VisBuffer
+  REQUIRE(mismatch3 == 0);
 
   chain.onShutdown(*backend);
+  backend->shutdown();
+}
+
+TEST_CASE("M3.3 post pass - disocclusion revive, exact",
+          "[gpu][vgchain][occ]") {
+  using namespace kenshin;
+  // The M3.3 acceptance: with the camera MOVING, the prev-frame HZB
+  // is stale and the Main cull wrongly kills newly-revealed clusters.
+  // The post pass must revive them within the SAME frame. Ground
+  // truth: a second chain with occlusion disabled produces the
+  // occlusion-free VisBuffer - the occluded chain must match it
+  // BIT-EXACTLY every frame of an orbiting-camera sequence.
+  geometry::ClusterDag dag;
+  {
+    const auto mesh = geometry::SphereGeometry::create(96, 48, 1.0f);
+    std::vector<geometry::ClusterGroup> groups;
+    geometry::BuildStats stats;
+    geometry::DagBuildStats dagStats;
+    std::string log;
+    const bool built = geometry::buildClusterLod(
+        mesh, [&](const geometry::ClusterGroup& g) { groups.push_back(g); },
+        stats, log);
+    REQUIRE(built);
+    REQUIRE(geometry::assembleClusterDag(mesh, groups, dag, dagStats, log));
+  }
+  manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+  auto backend = backend::createVulkanBackend();
+  backend::BackendInitParams params;
+  REQUIRE(backend->initialize(params));
+
+  std::vector<u8> clusterData, groupData;
+  for (const auto& c : dag.clusters)
+    renderer::packGpuCluster(clusterData, c.group, c.boundsSphere.x,
+                             c.boundsSphere.y, c.boundsSphere.z,
+                             c.boundsSphere.w, c.error, c.parentError,
+                             c.vertexOffset, c.vertexCount, c.indexOffset,
+                             c.indexCount, c.refinedGroup);
+  for (const auto& g : dag.groups)
+    renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
+                           g.boundsSphere.z, g.boundsSphere.w, g.maxError,
+                           g.simplifyError, static_cast<u32>(g.lodLevel));
+  std::vector<glm::vec4> positions4(dag.positions.size() / 3);
+  for (usize v = 0; v < positions4.size(); ++v)
+    positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
+                              dag.positions[v * 3 + 2], 0.0f);
+
+  // Same occluder/occluded pair as the M3.2 differential, but the
+  // camera ORBITS: each frame's hidden set of back-sphere clusters
+  // shifts, so the Main cull runs on stale occlusion every frame.
+  const glm::vec3 camBase(4.0f, 5.0f, 3.0f);
+  const glm::vec3 away = glm::normalize(camBase);
+  std::vector<renderer::CullGpuInstance> instances;
+  instances.emplace_back();
+  {
+    renderer::CullGpuInstance back;
+    back.model = glm::translate(glm::mat4(1.0f), away * 3.0f);
+    instances.push_back(back);
+  }
+  const std::vector<renderer::GpuMeshRangePair> meshRanges = {
+      {0u, static_cast<u32>(dag.clusters.size())}};
+
+  const u32 W = 96, H = 72;
+  const f32 fov = 60.0f;
+  glm::mat4 proj =
+      glm::perspectiveRH_ZO(glm::radians(fov), 4.0f / 3.0f, 0.1f, 100.0f);
+  proj[1][1] *= -1.0f;
+
+  renderer::VisBufferChain chainOff, chainOn;
+  REQUIRE(chainOff.init(*backend, shaders, positions4, dag.indices, clusterData,
+                        groupData, instances, meshRanges,
+                        static_cast<u32>(2 * dag.clusters.size()), W, H));
+  REQUIRE(chainOn.init(*backend, shaders, positions4, dag.indices, clusterData,
+                       groupData, instances, meshRanges,
+                       static_cast<u32>(2 * dag.clusters.size()), W, H));
+
+  auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
+  const int kFrames = 7;
+  u32 totalRevived = 0, totalPending = 0;
+  for (int f = 0; f < kFrames; ++f) {
+    // Orbit the camera around the Y axis through the origin; the
+    // step is large enough that occlusion relations change per frame.
+    const f32 yaw = 0.45f * static_cast<f32>(f);
+    const glm::vec3 cam =
+        glm::rotate(glm::mat4(1.0f), yaw, {0, 1, 0}) * glm::vec4(camBase, 1.0f);
+    glm::mat4 view = glm::lookAtRH(cam, {0, 0, 0}, {0, 1, 0});
+    glm::vec4 planes[6];
+    renderer::extractFrustumPlanes(proj * view, planes);
+
+    renderer::ChainInputs ci;
+    ci.view = view;
+    ci.proj = proj;
+    ci.nearZ = 0.1f;
+    ci.camPos = cam;
+    ci.pixelThreshold = 0.05f;
+    ci.worldPerPixel =
+        2.0f * std::tan(glm::radians(fov) * 0.5f) / static_cast<f32>(H);
+    ci.width = W;
+    ci.height = H;
+    for (int p = 0; p < 6; ++p) ci.planes[p] = planes[p];
+    ci.occlusionEnabled = false;
+    renderer::ChainInputs ciOn = ci;
+    ciOn.occlusionEnabled = true;
+
+    REQUIRE(backend->beginFrame(frameInfo));
+    chainOff.execute(*backend, ci);
+    chainOn.execute(*backend, ciOn);
+    backend->endFrame();
+
+    std::vector<u8> vbOff, vbOn;
+    REQUIRE(backend->readbackBuffer(chainOff.visBuffer(*backend), 0,
+                                    usize(W) * H * sizeof(u64), vbOff));
+    REQUIRE(backend->readbackBuffer(chainOn.visBuffer(*backend), 0,
+                                    usize(W) * H * sizeof(u64), vbOn));
+    usize mismatches = 0;
+    for (usize i = 0; i < usize(W) * H; ++i)
+      if (vbOff[i] != vbOn[i]) ++mismatches;
+    u32 st[11];
+    REQUIRE(chainOn.readStats(*backend, st));
+    totalRevived += st[9];
+    totalPending += st[8];
+    INFO("frame " << f << " vis mismatches " << mismatches << " pending "
+                  << st[8] << " revived " << st[9]);
+    REQUIRE(mismatches == 0);  // the post pass closed every hole
+  }
+  INFO("sequence totals: pending " << totalPending << " revived "
+                                   << totalRevived);
+  REQUIRE(totalPending > 0);  // the Main cull actually ran occluded
+  REQUIRE(totalRevived > 0);  // the post pass actually revived
+
+  chainOff.onShutdown(*backend);
+  chainOn.onShutdown(*backend);
   backend->shutdown();
 }

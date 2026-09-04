@@ -145,6 +145,11 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
                                                  false}
           : backend::IRenderBackend::Job::Buffer{kDummyAabb, sizeof(kDummyAabb),
                                                  false};
+  // binding 9 (pending pairs, M3.3): the one-shot differential drops
+  // occluded items (no post pass here) - a max-sized sink satisfies
+  // the layout; writes stay in bounds (pending <= work item count).
+  job.buffers[9] = backend::IRenderBackend::Job::Buffer{
+      nullptr, workItems.size() * sizeof(glm::uvec2), false};
   if (occlusion.enabled &&
       (occlusion.hzbTexels == nullptr || occlusion.hzbCount == 0 ||
        occlusion.clusterAabbs == nullptr))
