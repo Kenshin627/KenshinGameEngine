@@ -73,7 +73,7 @@
 - [ ] CommandContext 记 last-bound 状态（pipeline/顶点/索引缓冲），`draw()` 跳过重复绑定——当前每帧 draw 数个位数、驱动对冗余绑定有优化，纯属顺手加固；改动只在 backend 内部，不动 API —— 2026-09-02
 - [ ] one-shot 链入帧化（当前视角变化触发阻塞式 5 段 one-shot compute,交互帧率受限;运动中 VisBuffer 落后相机一帧导致剪影处闪烁/破洞,停止即恢复——链入帧+VisBuffer 按帧槽双缓冲可同时解决卡顿与错位;ShaderManager 的 SPIR-V 缓存已就位为前置）—— S4.5 落地后,M2 后续
 - [ ] 软光栅差分盲区对策：GPU/CPU 差分两边共享实现缺陷时不可见（S4.4 半像素行偏移、双重 view 两个 bug 都是 S4.5 对 HW 基线对比才暴露的）；后续可加一条 float64 独立地面真值 raster 校验 —— 2026-09-02
-- [ ] M3 遮挡测试包围体收紧：簇遮挡屏幕矩形当前用包围球的 ±R 方形（保守侧,零误剔但松）；Nanite 用簇包围盒的 8 顶点投影紧矩形——若 M3.4 验收发现遮挡收益不足,把 occluded() 的矩形换成盒投影（数据侧 GpuCluster 需要存盒 extent 或由球的构造期同步产盒）—— 2026-09-03,查证 Nanite 分层包围体后记
+- [ ] M3.2b 遮挡包围体收紧（提前，随链内遮挡接线一起做）：簇遮挡屏幕矩形当前用包围球的 ±R 方形（保守侧，零误剔但松），Nanite 用簇包围盒 8 顶点投影紧矩形——换盒投影（DAG 装配期从簇顶点算 AABB，GpuCluster 48B→64B 存 extent）；RECT 收紧是高价值部分（背景污染是主导损失），最近点是次要收紧；验收=遮挡计数上升+VisBuffer 仍逐位一致 —— 2026-09-03 记，09-04 用户裁定提前
 - [ ] （示例）调研 clusterlod.h 的 clodConfig 各参数含义 —— 对应 S3.1
 - [ ] RenderView 抽象（多视口/多窗口时引入；Filament View=Scene+Camera、renderEngine RenderView 同位）—— 2026-09-01 Renderer/IRenderPipeline 落地时明确推迟
 - [ ] RenderGraph（pass 图 + 资源生命周期 + 调度；参照 Frostbite FrameGraph / UE RDG / Godot RDG；UI 合成届时从 backend endFrame 上移为真 pass）—— M2 多 pass 化时引入
