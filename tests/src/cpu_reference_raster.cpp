@@ -206,9 +206,13 @@ struct CpuRaster {
           if (packed > vis[idx]) vis[idx] = packed;  // max, no atomics
           ++stats[1];
         }
-        w0 -= e0y;
-        w1 -= e1y;
-        w2 -= e2y;
+        // x advances ONE PIXEL = SUBPIXEL subpixels: the edge delta is
+        // -ey * SUBPIXEL (the row step multiplies by dySub for the same
+        // reason). Missing this factor made the edge functions crawl
+        // 256x too slowly across each row and drop half the coverage.
+        w0 -= e0y * SUBPIXEL;
+        w1 -= e1y * SUBPIXEL;
+        w2 -= e2y * SUBPIXEL;
         z += ra;
       }
     }
@@ -397,6 +401,87 @@ TEST_CASE("software rasterizer GPU/CPU differential", "[gpu][swraster]") {
     // Adjacent triangle sharing that exact edge.
     s.addCluster({{0, -3, 0}, {0, 3, 0}, {-4, 3, 0}}, {0, 1, 2});
     runCase("tie", s, {{0, 0}, {0, 1}}, {identity});
+  }
+
+  backend->shutdown();
+}
+
+// M4.1 post-mortem: every existing differential ran the UNFLIPPED
+// projection; the app's flipped (framebuffer-row) convention had zero
+// coverage, and a subpixel-stepping bug sailed through. Same cases as
+// the main differential, Y-FLIPPED (depth bits get the standard FMA
+// tolerance; payloads must match exactly).
+TEST_CASE("software rasterizer GPU/CPU differential - Y-FLIPPED",
+          "[gpu][swraster]") {
+  using namespace kenshin;
+  manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+  auto backend = backend::createVulkanBackend();
+  backend::BackendInitParams params;
+  REQUIRE(backend->initialize(params));
+
+  const glm::vec3 cam(0.0f, 0.0f, 8.0f);
+  renderer::SoftRasterFrame frame;
+  frame.view = glm::lookAtRH(cam, {0, 0, 0}, {0, 1, 0});
+  frame.proj =
+      glm::perspectiveRH_ZO(glm::radians(60.0f), 4.0f / 3.0f, 0.1f, 100.0f);
+  frame.proj[1][1] *= -1.0f;  // the app's convention
+  frame.yFlip = true;
+  frame.nearZ = 0.1f;
+  frame.width = 64;
+  frame.height = 48;
+  renderer::CullGpuInstance identity;
+
+  const auto runCase = [&](Scene& s, const std::vector<glm::uvec2>& pairs,
+                           const std::vector<renderer::CullGpuInstance>& insts,
+                           const char* name) {
+    s.frame = frame;
+    s.spans.emplace_back(static_cast<u32>(s.positions.size()),
+                         static_cast<u32>(s.indices.size()));
+    CpuRaster cpu{frame, s.positions, s.indices, {}};
+    u32 cpuStats[4] = {};
+    cpu.run(pairs, insts, s.spans, cpuStats);
+    std::vector<u64> gpuVis;
+    u32 gpuStats[4] = {};
+    REQUIRE(renderer::rasterizeOnGpu(*backend, shaders, frame, s.positions,
+                                     s.indices, s.clusterData, insts, pairs,
+                                     gpuVis, gpuStats));
+    const auto tolerantEqual = [](u64 a, u64 b) {
+      if (a == b) return true;
+      if ((a & 0xFFFFFFFFull) != (b & 0xFFFFFFFFull)) return false;
+      const u64 da = a >> 32, db = b >> 32;
+      return (da > db ? da - db : db - da) <= (1ull << 12);
+    };
+    u64 mismatches = 0;
+    for (usize i = 0; i < cpu.vis.size(); ++i)
+      if (!tolerantEqual(cpu.vis[i], gpuVis[i])) ++mismatches;
+    INFO("[" << name << "] cpu nz " <<
+         [&] {
+           u64 n = 0;
+           for (const u64 v : cpu.vis) n += v != 0;
+           return n;
+         }() << " mismatches "
+             << mismatches);
+    REQUIRE(mismatches == 0);
+    REQUIRE(cpuStats[2] == gpuStats[2]);
+  };
+
+  {
+    Scene s;
+    s.addCluster({{-2, -2, 0}, {2, -2, 0}, {2, 2, 0}, {-2, 2, 0}},
+                 {0, 1, 2, 0, 2, 3});
+    std::vector<renderer::CullGpuInstance> insts;
+    insts.push_back(identity);
+    renderer::CullGpuInstance moved;
+    moved.model = glm::translate(glm::mat4(1.0f), {0.8f, 0.0f, 1.0f});
+    insts.push_back(moved);
+    runCase(s, {{0, 0}, {1, 0}}, insts, "flip-multiinst");
+  }
+  {
+    Scene s;
+    s.addCluster({{0, -3, 0}, {4, -3, 0}, {0, 3, 0}}, {0, 1, 2});
+    s.addCluster({{0, -3, 0}, {0, 3, 0}, {-4, 3, 0}}, {0, 1, 2});
+    runCase(s, {{0, 0}, {0, 1}}, {identity}, "flip-tie");
   }
 
   backend->shutdown();

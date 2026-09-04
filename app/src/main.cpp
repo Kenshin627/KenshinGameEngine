@@ -120,6 +120,7 @@ struct Args {
                              // to the virtual chain (--baseline opts out)
   bool baseline = false;     // CPU-cut LOD preview (the pre-M3.4 default)
   bool checker = false;      // UV checkerboard debug view (decode path)
+  bool noOcclusion = false;  // A/B: disable the occlusion cull chain
   bool multi = false;        // S4.6 acceptance: near/mid/far instances
   bool dense = false;        // M3.4 acceptance: front-back occluders
   // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
@@ -155,6 +156,8 @@ Args parseArgs(int argc, char** argv) {
       args.baseline = true;
     else if (std::strcmp(argv[i], "--checker") == 0)
       args.checker = true;
+    else if (std::strcmp(argv[i], "--no-occ") == 0)
+      args.noOcclusion = true;
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
@@ -550,7 +553,7 @@ int main(int argc, char** argv) {
         ci.height = static_cast<kenshin::u32>(vp.y);
         kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
                                                 ci.planes);
-        ci.occlusionEnabled = vgDebug.occlusion;
+        ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
         chain.execute(*vgBackend, ci);
 
         // Panel stats: sample the chain counters every 8th frame (the

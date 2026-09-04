@@ -204,9 +204,13 @@ void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
                                packed);
                 InterlockedAdd(counters[1], 1);
             }
-            w0 -= e0y;
-            w1 -= e1y;
-            w2 -= e2y;
+            // x advances ONE PIXEL = SUBPIXEL subpixels: the edge delta is
+            // -ey * SUBPIXEL (the row step multiplies by dySub for the same
+            // reason). Missing this factor made the edge functions crawl
+            // 256x too slowly across each row.
+            w0 -= e0y * SUBPIXEL;
+            w1 -= e1y * SUBPIXEL;
+            w2 -= e2y * SUBPIXEL;
             z += ra;
         }
     }
