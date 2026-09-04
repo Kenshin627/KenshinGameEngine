@@ -74,10 +74,12 @@
 
 （随手记，格式：`- [ ] 事项 —— 备注/日期`）
 
+- [ ] HZB 遮挡体侧换簇包围盒保守光栅（Nanite 式）：当前金字塔从 VisBuffer 逐像素 min 归约，遮挡体轮廓边缘每个 mip 都混背景 tile（空像素=0 参与min→tileMin=0→保守保留；M3.4 量化：85px 圆盘 mip5 安全核仅 138px，粗簇 93px 矩形即触污染带全保留）；改为把幸存簇包围盒直接保守光栅进粗 mip（整 texel 用盒最远深度标记）可消除遮挡体侧污染——被遮挡侧（矩形/采样粒度）已近极限。空=远平面的约定不可动（安全底线）—— 2026-09-05 M3.4 验收时量化确认
+
 - [ ] CommandContext 记 last-bound 状态（pipeline/顶点/索引缓冲），`draw()` 跳过重复绑定——当前每帧 draw 数个位数、驱动对冗余绑定有优化，纯属顺手加固；改动只在 backend 内部，不动 API —— 2026-09-02
 - [ ] one-shot 链入帧化（当前视角变化触发阻塞式 5 段 one-shot compute,交互帧率受限;运动中 VisBuffer 落后相机一帧导致剪影处闪烁/破洞,停止即恢复——链入帧+VisBuffer 按帧槽双缓冲可同时解决卡顿与错位;ShaderManager 的 SPIR-V 缓存已就位为前置）—— S4.5 落地后,M2 后续
 - [ ] 软光栅差分盲区对策：GPU/CPU 差分两边共享实现缺陷时不可见（S4.4 半像素行偏移、双重 view 两个 bug 都是 S4.5 对 HW 基线对比才暴露的）；后续可加一条 float64 独立地面真值 raster 校验 —— 2026-09-02
-- [ ] M3.4 后退役 CPU 割切割渲染路径（分三步,依赖图 2026-09-04 盘点）：① M3.4 验收后 --virtual 转正为 kgeo 默认,基线路径降级为 --baseline 开关（A/B 参照价值在 M3.4 用完）；② M4 期间面板改读链统计（readStats 补"切割三角形数"）+ pixelThreshold 滑条状态搬离 KgeoPreview；③ 删 updateCut/rebuildCutMesh/meshHandle 网格重建半边。**永留**：loadKgeo+dag（GPU 路径数据源头）、selectLodCut（LOD 语义地面真值——M5 换遍历结构时"新遍历集合==selectLodCut 集合"是最便宜的语义回归）
+- [ ] M3.4 后退役 CPU 割切割渲染路径（分三步,依赖图 2026-09-04 盘点）：① ✅ 2026-09-05 —— kgeo 默认转正虚拟链（`--virtual` 保留解析为 no-op,历史验收命令仍可复现），基线路径降级 `--baseline` 开关（验证：无开关 kgeo 截图与显式 --virtual 逐字节一致、--baseline 路径可用、校验层零错误）；② M4 期间 pixelThreshold 滑条状态搬离 KgeoPreview（"切割三角形数"已随 M3.4 进链统计 readStats[11]）；③ 删 updateCut/rebuildCutMesh/meshHandle 网格重建半边。**永留**：loadKgeo+dag（GPU 路径数据源头）、selectLodCut（LOD 语义地面真值——M5 换遍历结构时"新遍历集合==selectLodCut 集合"是最便宜的语义回归）
 - [x] M3.2b 遮挡包围体收紧（提前，随链内遮挡接线一起做）✅ 2026-09-05（簇 AABB 8 顶点投影紧矩形替换球的 ±R 方形；AABB 运行时从簇顶点导出（每簇 2×vec4，.kgeo/GpuCluster 不动）；HZB 接入帧内链——每槽金字塔建于帧首、源是同槽滞后两帧的 VisBuffer（可证完备），首帧/resize 由 m_hzbValid 门控；occ-culled 计数入 readStats[8] 与调试面板；fillBuffer 自带 TRANSFER→COMPUTE 屏障。修：readStats/readIndirectArgs 首帧前无守卫致 app frame-0 崩溃、host 统计缓冲 + vis 缺 TRANSFER_SRC。验收：单测帧内遮挡保守精确（VisBuffer 逐位一致 + pair 守恒）；app 实心球沿轴机位 occ-culled 0→1；球/结两场景与无遮挡 HEAD 同参截图逐字节一致；校验层零错误（顺带消除 HEAD 的 binding-7 未更新遗留）。注：结类镂空几何 HZB mip 混洞深度、遮挡收益天然低，量化 RECT 收紧收益待 M3.3 后用大遮挡体场景测）
 - [ ] （示例）调研 clusterlod.h 的 clodConfig 各参数含义 —— 对应 S3.1
 - [ ] RenderView 抽象（多视口/多窗口时引入；Filament View=Scene+Camera、renderEngine RenderView 同位）—— 2026-09-01 Renderer/IRenderPipeline 落地时明确推迟

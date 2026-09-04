@@ -8,13 +8,17 @@
 //   KENSHINDemo --no-validation                 disable the validation layer (dev default: ON)
 //   KENSHINDemo --size WxH                       client size (default 1600x900)
 //   KENSHINDemo --screenshot path.bmp            capture the last rendered frame
-//   KENSHINDemo --kgeo path.kgeo --virtual       VisBuffer decode path (S4.5)
-//                                                instead of the baseline draw
-//                                                (needs --frames >= 2: the
-//                                                one-shot chain runs between
-//                                                frames, so frame 1 only
-//                                                warms the VisBuffer)
-//   KENSHINDemo --kgeo path.kgeo --virtual --checker   UV checkerboard view
+//   KENSHINDemo --kgeo path.kgeo               virtual geometry chain +
+//                                               decode (the default path
+//                                               since M3.4; the VisBuffer
+//                                               renders in-frame)
+//   KENSHINDemo --kgeo path.kgeo --baseline    the CPU-cut LOD preview
+//                                               (pre-M3.4 default; A/B
+//                                               reference until the cut
+//                                               path retires)
+//   KENSHINDemo --kgeo path.kgeo --checker     UV checkerboard view
+//                                               (--virtual still parses,
+//                                               a no-op for old scripts)
 //   KENSHINDemo --cam yaw,pitch,dist[,tx,ty,tz]    fixed camera pose in
 //                                                degrees/meters (S4.6
 //                                                acceptance screenshots)
@@ -112,7 +116,9 @@ struct Args {
                               // torus | cylinder | cone | knot | <path.obj>
   std::string screenshot;
   std::string screenshotUi;  // full window incl. ImGui
-  bool virtualPath = false;  // S4.5: chain + decode instead of baseline draw
+  bool virtualPath = false;  // accepted no-op since M3.4: kgeo defaults
+                             // to the virtual chain (--baseline opts out)
+  bool baseline = false;     // CPU-cut LOD preview (the pre-M3.4 default)
   bool checker = false;      // UV checkerboard debug view (decode path)
   bool multi = false;        // S4.6 acceptance: near/mid/far instances
   bool dense = false;        // M3.4 acceptance: front-back occluders
@@ -145,6 +151,8 @@ Args parseArgs(int argc, char** argv) {
       args.screenshotUi = argv[++i];
     else if (std::strcmp(argv[i], "--virtual") == 0)
       args.virtualPath = true;
+    else if (std::strcmp(argv[i], "--baseline") == 0)
+      args.baseline = true;
     else if (std::strcmp(argv[i], "--checker") == 0)
       args.checker = true;
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
@@ -302,7 +310,10 @@ int main(int argc, char** argv) {
       vgScene.flushPools();
       vgScene.setInstances(
           {kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}});
-      if (args.virtualPath) {
+      // M3.4 retirement step 1: kgeo defaults to the virtual chain;
+      // --baseline opts into the CPU-cut LOD preview (the A/B
+      // reference until the cut path is deleted).
+      if (!args.baseline) {
         const kenshin::renderer::VgMeshRange& mesh = vgScene.meshes()[vgMeshId];
         const auto makeInst = [&](const glm::mat4& model) {
           kenshin::renderer::CullGpuInstance inst;
@@ -354,7 +365,7 @@ int main(int argc, char** argv) {
       }
       overlay.setExtraPanel([&kgeoPreview, &vgDebug, &args] {
         demo::drawLodPanel(kgeoPreview);
-        if (args.virtualPath) {
+        if (!args.baseline) {
           ImGui::Begin("Virtual Geometry");
           const char* names[] = {"final",     "LOD level", "error heat",
                                  "triangles", "checker",   "clusters"};
@@ -401,7 +412,7 @@ int main(int argc, char** argv) {
   // The S4.x chain/decode APIs are engine-side renderer code that speaks
   // the backend interface; resolved from the registry the same way the
   // scene's own onInit does.
-  const bool virtualPath = kgeoMode && args.virtualPath;
+  const bool virtualPath = kgeoMode && !args.baseline;
   kenshin::renderer::VirtualGeometryScene* vgScene = nullptr;
   kenshin::backend::IRenderBackend* vgBackend = nullptr;
   if (virtualPath) {
