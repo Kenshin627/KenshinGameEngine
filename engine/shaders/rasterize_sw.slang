@@ -80,96 +80,123 @@ uint64_t packPixel(float z, uint clusterIdx, uint triIdx, uint instanceIdx)
            (uint64_t(triIdx & 0x7Fu) << 5) | uint64_t(instanceIdx & 0x1Fu);
 }
 
-void rasterizeTriangle(float2 s0, float2 s1, float2 s2,
+// M4.1: coverage runs in 16.8 SUBPIXEL FIXED POINT (256 units per
+// pixel), mirroring DX/Vulkan hardware rasterization: vertex screen
+// coords are floored to 1/256 and the edge functions are EXACT int64
+// integers, so tie pixels (w == 0) are decided by the DX top-left rule
+// - a tie counts only on a TOP edge (ey == 0 && ex > 0) or a LEFT edge
+// (ey < 0), in the canonical positive-area winding (the rule is its
+// own mirror image, so it holds for both yFlip conventions). This is
+// what lets SW and HW clusters share a seam with zero cracks AND zero
+// double coverage. Depth stays a float affine interpolation of NDC z
+// at the QUANTIZED positions (UE's MicropolyRasterize does the same -
+// its z is also screen-affine, not perspective-correct).
+static const int SUBPIXEL = 256;
+
+int64_t edgeW(int64_t ex, int64_t ey, int64_t px, int64_t py, int64_t vx, int64_t vy)
+{
+    return ex * (py - vy) - ey * (px - vx);
+}
+
+void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
                        float z0, float z1, float z2,
                        uint2 widthHeight, uint clusterIdx, uint triIdx,
                        uint instanceIdx)
 {
-    // Doubled signed area = cross(s1-s0, s2-s0); cull by sign. The
+    // Quantize to subpixel fixed point (floor - the DX spec's x.8 snap).
+    const int64_t X0 = int64_t(int(floor(s0f.x * float(SUBPIXEL))));
+    const int64_t Y0 = int64_t(int(floor(s0f.y * float(SUBPIXEL))));
+    int64_t X1 = int64_t(int(floor(s1f.x * float(SUBPIXEL))));
+    int64_t Y1 = int64_t(int(floor(s1f.y * float(SUBPIXEL))));
+    int64_t X2 = int64_t(int(floor(s2f.x * float(SUBPIXEL))));
+    int64_t Y2 = int64_t(int(floor(s2f.y * float(SUBPIXEL))));
+
+    // Doubled signed area on the QUANTIZED corners; cull by sign. The
     // culled half depends on the projection's Y orientation: y-up rows
     // (unflipped proj, the S4.4 differential convention) cull area<0;
     // y-down rows (the camera's flipped proj, framebuffer order) cull
     // area>0 - the same CW-as-viewed half the HW path's CCW-front
-    // culling drops. The CPU reference implements the identical rule.
-    const float area2 = (s1.x - s0.x) * (s2.y - s0.y)
-                      - (s1.y - s0.y) * (s2.x - s0.x);
-    if (area2 == 0.0) return;
-    const float cullSign = params[9].x > 0.5 ? 1.0 : -1.0;
-    if (area2 * cullSign > 0.0)
+    // culling drops.
+    const int64_t area2 = (X1 - X0) * (Y2 - Y0) - (Y1 - Y0) * (X2 - X0);
+    if (area2 == 0) return;
+    const int64_t cullSign = params[9].x > 0.5 ? 1 : -1;
+    if (area2 * cullSign > 0)
     {
         InterlockedAdd(counters[2], 1);
         return;
     }
-    // Canonicalize to positive area so the edge equations below keep
-    // their w >= 0 inside test on both orientations: swap v1/v2 (the
-    // payload names the triangle by index, not by corner order).
-    if (area2 < 0.0)
+    // Canonicalize to positive area (swap v1/v2; the payload names the
+    // triangle by index, not by corner order).
+    if (area2 < 0)
     {
-        float2 ts = s1; s1 = s2; s2 = ts;
+        int64_t tx = X1; int64_t ty = Y1; X1 = X2; Y1 = Y2; X2 = tx; Y2 = ty;
         float tz = z1; z1 = z2; z2 = tz;
     }
 
-    // Edge functions W_i(p) = cross(edge, p - v0): positive inside for a
-    // consistently wound triangle; per-step deltas are the raw edge vecs.
-    const float2 e0 = s1 - s0;
-    const float2 e1 = s2 - s1;
-    const float2 e2 = s0 - s2;
+    // Integer edge vectors of the canonical winding.
+    const int64_t e0x = X1 - X0, e0y = Y1 - Y0;
+    const int64_t e1x = X2 - X1, e1y = Y2 - Y1;
+    const int64_t e2x = X0 - X2, e2y = Y0 - Y2;
+    // DX top-left rule: ties (w == 0) count as inside ONLY on top
+    // (horizontal, interior below) or left edges.
+    const int64_t t0 = (e0y == 0 && e0x > 0) || e0y < 0 ? 0 : 1;
+    const int64_t t1 = (e1y == 0 && e1x > 0) || e1y < 0 ? 0 : 1;
+    const int64_t t2 = (e2y == 0 && e2x > 0) || e2y < 0 ? 0 : 1;
 
-    // Screen-space affine depth: z = a*x + b*y + c through the three
-    // vertices (NDC z is affine in screen space for a planar triangle).
-    // Solve with the same formula on CPU; test scenes use constant-z or
-    // nice-slope depths so rounding cannot diverge.
-    const float det = e0.x * (s2.y - s0.y) - e0.y * (s2.x - s0.x);  // = area2
-    const float ra = ((z1 - z0) * (s2.y - s0.y) - (z2 - z0) * (s1.y - s0.y)) / det;
-    const float rb = (e0.x * (z2 - z0) - e0.x * 0.0 -
-                      ((s2.x - s0.x) * (z1 - z0))) / det;
-
-    // Bounding rect: pixel centers p = integer + 0.5 inside
-    // [min(s), max(s)] -> first = ceil(min - 0.5), end = ceil(max - 0.5).
-    const float minx = min(min(s0.x, s1.x), s2.x);
-    const float maxx = max(max(s0.x, s1.x), s2.x);
-    const float miny = min(min(s0.y, s1.y), s2.y);
-    const float maxy = max(max(s0.y, s1.y), s2.y);
-    int x0 = int(ceil(minx - 0.5));
-    int x1 = int(ceil(maxx - 0.5));
-    int y0 = int(ceil(miny - 0.5));
-    int y1 = int(ceil(maxy - 0.5));
+    // Bounding rect: pixel x's center is at subpixel 256*x + 128, so
+    // the first candidate is ceil((minSub-128)/256) and the last is
+    // floor((maxSub-128)/256) (inclusive). The float round-trips are
+    // exact (values < 2^21, division by 256 is an exponent shift).
+    const int64_t minSubX = min(min(X0, X1), X2);
+    const int64_t maxSubX = max(max(X0, X1), X2);
+    const int64_t minSubY = min(min(Y0, Y1), Y2);
+    const int64_t maxSubY = max(max(Y0, Y1), Y2);
+    int x0 = int(ceil((float(minSubX) - 128.0) / 256.0));
+    int x1 = int(floor((float(maxSubX) - 128.0) / 256.0));
+    int y0 = int(ceil((float(minSubY) - 128.0) / 256.0));
+    int y1 = int(floor((float(maxSubY) - 128.0) / 256.0));
     x0 = max(x0, 0);
     y0 = max(y0, 0);
-    x1 = min(x1, int(widthHeight.x));
-    y1 = min(y1, int(widthHeight.y));
-    if (x0 >= x1 || y0 >= y1) return;
+    x1 = min(x1, int(widthHeight.x) - 1);
+    y1 = min(y1, int(widthHeight.y) - 1);
+    if (x0 > x1 || y0 > y1) return;
 
-    // Edge function values at the rect origin (first pixel center).
-    const float2 p00 = float2(float(x0) + 0.5, float(y0) + 0.5);
-    const float w0r0 = e0.x * (p00.y - s0.y) - e0.y * (p00.x - s0.x);
-    const float w1r0 = e1.x * (p00.y - s1.y) - e1.y * (p00.x - s1.x);
-    const float w2r0 = e2.x * (p00.y - s2.y) - e2.y * (p00.x - s2.x);
-    const float z00 = z0 + ra * (p00.x - s0.x) + rb * (p00.y - s0.y);
-    const float dzdx = ra;
-    const float dzdy = rb;
+    // Screen-space affine depth through the QUANTIZED corners (floats
+    // in pixel units; exactly representable, same solve on the CPU).
+    const float2 q0 = float2(float(X0), float(Y0)) * (1.0 / 256.0);
+    const float2 q1 = float2(float(X1), float(Y1)) * (1.0 / 256.0);
+    const float2 q2 = float2(float(X2), float(Y2)) * (1.0 / 256.0);
+    const float det = (q1.x - q0.x) * (q2.y - q0.y) -
+                      (q1.y - q0.y) * (q2.x - q0.x);
+    const float ra =
+        ((z1 - z0) * (q2.y - q0.y) - (z2 - z0) * (q1.y - q0.y)) / det;
+    const float rb = ((q1.x - q0.x) * (z2 - z0) -
+                      (q2.x - q0.x) * (z1 - z0)) / det;
 
-    for (int y = y0; y < y1; ++y)
+    // Edge values at the rect origin's pixel center; the loops only
+    // ever ADD integer edge deltas to these (exact in int64 - no
+    // drift, and the CPU reference mirrors the same increments).
+    const int64_t px0 = int64_t(x0) * SUBPIXEL + 128;
+    const int64_t py0 = int64_t(y0) * SUBPIXEL + 128;
+    int64_t w0r0 = edgeW(e0x, e0y, px0, py0, X0, Y0);
+    int64_t w1r0 = edgeW(e1x, e1y, px0, py0, X1, Y1);
+    int64_t w2r0 = edgeW(e2x, e2y, px0, py0, X2, Y2);
+    const float2 p00 = float2(float(px0), float(py0)) * (1.0 / 256.0);
+    const float z00 = z0 + ra * (p00.x - q0.x) + rb * (p00.y - q0.y);
+
+    for (int y = y0; y <= y1; ++y)
     {
-        // Row-start values recomputed from the ORIGIN (p00) values with
-        // a single multiply-add per edge/depth - no accumulation drift,
-        // and the CPU reference mirrors the exact same expressions.
-        // NOTE: + 0.5 - the ROW's pixel centers sit at y + 0.5, same as
-        // p00 = (x0 + 0.5, y0 + 0.5); without it every row samples the
-        // pixel's TOP EDGE and near-edge pixels flip in/out (the S4.5
-        // crack bug - the differential missed it because the CPU mirror
-        // shared the same half-pixel offset).
-        const float ry = float(y) + 0.5 - p00.y;
-        float w0 = w0r0 + e0.x * ry;
-        float w1 = w1r0 + e1.x * ry;
-        float w2 = w2r0 + e2.x * ry;
-        float z = z00 + dzdy * ry;
-        for (int x = x0; x < x1; ++x)
+        const int64_t dySub = int64_t(y) * SUBPIXEL + 128 - py0;
+        int64_t w0 = w0r0 + e0x * dySub;
+        int64_t w1 = w1r0 + e1x * dySub;
+        int64_t w2 = w2r0 + e2x * dySub;
+        const float ry = float(dySub) * (1.0 / 256.0);
+        float z = z00 + rb * ry;
+        for (int x = x0; x <= x1; ++x)
         {
-            // Pixel-center inside test; EXACT ties (w == 0) count as
-            // inside on every edge - the CPU reference implements the
-            // same rule, so shared-edge pixels resolve identically.
-            if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0)
+            // Inside = strictly positive, or exactly zero on a
+            // top/left edge (w >= t with t = 0/1 encodes both).
+            if (w0 >= t0 && w1 >= t1 && w2 >= t2)
             {
                 const uint64_t packed =
                     packPixel(z, clusterIdx, triIdx, instanceIdx);
@@ -177,10 +204,10 @@ void rasterizeTriangle(float2 s0, float2 s1, float2 s2,
                                packed);
                 InterlockedAdd(counters[1], 1);
             }
-            w0 += -e0.y;
-            w1 += -e1.y;
-            w2 += -e2.y;
-            z += dzdx;
+            w0 -= e0y;
+            w1 -= e1y;
+            w2 -= e2y;
+            z += ra;
         }
     }
 }

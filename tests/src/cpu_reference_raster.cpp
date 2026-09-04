@@ -114,62 +114,101 @@ struct CpuRaster {
     }
   }
 
-  void rasterTriangle(glm::vec2 s0, glm::vec2 s1, glm::vec2 s2, float z0,
+  void rasterTriangle(glm::vec2 s0f, glm::vec2 s1f, glm::vec2 s2f, float z0,
                       float z1, float z2, u32 clusterIdx, u32 triIdx,
                       u32 instanceIdx, u32* stats) {
-    // Cull-sign + canonicalization mirror rasterize_sw.slang: yFlip
+    // M4.1 mirror: 16.8 subpixel fixed point + int64 edge functions +
+    // the DX top-left tie rule (rasterize_sw.slang's new core).
+    constexpr int SUBPIXEL = 256;
+    const auto quant = [](float v) {
+      return i64(std::floor(v * static_cast<float>(SUBPIXEL)));
+    };
+    const i64 X0 = quant(s0f.x), Y0 = quant(s0f.y);
+    i64 X1 = quant(s1f.x), Y1 = quant(s1f.y);
+    i64 X2 = quant(s2f.x), Y2 = quant(s2f.y);
+
+    const i64 area2 = (X1 - X0) * (Y2 - Y0) - (Y1 - Y0) * (X2 - X0);
+    if (area2 == 0) return;
+    // Cull-sign + canonicalization mirror the shader: yFlip
     // (framebuffer-order rows) culls the CW-as-viewed half, then a
     // vertex swap restores the positive-area edge-equation path.
-    const float area2 =
-        (s1.x - s0.x) * (s2.y - s0.y) - (s1.y - s0.y) * (s2.x - s0.x);
-    if (area2 == 0.0f) return;
-    const float cullSign = frame.yFlip ? 1.0f : -1.0f;
-    if (area2 * cullSign > 0.0f) {
+    const i64 cullSign = frame.yFlip ? 1 : -1;
+    if (area2 * cullSign > 0) {
       ++stats[2];
       return;
     }
-    if (area2 < 0.0f) {
-      std::swap(s1, s2);
+    if (area2 < 0) {
+      std::swap(X1, X2);
+      std::swap(Y1, Y2);
       std::swap(z1, z2);
     }
-    const glm::vec2 e0 = s1 - s0, e1 = s2 - s1, e2 = s0 - s2;
-    const float det = area2 < 0.0f ? -area2 : area2;
+
+    const i64 e0x = X1 - X0, e0y = Y1 - Y0;
+    const i64 e1x = X2 - X1, e1y = Y2 - Y1;
+    const i64 e2x = X0 - X2, e2y = Y0 - Y2;
+    // DX top-left: ties count only on top (ey==0 && ex>0) or left
+    // (ey<0) edges of the canonical winding.
+    const auto tieBias = [](i64 ex, i64 ey) -> i64 {
+      return (ey == 0 && ex > 0) || ey < 0 ? 0 : 1;
+    };
+    const i64 t0 = tieBias(e0x, e0y);
+    const i64 t1 = tieBias(e1x, e1y);
+    const i64 t2 = tieBias(e2x, e2y);
+
+    const i64 minSubX = std::min({X0, X1, X2});
+    const i64 maxSubX = std::max({X0, X1, X2});
+    const i64 minSubY = std::min({Y0, Y1, Y2});
+    const i64 maxSubY = std::max({Y0, Y1, Y2});
+    int x0 =
+        std::max<int>(int(std::ceil((float(minSubX) - 128.0f) / 256.0f)), 0);
+    int x1 = std::min<int>(int(std::floor((float(maxSubX) - 128.0f) / 256.0f)),
+                           int(frame.width) - 1);
+    int y0 =
+        std::max<int>(int(std::ceil((float(minSubY) - 128.0f) / 256.0f)), 0);
+    int y1 = std::min<int>(int(std::floor((float(maxSubY) - 128.0f) / 256.0f)),
+                           int(frame.height) - 1);
+    if (x0 > x1 || y0 > y1) return;
+
+    // Affine depth through the quantized corners (pixel units).
+    const glm::vec2 q0(float(X0) / 256.0f, float(Y0) / 256.0f);
+    const glm::vec2 q1(float(X1) / 256.0f, float(Y1) / 256.0f);
+    const glm::vec2 q2(float(X2) / 256.0f, float(Y2) / 256.0f);
+    const float det =
+        (q1.x - q0.x) * (q2.y - q0.y) - (q1.y - q0.y) * (q2.x - q0.x);
     const float ra =
-        ((z1 - z0) * (s2.y - s0.y) - (z2 - z0) * (s1.y - s0.y)) / det;
-    const float rb = (e0.x * (z2 - z0) - ((s2.x - s0.x) * (z1 - z0))) / det;
-    const float minx = std::min(std::min(s0.x, s1.x), s2.x);
-    const float maxx = std::max(std::max(s0.x, s1.x), s2.x);
-    const float miny = std::min(std::min(s0.y, s1.y), s2.y);
-    const float maxy = std::max(std::max(s0.y, s1.y), s2.y);
-    int x0 = std::max(int(std::ceil(minx - 0.5f)), 0);
-    int x1 = std::min(int(std::ceil(maxx - 0.5f)), int(frame.width));
-    int y0 = std::max(int(std::ceil(miny - 0.5f)), 0);
-    int y1 = std::min(int(std::ceil(maxy - 0.5f)), int(frame.height));
-    if (x0 >= x1 || y0 >= y1) return;
-    const glm::vec2 p00(float(x0) + 0.5f, float(y0) + 0.5f);
-    const float w0r0 = e0.x * (p00.y - s0.y) - e0.y * (p00.x - s0.x);
-    const float w1r0 = e1.x * (p00.y - s1.y) - e1.y * (p00.x - s1.x);
-    const float w2r0 = e2.x * (p00.y - s2.y) - e2.y * (p00.x - s2.x);
-    const float z00 = z0 + ra * (p00.x - s0.x) + rb * (p00.y - s0.y);
-    for (int y = y0; y < y1; ++y) {
-      // + 0.5: the row's pixel centers sit at y + 0.5 (see the shader's
-      // comment - without it each row samples the pixel's top edge).
-      const float ry = float(y) + 0.5f - p00.y;
-      float w0 = w0r0 + e0.x * ry;
-      float w1 = w1r0 + e1.x * ry;
-      float w2 = w2r0 + e2.x * ry;
+        ((z1 - z0) * (q2.y - q0.y) - (z2 - z0) * (q1.y - q0.y)) / det;
+    const float rb =
+        ((q1.x - q0.x) * (z2 - z0) - (q2.x - q0.x) * (z1 - z0)) / det;
+
+    const i64 px0 = i64(x0) * SUBPIXEL + 128;
+    const i64 py0 = i64(y0) * SUBPIXEL + 128;
+    const auto edgeW = [](i64 ex, i64 ey, i64 px, i64 py, i64 vx, i64 vy) {
+      return ex * (py - vy) - ey * (px - vx);
+    };
+    const i64 w0r0 = edgeW(e0x, e0y, px0, py0, X0, Y0);
+    const i64 w1r0 = edgeW(e1x, e1y, px0, py0, X1, Y1);
+    const i64 w2r0 = edgeW(e2x, e2y, px0, py0, X2, Y2);
+    const glm::vec2 p00(float(px0) / 256.0f, float(py0) / 256.0f);
+    const float z00 = z0 + ra * (p00.x - q0.x) + rb * (p00.y - q0.y);
+
+    for (int y = y0; y <= y1; ++y) {
+      const i64 dySub = i64(y) * SUBPIXEL + 128 - py0;
+      i64 w0 = w0r0 + e0x * dySub;
+      i64 w1 = w1r0 + e1x * dySub;
+      i64 w2 = w2r0 + e2x * dySub;
+      const float ry = float(dySub) / 256.0f;
       float z = z00 + rb * ry;
-      for (int x = x0; x < x1; ++x) {
-        if (w0 >= 0.0f && w1 >= 0.0f && w2 >= 0.0f) {
+      for (int x = x0; x <= x1; ++x) {
+        if (w0 >= t0 && w1 >= t1 && w2 >= t2) {
           const u64 packed =
               renderer::packVisPixel(z, clusterIdx, triIdx, instanceIdx);
           const usize idx = usize(y) * frame.width + x;
           if (packed > vis[idx]) vis[idx] = packed;  // max, no atomics
           ++stats[1];
         }
-        w0 += -e0.y;
-        w1 += -e1.y;
-        w2 += -e2.y;
+        w0 -= e0y;
+        w1 -= e1y;
+        w2 -= e2y;
         z += ra;
       }
     }
