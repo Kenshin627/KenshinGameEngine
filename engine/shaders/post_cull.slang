@@ -24,8 +24,24 @@
 //   3: GpuInstance instances[] - model transforms (AABB corners)
 //   4: uint hzb[]           - the CURRENT frame's preliminary pyramid
 //   5: float4 aabbs[]       - 2 per cluster (min.xyz, max.xyz)
-//   6: uint counters[6]     - [4] pending count (in, Main cull's),
-//                             [5] revived count (out)
+//   6: uint counters[7]     - [4] pending count (in, Main cull's),
+//                             [5] revived count (out),
+//                             [6] cut-triangle accumulation (out; this
+//                             pass adds the revived clusters' tris)
+//   7: GpuCluster clusters[] - 48B, mirrors packGpuCluster (the
+//                             revived items' indexCount for [6])
+
+struct GpuCluster {
+  float4 bounds;
+  float error;
+  float parentError;
+  uint vertexOffset;
+  uint vertexCount;
+  uint indexOffset;
+  uint indexCount;
+  uint group;
+  int refinedGroup;
+};
 
 struct GpuInstance {
   float4x4 model;
@@ -43,6 +59,7 @@ struct GpuInstance {
 [[vk::binding(4)]] StructuredBuffer<uint> hzb;
 [[vk::binding(5)]] StructuredBuffer<float4> aabbs;
 [[vk::binding(6)]] RWStructuredBuffer<uint> counters;
+[[vk::binding(7)]] StructuredBuffer<GpuCluster> clusters;
 
 bool occluded(uint2 item, float4x4 model)
 {
@@ -138,4 +155,7 @@ void main(uint tid : SV_DispatchThreadID)
     uint slot = 0;
     InterlockedAdd(counters[5], 1, slot);
     postPairs[slot] = item;
+    // The revived cluster's triangles join this frame's cut (M3.4:
+    // the panel/test readout counts everything actually rasterized).
+    InterlockedAdd(counters[6], clusters[item.y].indexCount / 3u);
 }

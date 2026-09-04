@@ -133,9 +133,10 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
                                      "chain-cullParams");
     m_hzbParams[s] =
         makeHostBuffer(backend, sizeof(glm::vec4), nullptr, "chain-hzbParams");
-    // [5] = post-revived count (post_cull's out; the cull counters
-    // and the post convert share this buffer via cfg[2] src slots).
-    m_cullCnt[s] = makeHostBuffer(backend, 24, nullptr, "chain-cullCnt");
+    // [5] = post-revived count, [6] = cut-triangle accumulation (the
+    // cull counters and the post convert share this buffer via cfg[2]
+    // src slots; post_cull adds the revived share into [6]).
+    m_cullCnt[s] = makeHostBuffer(backend, 28, nullptr, "chain-cullCnt");
     m_pairs[s] = makeDeviceBuffer(backend, pairBytes, nullptr, "chain-pairs");
     m_rasterParams[s] = makeHostBuffer(backend, 12 * sizeof(glm::vec4), nullptr,
                                        "chain-rasterParams");
@@ -233,7 +234,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   cullParams[7] = glm::vec4(m_prevCam[prevSlot], 0.0f);  // reserved
   std::memcpy(backend.mappedPtr(m_cullParams[slot]), cullParams,
               sizeof(cullParams));
-  std::memset(backend.mappedPtr(m_cullCnt[slot]), 0, 24);
+  std::memset(backend.mappedPtr(m_cullCnt[slot]), 0, 28);
   std::memset(backend.mappedPtr(m_rasterCnt[slot]), 0, 16);
   std::memset(backend.mappedPtr(m_postRasterCnt[slot]), 0, 16);
   // post_cull's params: the CURRENT viewProj - the preliminary HZB
@@ -333,11 +334,11 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
                             (in.width * in.height + 63) / 64, 1, 1);
     b(m_hzb[slot]);
 
-    const u32 postCullHandles[7] = {m_postParams[slot], m_pendingPairs[slot],
+    const u32 postCullHandles[8] = {m_postParams[slot], m_pendingPairs[slot],
                                     m_postPairs[slot],  m_instanceBuffer,
                                     m_hzb[slot],        m_aabbBuffer,
-                                    m_cullCnt[slot]};
-    backend.dispatchComputeIndirect(m_pipePostCull, postCullHandles, 7,
+                                    m_cullCnt[slot],    m_clusterBuffer};
+    backend.dispatchComputeIndirect(m_pipePostCull, postCullHandles, 8,
                                     m_argsCull[slot], 0);
     b(m_postPairs[slot]);
     b(m_cullCnt[slot]);
@@ -396,12 +397,12 @@ u32 VisBufferChain::visBuffer(backend::IRenderBackend& backend) const {
 }
 
 bool VisBufferChain::readStats(backend::IRenderBackend& backend,
-                               u32 out[11]) const {
+                               u32 out[12]) const {
   const u32 slot = backend.lastCompletedFrameSlot();
   if (slot == 0xFFFFFFFFu) return false;  // no completed frame yet
-  std::vector<u8> a(8), c(24), r(16);
+  std::vector<u8> a(8), c(28), r(16);
   if (!backend.readbackBuffer(m_cntA[slot], 0, 8, a)) return false;
-  if (!backend.readbackBuffer(m_cullCnt[slot], 0, 24, c)) return false;
+  if (!backend.readbackBuffer(m_cullCnt[slot], 0, 28, c)) return false;
   if (!backend.readbackBuffer(m_rasterCnt[slot], 0, 16, r)) return false;
   std::vector<u8> e(8);
   if (!backend.readbackBuffer(m_expCnt[slot], 0, 8, e)) return false;
@@ -423,6 +424,7 @@ bool VisBufferChain::readStats(backend::IRenderBackend& backend,
   out[8] = cc[4];                               // occlusion-culled (pending)
   out[9] = cc[5];                               // post-pass revived
   out[10] = prc[1];                             // post-raster px writes
+  out[11] = cc[6];                              // cut tris (main + revived)
   return true;
 }
 

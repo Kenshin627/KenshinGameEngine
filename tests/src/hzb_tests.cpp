@@ -382,7 +382,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   for (int p = 0; p < 6; ++p) inputs.planes[p] = planes[p];
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
-  auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[11]) {
+  auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[12]) {
     REQUIRE(backend->beginFrame(frameInfo));
     chain.execute(*backend, inputs);
     backend->endFrame();
@@ -399,7 +399,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   // from frame 2 on, testing against the PREVIOUS frame's complete
   // visibility - one frame stale, not two.
   std::vector<u64> vis1, vis2, vis3;
-  u32 st1[11], st2[11], st3[11];
+  u32 st1[12], st2[12], st3[12];
   runFrame(vis1, st1);  // slot 0, occ off (no HZB yet) - the reference
   runFrame(vis2, st2);  // slot 1, occ ON vs frame 1's final HZB
   runFrame(vis3, st3);  // slot 0, occ ON vs frame 2's final HZB
@@ -542,7 +542,7 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
     usize mismatches = 0;
     for (usize i = 0; i < usize(W) * H; ++i)
       if (vbOff[i] != vbOn[i]) ++mismatches;
-    u32 st[11];
+    u32 st[12];
     REQUIRE(chainOn.readStats(*backend, st));
     totalRevived += st[9];
     totalPending += st[8];
@@ -554,6 +554,128 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
                                    << totalRevived);
   REQUIRE(totalPending > 0);  // the Main cull actually ran occluded
   REQUIRE(totalRevived > 0);  // the post pass actually revived
+
+  chainOff.onShutdown(*backend);
+  chainOn.onShutdown(*backend);
+  backend->shutdown();
+}
+
+TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
+          "[gpu][vgchain][occ]") {
+  using namespace kenshin;
+  // The M3.4 acceptance scene: three instances stacked along the view
+  // axis (the app's --multi --dense layout). A static camera looks
+  // dead-on, so the near mesh occludes most of the mid/far ones.
+  // Occlusion ON must measurably shrink the cut (clusters AND tris)
+  // while the VisBuffer stays bit-identical to occlusion OFF.
+  geometry::ClusterDag dag;
+  {
+    const auto mesh = geometry::SphereGeometry::create(96, 48, 1.0f);
+    std::vector<geometry::ClusterGroup> groups;
+    geometry::BuildStats stats;
+    geometry::DagBuildStats dagStats;
+    std::string log;
+    const bool built = geometry::buildClusterLod(
+        mesh, [&](const geometry::ClusterGroup& g) { groups.push_back(g); },
+        stats, log);
+    REQUIRE(built);
+    REQUIRE(geometry::assembleClusterDag(mesh, groups, dag, dagStats, log));
+  }
+  manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+  auto backend = backend::createVulkanBackend();
+  backend::BackendInitParams params;
+  REQUIRE(backend->initialize(params));
+
+  std::vector<u8> clusterData, groupData;
+  for (const auto& c : dag.clusters)
+    renderer::packGpuCluster(clusterData, c.group, c.boundsSphere.x,
+                             c.boundsSphere.y, c.boundsSphere.z,
+                             c.boundsSphere.w, c.error, c.parentError,
+                             c.vertexOffset, c.vertexCount, c.indexOffset,
+                             c.indexCount, c.refinedGroup);
+  for (const auto& g : dag.groups)
+    renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
+                           g.boundsSphere.z, g.boundsSphere.w, g.maxError,
+                           g.simplifyError, static_cast<u32>(g.lodLevel));
+  std::vector<glm::vec4> positions4(dag.positions.size() / 3);
+  for (usize v = 0; v < positions4.size(); ++v)
+    positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
+                              dag.positions[v * 3 + 2], 0.0f);
+
+  // The app's --dense offsets, along +x; the camera sits on -x.
+  std::vector<renderer::CullGpuInstance> instances;
+  for (const f32 x : {0.0f, 2.2f, 4.4f})
+    instances.push_back(
+        {glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.0f, 0.0f))});
+  const std::vector<renderer::GpuMeshRangePair> meshRanges = {
+      {0u, static_cast<u32>(dag.clusters.size())}};
+
+  const u32 W = 128, H = 96;
+  const f32 fov = 60.0f;
+  const glm::vec3 cam(-5.5f, 0.0f, 0.0f);
+  glm::mat4 view = glm::lookAtRH(cam, {2.2f, 0.0f, 0.0f}, {0, 1, 0});
+  glm::mat4 proj =
+      glm::perspectiveRH_ZO(glm::radians(fov), 4.0f / 3.0f, 0.1f, 100.0f);
+  proj[1][1] *= -1.0f;
+  glm::vec4 planes[6];
+  renderer::extractFrustumPlanes(proj * view, planes);
+
+  renderer::VisBufferChain chainOff, chainOn;
+  REQUIRE(chainOff.init(*backend, shaders, positions4, dag.indices, clusterData,
+                        groupData, instances, meshRanges,
+                        static_cast<u32>(3 * dag.clusters.size()), W, H));
+  REQUIRE(chainOn.init(*backend, shaders, positions4, dag.indices, clusterData,
+                       groupData, instances, meshRanges,
+                       static_cast<u32>(3 * dag.clusters.size()), W, H));
+
+  renderer::ChainInputs ci;
+  ci.view = view;
+  ci.proj = proj;
+  ci.nearZ = 0.1f;
+  ci.camPos = cam;
+  ci.pixelThreshold = 0.05f;
+  ci.worldPerPixel =
+      2.0f * std::tan(glm::radians(fov) * 0.5f) / static_cast<f32>(H);
+  ci.width = W;
+  ci.height = H;
+  for (int p = 0; p < 6; ++p) ci.planes[p] = planes[p];
+  ci.occlusionEnabled = false;
+  renderer::ChainInputs ciOn = ci;
+  ciOn.occlusionEnabled = true;
+
+  auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
+  std::vector<u8> vbOff, vbOn;
+  u32 stOff[12] = {}, stOn[12] = {};
+  for (int f = 0; f < 5; ++f) {  // steady state well past warmup
+    REQUIRE(backend->beginFrame(frameInfo));
+    chainOff.execute(*backend, ci);
+    chainOn.execute(*backend, ciOn);
+    backend->endFrame();
+    REQUIRE(backend->readbackBuffer(chainOff.visBuffer(*backend), 0,
+                                    usize(W) * H * sizeof(u64), vbOff));
+    REQUIRE(backend->readbackBuffer(chainOn.visBuffer(*backend), 0,
+                                    usize(W) * H * sizeof(u64), vbOn));
+    REQUIRE(chainOff.readStats(*backend, stOff));
+    REQUIRE(chainOn.readStats(*backend, stOn));
+  }
+
+  usize mismatches = 0;
+  for (usize i = 0; i < vbOff.size(); ++i)
+    if (vbOff[i] != vbOn[i]) ++mismatches;
+  INFO("dense stack: off pairs "
+       << stOff[2] << " tris " << stOff[11] << " px " << stOff[5]
+       << " | on pairs " << stOn[2] << " tris " << stOn[11] << " px "
+       << stOn[5] + stOn[10] << " occCulled " << stOn[8] << " revived "
+       << stOn[9] << " | vis mismatches " << mismatches);
+  REQUIRE(mismatches == 0);  // occlusion never changes the image
+  REQUIRE(stOn[8] > 0);      // the stack actually occludes
+  REQUIRE(stOn[9] == 0);     // static camera: nothing stays revived
+  REQUIRE(stOn[2] + stOn[8] == stOff[2]);  // conservation vs occlusion off
+  // The acceptance margin: the dense stack must cut a real fraction -
+  // at least a quarter of the unoccluded clusters stay culled.
+  REQUIRE(stOn[2] <= stOff[2] - stOff[2] / 4);
+  REQUIRE(stOn[11] < stOff[11]);
 
   chainOff.onShutdown(*backend);
   chainOn.onShutdown(*backend);

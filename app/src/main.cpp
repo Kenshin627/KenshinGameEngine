@@ -115,6 +115,7 @@ struct Args {
   bool virtualPath = false;  // S4.5: chain + decode instead of baseline draw
   bool checker = false;      // UV checkerboard debug view (decode path)
   bool multi = false;        // S4.6 acceptance: near/mid/far instances
+  bool dense = false;        // M3.4 acceptance: front-back occluders
   // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
   // controller's interactive defaults.
   bool hasCam = false;
@@ -150,6 +151,8 @@ Args parseArgs(int argc, char** argv) {
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
       args.multi = true;
+    else if (std::strcmp(argv[i], "--dense") == 0)
+      args.dense = true;
     else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc) {
       const int n = sscanf_s(argv[++i], "%f,%f,%f,%f,%f,%f", &args.camYaw,
                              &args.camPitch, &args.camDist, &args.camTarget[0],
@@ -202,14 +205,19 @@ struct VgDebugState {
   bool occlusion = true;
   kenshin::f32 coveragePct = 0.0f;
   std::vector<float> clusterHist, triHist, coverHist;
+  std::vector<float> occHist, reviveHist;  // M3.4: occlusion curves
   void pushHistory() {
     clusterHist.push_back(static_cast<float>(visibleClusters));
     triHist.push_back(static_cast<float>(cutTris));
     coverHist.push_back(coveragePct);
+    occHist.push_back(static_cast<float>(occCulled));
+    reviveHist.push_back(static_cast<float>(revived));
     if (clusterHist.size() > 240) {
       clusterHist.erase(clusterHist.begin());
       triHist.erase(triHist.begin());
       coverHist.erase(coverHist.begin());
+      occHist.erase(occHist.begin());
+      reviveHist.erase(reviveHist.begin());
     }
   }
 };
@@ -319,9 +327,16 @@ int main(int argc, char** argv) {
         };
         if (args.multi) {
           // S4.6 acceptance scene: the same mesh at near/mid/far along
-          // +x - one threshold, visibly different LOD levels per instance.
-          const std::vector<glm::vec3> offsets{
-              {0.0f, 0.0f, 0.0f}, {7.0f, 0.0f, 0.0f}, {59.0f, 0.0f, 0.0f}};
+          // +x - one threshold, visibly different LOD levels per
+          // instance. --dense (M3.4) pulls them close instead: a
+          // front-back occluder stack for the occlusion acceptance.
+          const std::vector<glm::vec3> offsets =
+              args.dense ? std::vector<glm::vec3>{{0.0f, 0.0f, 0.0f},
+                                                  {2.2f, 0.0f, 0.0f},
+                                                  {4.4f, 0.0f, 0.0f}}
+                         : std::vector<glm::vec3>{{0.0f, 0.0f, 0.0f},
+                                                  {7.0f, 0.0f, 0.0f},
+                                                  {59.0f, 0.0f, 0.0f}};
           std::vector<kenshin::renderer::VgInstance> vgInsts;
           for (const glm::vec3& o : offsets) {
             const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
@@ -347,10 +362,10 @@ int main(int argc, char** argv) {
             ImGui::RadioButton(names[i], &vgDebug.viewMode, i);
           ImGui::Separator();
           ImGui::Text(
-              "clusters %u  writes %u  cover %.1f%%\n"
+              "clusters %u  tris %u  writes %u  cover %.1f%%\n"
               "occ-culled %u  revived %u",
-              vgDebug.visibleClusters, vgDebug.pxWrites, vgDebug.coveragePct,
-              vgDebug.occCulled, vgDebug.revived);
+              vgDebug.visibleClusters, vgDebug.cutTris, vgDebug.pxWrites,
+              vgDebug.coveragePct, vgDebug.occCulled, vgDebug.revived);
           ImGui::Checkbox("occlusion", &vgDebug.occlusion);
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
                            int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
@@ -361,6 +376,12 @@ int main(int argc, char** argv) {
           ImGui::PlotLines("##coverage", vgDebug.coverHist.data(),
                            int(vgDebug.coverHist.size()), 0, nullptr, 0.0f,
                            100.0f, ImVec2(240, 40));
+          ImGui::PlotLines("##occ", vgDebug.occHist.data(),
+                           int(vgDebug.occHist.size()), 0, nullptr, 0.0f,
+                           1500.0f, ImVec2(240, 40));
+          ImGui::PlotLines("##revive", vgDebug.reviveHist.data(),
+                           int(vgDebug.reviveHist.size()), 0, nullptr, 0.0f,
+                           1500.0f, ImVec2(240, 40));
           ImGui::End();
         }
       });
@@ -524,9 +545,10 @@ int main(int argc, char** argv) {
         // Panel stats: sample the chain counters every 8th frame (the
         // readback is blocking - per-frame would reintroduce stalls).
         if (frame % 8 == 0) {
-          kenshin::u32 cs[11];
+          kenshin::u32 cs[12];
           if (chainReady && chain.readStats(*vgBackend, cs)) {
             vgDebug.visibleClusters = cs[2];
+            vgDebug.cutTris = cs[11];
             vgDebug.pxWrites = cs[5] + cs[10];  // main + post raster
             vgDebug.occCulled = cs[8];
             vgDebug.revived = cs[9];

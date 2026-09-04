@@ -106,8 +106,10 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
     params[7] = glm::vec4(occlusion.prevCamPos, 0.0f);
   }
   // [3] = work item count (the shader's input guard), [4] = occlusion
-  // culled counter (out), rest zeroed outs.
-  const u32 countersInit[5] = {0, 0, 0, static_cast<u32>(workItems.size()), 0};
+  // culled counter (out), [6] = cut-triangle accumulation (out) - the
+  // rest zeroed outs.
+  const u32 countersInit[7] = {0, 0, 0, static_cast<u32>(workItems.size()),
+                               0, 0, 0};
 
   backend::IRenderBackend::Job job;
   job.spirv = spirv.data();

@@ -35,9 +35,12 @@
 //   9: uint2 pendingPairs[]   - out (M3.3): occluded items, kept for
 //                              the post pass's retest instead of being
 //                              dropped
-//   6: uint counters[6]       - [4] occlusion-culled count (out),
+//   6: uint counters[7]       - [4] occlusion-culled count (out),
 //                              [5] post-revived count (written by the
-//                              POST cull, zero here);
+//                              POST cull, zero here),
+//                              [6] cut-triangle accumulation (out,
+//                              M3.4: surviving clusters' indexCount/3,
+//                              the post cull adds its revived share);
 //                              [3] work item count (in; GPU-written by
 //                              the in-frame chain or pre-filled one-shot),
 //                              [0] visible count (zero-init out);
@@ -223,4 +226,5 @@ bool occluded(uint2 item, float4x4 model)
   uint slot = 0;
   InterlockedAdd(counters[0], 1, slot);
   visiblePairs[slot] = item;
+  InterlockedAdd(counters[6], cluster.indexCount / 3u);  // cut tris
 }

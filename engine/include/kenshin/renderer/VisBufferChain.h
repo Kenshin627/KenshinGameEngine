@@ -82,8 +82,9 @@ class VisBufferChain {
   /// [0] visible instances, [1] work items, [2] visible pairs (clusters
   /// cut), [3] too-coarse, [4] source-too-coarse, [5] px writes,
   /// [6] backface, [7] near-clipped, [8] occlusion-culled (pending),
-  /// [9] post-pass revived, [10] post-raster px writes.
-  bool readStats(backend::IRenderBackend& backend, u32 out[11]) const;
+  /// [9] post-pass revived, [10] post-raster px writes,
+  /// [11] cut tris (main + revived).
+  bool readStats(backend::IRenderBackend& backend, u32 out[12]) const;
   /// Debug probe: the three indirect dispatch commands as written by
   /// the conversions (x = group count).
   bool readIndirectArgs(backend::IRenderBackend& backend, u32 expandX[3],

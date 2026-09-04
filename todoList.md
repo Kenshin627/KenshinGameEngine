@@ -49,11 +49,11 @@
 ## 后续里程碑（排期未定，选做）
 
 - [ ] **ECS 实体组件系统**（gameplay 层，用户确认将来要做：引入 EnTT（header-only，vcpkg）；渲染器保持只消费"实例平表"的接口缝，ECS 在上游填数组，管线零改动）
-- [ ] M3 两遍 HZB 遮挡剔除（分阶段方案 2026-09-04 批准，编号此前只在会话/代码注释里，2026-09-05 补记于此；明确不做：深度梯度测试、cone backface、实例级遮挡前置（留 M5）、HZB storage image 优化）
+- [x] M3 两遍 HZB 遮挡剔除 ✅ 2026-09-05（M3.1~M3.4 全过，见下方细分；分阶段方案 2026-09-04 批准，编号此前只在会话/代码注释里，2026-09-05 补记于此；明确不做：深度梯度测试、cone backface、实例级遮挡前置（留 M5）、HZB storage image 优化）
   - [x] M3.1 深度金字塔基建（HZB 缓冲式单 dispatch 原子攀爬 + CPU 参考差分）✅ 2026-09-03（commit 2e15436）
   - [x] M3.2 遮挡测试进簇剔除 Main Pass + M3.2b 盒投影紧矩形/链内接线 ✅ 2026-09-05（commit 3eeba91 + 595fa12，详见杂项 M3.2b 条目）
   - [x] M3.3 Post Pass 闭环 ✅ 2026-09-05（被剔簇进 pendingPairs（counters[4] 即计数）；Main 光栅后建本帧初步 HZB → post_cull 复测 pending（只重测遮挡，当前帧 viewProj）→ 复活者补光栅并入同一 VisBuffer → 建最终 HZB 留下帧 Main（每帧两次构建，Nanite 对齐）；HZB 语义改为"帧末建、测上一帧"（1 帧旧替代 2 帧旧），最终 HZB 无条件构建作为激活引导；count_to_indirect 加 cfg[2] 源索引；fillBuffer 补写前屏障（WAR + 跨提交序）；post 光栅/最终 HZB 用独立管线实例（同帧双更新描述符集违例——NVIDIA 绑定时快照碰巧正确，spec 层 UB）；ChainInputs::occlusionEnabled 开关 + 面板 occ-culled/revived 计数与开关。验收：双链差分（轨道相机 7 帧，遮挡开/关）VisBuffer 逐位一致 + pending>0 + revived>0（disocclusion 无洞的强形式）；球/结场景静态相机截图与无遮挡 HEAD 逐字节一致；校验层零错误）
-  - [ ] M3.4 遮挡密集场景验收：三实例前后遮挡布局，开/关遮挡三形计数下降幅度对比 + 画面一致；遮挡计数曲线进面板
+  - [x] M3.4 遮挡密集场景验收 ✅ 2026-09-05（--multi --dense 布局：三实例沿视轴 x=0/2.2/4.4；readStats 补 [11] 切割三角形数——cull 主趟幸存簇 + post 复活簇把 indexCount/3 累进 counters[6]（即退役计划步骤②预告的面板改读链统计）；面板 occ-culled/revived 曲线入列。验收数据：app 640×461 机位 `--cam 270,0,8,2.2,0,0 --lod-threshold 0.25` → 129 簇全切 84 可见 + 45 遮挡剔除 = **35% 剔除**、revived 0（静态相机）、校验层零错误；单测同布局双链差分 VisBuffer 逐位一致 + 削减 ≥25% 断言。**量化记录：默认阈值 1.0 下 0 剔除不是 bug**——粗簇矩形（~90px）超出近球圆盘（r≈85px）的 mip 安全核（mip5=32px tile 时 ≈138px 核直径 vs 93px rect 触到圆盘外 tile），空像素 L0=0（远平面，保守约定——=0xFFFFFFFF 会变"最近遮挡体"错误剔除）混入 min 污染 tileMin → 全保守保留；这正是 M3.2b 记录的"背景污染主导损失"，RECT/mip 收紧是后续优化空间（Nanite 同源保守性））
 - [ ] M4 大三角形 HW 光栅路径 + async compute 重叠
 - [ ] M5 BVH8 + Persistent Threads 剔除
 - [ ] M6 分页流式加载
