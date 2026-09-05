@@ -66,6 +66,12 @@ class PipelineStore {
   /// handle indexes the SAME slot table as create().
   u32 createFullscreen(VkDevice device, VkFormat colorFormat,
                        const IRenderBackend::FullscreenPipelineInfo& info);
+  /// M4.2 hardware raster path: NO attachments at all (the PS writes
+  /// the VisBuffer SSBO atomically, UE's null-targets form - one output
+  /// buffer, async-overlap friendly). Cull BACK / front CCW, matching
+  /// the SW rasterizer's convention under the Y-flipped projection.
+  u32 createNullRaster(VkDevice device,
+                       const IRenderBackend::FullscreenPipelineInfo& info);
   /// Persistent compute pipeline (in-frame chain passes).
   u32 createCompute(VkDevice device,
                     const IRenderBackend::ComputePipelineInfo& info);
@@ -75,6 +81,10 @@ class PipelineStore {
     return m_fullscreen[handle - 1];
   }
   u32 fullscreenCount() const { return static_cast<u32>(m_fullscreen.size()); }
+  const Fullscreen& nullRaster(u32 handle) const {
+    return m_nullRaster[handle - 1];
+  }
+  u32 nullRasterCount() const { return static_cast<u32>(m_nullRaster.size()); }
 
   /// Zero the slot and return its raw handles (for a deletion-queue
   /// lambda that destroys them when the frame completes).
@@ -87,6 +97,7 @@ class PipelineStore {
  private:
   std::vector<Pipeline> m_slots;
   std::vector<Fullscreen> m_fullscreen;
+  std::vector<Fullscreen> m_nullRaster;
   std::vector<Compute> m_compute;
   VkPipelineCache m_cache = VK_NULL_HANDLE;
 };

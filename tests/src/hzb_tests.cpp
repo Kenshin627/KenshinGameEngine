@@ -264,7 +264,7 @@ TEST_CASE("M3.2 occlusion cull is conservative", "[gpu][hzb][occ]") {
   occ.screenH = H;
   occ.tanHalfFov = std::tan(glm::radians(fov) * 0.5f);
   const std::vector<glm::vec4> aabbs =
-      renderer::computeClusterAabbs(positions4, clusterData);
+      renderer::computeClusterAabbs(positions4, dag.indices, clusterData);
   occ.clusterAabbs = aabbs.data();
   std::vector<glm::uvec2> pairsOcc;
   u32 statsOcc[4] = {};
@@ -382,7 +382,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   for (int p = 0; p < 6; ++p) inputs.planes[p] = planes[p];
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
-  auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[12]) {
+  auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[13]) {
     REQUIRE(backend->beginFrame(frameInfo));
     chain.execute(*backend, inputs);
     backend->endFrame();
@@ -399,7 +399,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   // from frame 2 on, testing against the PREVIOUS frame's complete
   // visibility - one frame stale, not two.
   std::vector<u64> vis1, vis2, vis3;
-  u32 st1[12], st2[12], st3[12];
+  u32 st1[13], st2[13], st3[13];
   runFrame(vis1, st1);  // slot 0, occ off (no HZB yet) - the reference
   runFrame(vis2, st2);  // slot 1, occ ON vs frame 1's final HZB
   runFrame(vis3, st3);  // slot 0, occ ON vs frame 2's final HZB
@@ -542,7 +542,7 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
     usize mismatches = 0;
     for (usize i = 0; i < usize(W) * H; ++i)
       if (vbOff[i] != vbOn[i]) ++mismatches;
-    u32 st[12];
+    u32 st[13];
     REQUIRE(chainOn.readStats(*backend, st));
     totalRevived += st[9];
     totalPending += st[8];
@@ -646,7 +646,7 @@ TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
   std::vector<u8> vbOff, vbOn;
-  u32 stOff[12] = {}, stOn[12] = {};
+  u32 stOff[13] = {}, stOn[13] = {};
   for (int f = 0; f < 5; ++f) {  // steady state well past warmup
     REQUIRE(backend->beginFrame(frameInfo));
     chainOff.execute(*backend, ci);
@@ -682,5 +682,131 @@ TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
 
   chainOff.onShutdown(*backend);
   chainOn.onShutdown(*backend);
+  backend->shutdown();
+}
+
+TEST_CASE("M4.2 HW raster path - force-HW vs all-SW coverage",
+          "[gpu][vgchain][hw]") {
+  using namespace kenshin;
+  // The M4.2 acceptance: hwMode=2 (UE's RENDER_FLAG_FORCE_HW_RASTER)
+  // routes EVERY cluster through the fixed-function rasterizer; the
+  // all-SW chain must produce the SAME coverage set bit-for-bit (the
+  // PS re-runs rasterize_sw's exact quantized edge test, so coverage
+  // is path-independent). Depth bits may differ (perspective-correct
+  // vs affine) and with them near-tie winners - payloads are only
+  // compared on uniquely-owned pixels.
+  geometry::ClusterDag dag;
+  {
+    const auto mesh = geometry::SphereGeometry::create(96, 48, 1.0f);
+    std::vector<geometry::ClusterGroup> groups;
+    geometry::BuildStats stats;
+    geometry::DagBuildStats dagStats;
+    std::string log;
+    const bool built = geometry::buildClusterLod(
+        mesh, [&](const geometry::ClusterGroup& g) { groups.push_back(g); },
+        stats, log);
+    REQUIRE(built);
+    REQUIRE(geometry::assembleClusterDag(mesh, groups, dag, dagStats, log));
+  }
+  manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+  auto backend = backend::createVulkanBackend();
+  backend::BackendInitParams params;
+  REQUIRE(backend->initialize(params));
+
+  std::vector<u8> clusterData, groupData;
+  for (const auto& c : dag.clusters)
+    renderer::packGpuCluster(clusterData, c.group, c.boundsSphere.x,
+                             c.boundsSphere.y, c.boundsSphere.z,
+                             c.boundsSphere.w, c.error, c.parentError,
+                             c.vertexOffset, c.vertexCount, c.indexOffset,
+                             c.indexCount, c.refinedGroup);
+  for (const auto& g : dag.groups)
+    renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
+                           g.boundsSphere.z, g.boundsSphere.w, g.maxError,
+                           g.simplifyError, static_cast<u32>(g.lodLevel));
+  std::vector<glm::vec4> positions4(dag.positions.size() / 3);
+  for (usize v = 0; v < positions4.size(); ++v)
+    positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
+                              dag.positions[v * 3 + 2], 0.0f);
+
+  std::vector<renderer::CullGpuInstance> instances;
+  instances.emplace_back();
+  {
+    renderer::CullGpuInstance back;
+    back.model = glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 3.0f));
+    instances.push_back(back);
+  }
+  const std::vector<renderer::GpuMeshRangePair> meshRanges = {
+      {0u, static_cast<u32>(dag.clusters.size())}};
+
+  const u32 W = 160, H = 120;
+  const f32 fov = 60.0f;
+  const glm::vec3 cam(4.0f, 5.0f, 3.0f);
+  glm::mat4 view = glm::lookAtRH(cam, {0, 0, 0}, {0, 1, 0});
+  glm::mat4 proj =
+      glm::perspectiveRH_ZO(glm::radians(fov), 4.0f / 3.0f, 0.1f, 100.0f);
+  proj[1][1] *= -1.0f;
+  glm::vec4 planes[6];
+  renderer::extractFrustumPlanes(proj * view, planes);
+
+  renderer::VisBufferChain chainSw, chainHw;
+  REQUIRE(chainSw.init(*backend, shaders, positions4, dag.indices, clusterData,
+                       groupData, instances, meshRanges,
+                       static_cast<u32>(2 * dag.clusters.size()), W, H));
+  REQUIRE(chainHw.init(*backend, shaders, positions4, dag.indices, clusterData,
+                       groupData, instances, meshRanges,
+                       static_cast<u32>(2 * dag.clusters.size()), W, H));
+
+  renderer::ChainInputs ci;
+  ci.view = view;
+  ci.proj = proj;
+  ci.nearZ = 0.1f;
+  ci.camPos = cam;
+  ci.pixelThreshold = 0.05f;
+  ci.worldPerPixel =
+      2.0f * std::tan(glm::radians(fov) * 0.5f) / static_cast<f32>(H);
+  ci.width = W;
+  ci.height = H;
+  for (int p = 0; p < 6; ++p) ci.planes[p] = planes[p];
+  ci.occlusionEnabled = true;  // exercise the full chain both sides
+  ci.hwMode = 0;               // all-SW reference
+  renderer::ChainInputs ciHw = ci;
+  ciHw.hwMode = 2;  // FORCE all HW
+
+  auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
+  for (int f = 0; f < 4; ++f) {
+    REQUIRE(backend->beginFrame(frameInfo));
+    chainSw.execute(*backend, ci);
+    chainHw.execute(*backend, ciHw);
+    backend->endFrame();
+    std::vector<u8> vbSw, vbHw;
+    REQUIRE(backend->readbackBuffer(chainSw.visBuffer(*backend), 0,
+                                    usize(W) * H * sizeof(u64), vbSw));
+    REQUIRE(backend->readbackBuffer(chainHw.visBuffer(*backend), 0,
+                                    usize(W) * H * sizeof(u64), vbHw));
+    u64 swNz = 0, hwNz = 0, holes = 0, extra = 0;
+    for (usize i = 0; i < usize(W) * H; ++i) {
+      const bool s = vbSw[i] != 0 || vbSw[i + 1] != 0;
+      const bool h = vbHw[i] != 0 || vbHw[i + 1] != 0;
+      swNz += s;
+      hwNz += h;
+      if (s && !h) ++holes;
+      if (h && !s) ++extra;
+    }
+    u32 stSw[13], stHw[13];
+    REQUIRE(chainSw.readStats(*backend, stSw));
+    REQUIRE(chainHw.readStats(*backend, stHw));
+    INFO("frame " << f << " sw nz " << swNz << " hw nz " << hwNz << " holes "
+                  << holes << " extra " << extra << " | sw pairs " << stSw[2]
+                  << " hw-routed " << stHw[12]);
+    REQUIRE(stHw[12] > 0);  // the HW path actually took the clusters
+    REQUIRE(stHw[2] == 0);  // ... ALL of them (force mode)
+    REQUIRE(holes == 0);    // coverage: the HW path misses nothing
+    REQUIRE(extra == 0);    // ... and covers nothing extra
+  }
+
+  chainSw.onShutdown(*backend);
+  chainHw.onShutdown(*backend);
   backend->shutdown();
 }

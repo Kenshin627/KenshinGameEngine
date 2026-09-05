@@ -1,5 +1,6 @@
 #include "kenshin/renderer/ClusterCullPass.h"
 
+#include <algorithm>
 #include <cfloat>
 #include <cstring>
 
@@ -103,13 +104,15 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
     params[6] =
         glm::vec4(1.0f, static_cast<f32>(occlusion.screenW),
                   static_cast<f32>(occlusion.screenH), occlusion.tanHalfFov);
-    params[7] = glm::vec4(occlusion.prevCamPos, 0.0f);
+    // [7] = (hwMode, hwThresholdPx): always OFF on the one-shot path
+    // (the differential has no HW rasterizer).
+    params[7] = glm::vec4(0.0f, 18.0f, 0.0f, 0.0f);
   }
   // [3] = work item count (the shader's input guard), [4] = occlusion
   // culled counter (out), [6] = cut-triangle accumulation (out) - the
   // rest zeroed outs.
-  const u32 countersInit[7] = {0, 0, 0, static_cast<u32>(workItems.size()),
-                               0, 0, 0};
+  const u32 countersInit[8] = {0, 0, 0, static_cast<u32>(workItems.size()),
+                               0, 0, 0, 0};
 
   backend::IRenderBackend::Job job;
   job.spirv = spirv.data();
@@ -142,7 +145,7 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
   job.buffers[8] =
       occlusion.enabled
           ? backend::IRenderBackend::Job::Buffer{occlusion.clusterAabbs,
-                                                 clusterData.size() / 48 * 2 *
+                                                 clusterData.size() / 48 * 3 *
                                                      sizeof(glm::vec4),
                                                  false}
           : backend::IRenderBackend::Job::Buffer{kDummyAabb, sizeof(kDummyAabb),
@@ -151,6 +154,10 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
   // occluded items (no post pass here) - a max-sized sink satisfies
   // the layout; writes stay in bounds (pending <= work item count).
   job.buffers[9] = backend::IRenderBackend::Job::Buffer{
+      nullptr, workItems.size() * sizeof(glm::uvec2), false};
+  // binding 10 (HW pairs, M4.2): routing is OFF one-shot - a max-sized
+  // sink satisfies the layout; nothing is written (mode 0).
+  job.buffers[10] = backend::IRenderBackend::Job::Buffer{
       nullptr, workItems.size() * sizeof(glm::uvec2), false};
   if (occlusion.enabled &&
       (occlusion.hzbTexels == nullptr || occlusion.hzbCount == 0 ||
@@ -177,21 +184,37 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
 }
 
 std::vector<glm::vec4> computeClusterAabbs(
-    std::span<const glm::vec4> positions4, const std::vector<u8>& clusterData) {
-  std::vector<glm::vec4> aabbs(clusterData.size() / 48 * 2);
+    std::span<const glm::vec4> positions4, std::span<const u32> indices,
+    const std::vector<u8>& clusterData) {
+  std::vector<glm::vec4> aabbs(clusterData.size() / 48 * 3);
   for (usize c = 0; c < clusterData.size() / 48; ++c) {
     const u8* e = clusterData.data() + c * 48;
-    u32 vertexOffset, vertexCount;
+    u32 vertexOffset, vertexCount, indexOffset, indexCount;
     std::memcpy(&vertexOffset, e + 24, 4);
     std::memcpy(&vertexCount, e + 28, 4);
+    std::memcpy(&indexOffset, e + 32, 4);
+    std::memcpy(&indexCount, e + 36, 4);
     glm::vec3 mn(FLT_MAX), mx(-FLT_MAX);
     for (u32 v = 0; v < vertexCount; ++v) {
       const glm::vec3 p(positions4[vertexOffset + v]);
       mn = glm::min(mn, p);
       mx = glm::max(mx, p);
     }
-    aabbs[c * 2 + 0] = glm::vec4(mn, 0.0f);
-    aabbs[c * 2 + 1] = glm::vec4(mx, 0.0f);
+    aabbs[c * 3 + 0] = glm::vec4(mn, 0.0f);
+    aabbs[c * 3 + 1] = glm::vec4(mx, 0.0f);
+    // Max triangle edge length in object space (the HW/SW routing's
+    // EdgeLength; UE computes the same in FCluster::Bound offline).
+    f32 maxEdge = 0.0f;
+    for (u32 t = 0; t < indexCount / 3; ++t) {
+      const glm::vec3& a = glm::vec3(positions4[indices[indexOffset + t * 3]]);
+      const glm::vec3& b =
+          glm::vec3(positions4[indices[indexOffset + t * 3 + 1]]);
+      const glm::vec3& c3 =
+          glm::vec3(positions4[indices[indexOffset + t * 3 + 2]]);
+      maxEdge = std::max({maxEdge, glm::length(b - a), glm::length(c3 - b),
+                          glm::length(a - c3)});
+    }
+    aabbs[c * 3 + 2] = glm::vec4(maxEdge, 0.0f, 0.0f, 0.0f);
   }
   return aabbs;
 }

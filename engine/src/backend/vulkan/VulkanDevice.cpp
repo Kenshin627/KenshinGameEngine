@@ -107,6 +107,11 @@ bool VulkanDevice::init(const VulkanContext& context) {
   };
   features2.features.shaderInt64 =
       coreFeatures.shaderInt64 ? VK_TRUE : VK_FALSE;
+  // M4.2: the hardware raster path's FRAGMENT shader atomically writes
+  // the VisBuffer SSBO (the null-attachment form) - storage writes in
+  // fragment shaders need this feature.
+  features2.features.fragmentStoresAndAtomics =
+      coreFeatures.fragmentStoresAndAtomics ? VK_TRUE : VK_FALSE;
 
   const float priority = 1.0f;
   std::vector<VkDeviceQueueCreateInfo> queueInfos;

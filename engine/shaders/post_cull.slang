@@ -64,8 +64,8 @@ struct GpuInstance {
 bool occluded(uint2 item, float4x4 model)
 {
     const uint W = uint(params[6].y), H = uint(params[6].z);
-    const float3 mn = aabbs[2u * item.y + 0u].xyz;
-    const float3 mx = aabbs[2u * item.y + 1u].xyz;
+    const float3 mn = aabbs[3u * item.y + 0u].xyz;
+    const float3 mx = aabbs[3u * item.y + 1u].xyz;
 
     // 8 cluster-local corners -> world (explicit glm-column
     // combination per corner), projected with the CURRENT viewProj

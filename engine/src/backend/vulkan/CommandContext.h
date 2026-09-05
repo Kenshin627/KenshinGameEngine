@@ -31,6 +31,9 @@ class CommandContext {
   /// ordering replaces the hand-rolled inter-draw barriers.
   void beginViewportPass(VkImageView color, VkImageView depth, u32 width,
                          u32 height);
+  /// M4.2 hardware raster: a rendering scope with NO attachments (the
+  /// only output is the VisBuffer SSBO atomic written by the PS).
+  void beginNullPass(u32 width, u32 height);
   /// Close the viewport scope (no-op when it never opened).
   void endPass();
   bool passOpen() const { return m_passOpen; }
@@ -43,9 +46,11 @@ class CommandContext {
 
   /// Frame-loop image transition: "everything written so far" (src side is
   /// ALL_COMMANDS + MEMORY_WRITE) into the given dst stage/access + layout.
-  static VkImageMemoryBarrier2 imageBarrier(
-      VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
-      VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess);
+  static VkImageMemoryBarrier2 imageBarrier(VkImage image,
+                                            VkImageLayout oldLayout,
+                                            VkImageLayout newLayout,
+                                            VkPipelineStageFlags2 dstStage,
+                                            VkAccessFlags2 dstAccess);
 
   /// Clear a color image (RGBA floats) in the given (already transitioned)
   /// layout; full mip 0 / layer 0 / single aspect range.

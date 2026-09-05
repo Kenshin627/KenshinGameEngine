@@ -906,6 +906,145 @@ void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
 
 // ── in-frame compute (链入帧化) ────────────────────────────────
 
+u32 VulkanBackend::createNullPipeline(const FullscreenPipelineInfo& info) {
+  return m_impl->pipelines.createNullRaster(m_impl->device.device, info);
+}
+
+void VulkanBackend::destroyNullPipeline(u32 pipeline) {
+  Impl& impl = *m_impl;
+  if (pipeline == 0 || pipeline > impl.pipelines.nullRasterCount()) return;
+  PipelineStore::Fullscreen& e = const_cast<PipelineStore::Fullscreen&>(
+      impl.pipelines.nullRaster(pipeline));
+  if (!e.valid) return;
+  vkDestroyPipeline(impl.device.device, e.pipeline, nullptr);
+  vkDestroyPipelineLayout(impl.device.device, e.layout, nullptr);
+  vkDestroyDescriptorPool(impl.device.device, e.pool, nullptr);
+  vkDestroyDescriptorSetLayout(impl.device.device, e.setLayout, nullptr);
+  e = {};
+}
+
+void VulkanBackend::drawNullIndirect(u32 pipeline, const u32* bufferHandles,
+                                     u32 bufferCount, u32 argsBuffer,
+                                     usize argsOffset, u32 width, u32 height) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == 0 ||
+      pipeline > impl.pipelines.nullRasterCount())
+    return;
+  const PipelineStore::Fullscreen& nr = impl.pipelines.nullRaster(pipeline);
+  if (!nr.valid || !impl.buffers.valid(argsBuffer)) return;
+
+  // Validate + collect BEFORE opening the scope (bail-out must not
+  // leave a pass dangling).
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+  const VkBuffer argBuf = impl.buffers.buffer(argsBuffer);
+
+  if (impl.cmd.passOpen()) impl.cmd.endPass();
+  impl.cmd.beginNullPass(width, height);
+
+  const VkDescriptorSet set = nr.sets[impl.frameSync.frameIndex];
+  std::vector<VkWriteDescriptorSet> writes(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i)
+    writes[i] = VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set,
+        .dstBinding = i,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        .pBufferInfo = &infos[i],
+    };
+  vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
+                         nullptr);
+
+  vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          nr.layout, 0, 1, &set, 0, nullptr);
+  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    nr.pipeline);
+  const VkDeviceSize stride = 4 * sizeof(u32);  // VkDrawIndirectCommand
+  vkCmdDrawIndirect(impl.cmd.cmd(), argBuf,
+                    static_cast<VkDeviceSize>(argsOffset), 1, stride);
+  impl.cmd.endPass();
+}
+
+void VulkanBackend::barrierGraphicsToCompute(u32 buffer) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || !impl.buffers.valid(buffer)) return;
+  const VkBufferMemoryBarrier2 barrier{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      // The HW raster pass's VERTEX reads + FRAGMENT atomics.
+      .srcStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+      .buffer = impl.buffers.buffer(buffer),
+      .offset = 0,
+      .size = impl.buffers.size(buffer),
+  };
+  const VkDependencyInfo dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1,
+      .pBufferMemoryBarriers = &barrier,
+  };
+  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+}
+
+void VulkanBackend::barrierIndirectArgs(u32 buffer) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || !impl.buffers.valid(buffer)) return;
+  const VkBufferMemoryBarrier2 barrier{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+      .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+      .buffer = impl.buffers.buffer(buffer),
+      .offset = 0,
+      .size = impl.buffers.size(buffer),
+  };
+  const VkDependencyInfo dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1,
+      .pBufferMemoryBarriers = &barrier,
+  };
+  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+}
+
+void VulkanBackend::barrierGraphicsRw(u32 buffer) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || !impl.buffers.valid(buffer)) return;
+  const VkBufferMemoryBarrier2 barrier{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+      // The HW pass reads the pair lists in its VERTEX shader and
+      // atomically writes the VisBuffer in its FRAGMENT shader.
+      .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                       VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+      .buffer = impl.buffers.buffer(buffer),
+      .offset = 0,
+      .size = impl.buffers.size(buffer),
+  };
+  const VkDependencyInfo dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1,
+      .pBufferMemoryBarriers = &barrier,
+  };
+  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+}
+
 u32 VulkanBackend::createComputePipeline(const ComputePipelineInfo& info) {
   return m_impl->pipelines.createCompute(m_impl->device.device, info);
 }

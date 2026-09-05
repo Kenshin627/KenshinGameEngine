@@ -79,6 +79,29 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
   if (!makePipe("build_hzb.slang", m_pipeHzbFinal)) return false;
   if (!makePipe("rasterize_sw.slang", m_pipeRaster)) return false;
   if (!makePipe("rasterize_sw.slang", m_pipeRasterPost)) return false;
+  if (!makePipe("count_to_draw.slang", m_pipeCountToDraw)) return false;
+  {
+    // raster_hw: one file, two entry points; the null-attachment
+    // graphics pipeline (the FS reflection covers the VS's bindings -
+    // both stages share the file-scope globals).
+    std::vector<u32> vs, fs;
+    std::string log;
+    if (!shaders.compileFile("raster_hw.slang", vs, log, "vsMain") ||
+        !shaders.compileFile("raster_hw.slang", fs, log, "psMain")) {
+      KENSHIN_ERROR("[vgchain] raster_hw compile failed: {}", log);
+      return false;
+    }
+    backend::IRenderBackend::FullscreenPipelineInfo fi;
+    fi.vsSpirv = vs.data();
+    fi.vsBytes = vs.size() * sizeof(u32);
+    fi.fsSpirv = fs.data();
+    fi.fsBytes = fs.size() * sizeof(u32);
+    m_pipeHwRaster = backend.createNullPipeline(fi);
+    if (m_pipeHwRaster == backend::IRenderBackend::kInvalidPipelineHandle) {
+      KENSHIN_ERROR("[vgchain] raster_hw pipeline failed");
+      return false;
+    }
+  }
   for (u32 k = 0; k < 4; ++k)
     if (!makePipe("count_to_indirect.slang", m_pipeConvert[k])) return false;
 
@@ -105,18 +128,20 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
                                    indices.data(), "chain-indices");
   // Runtime-derived per-cluster AABBs (the occlusion bound; static).
   const std::vector<glm::vec4> aabbs =
-      computeClusterAabbs(positions4, clusterData);
+      computeClusterAabbs(positions4, indices, clusterData);
   m_aabbBuffer = makeDeviceBuffer(backend, aabbs.size() * sizeof(glm::vec4),
                                   aabbs.data(), "chain-aabbs");
   // Conversion configs (static): {groupSize, fwdSlot, srcSlot, pad}.
   const u32 cfgExpand[4] = {64, 1, 0, 0};
   const u32 cfgCull[4] = {64, 3, 0, 0};
   const u32 cfgRaster[4] = {0, 0, 0, 0};
-  const u32 cfgPost[4] = {0, 0, 5, 0};  // post raster: src = cull [5]
+  const u32 cfgPost[4] = {0, 0, 5, 0};      // post raster: src = cull [5]
+  const u32 cfgHwDraw[4] = {384, 0, 7, 0};  // 3*128 verts, src = cull [7]
   m_cfgExpand = makeHostBuffer(backend, sizeof(cfgExpand), cfgExpand, "cfgE");
   m_cfgCull = makeHostBuffer(backend, sizeof(cfgCull), cfgCull, "cfgC");
   m_cfgRaster = makeHostBuffer(backend, sizeof(cfgRaster), cfgRaster, "cfgR");
   m_cfgPost = makeHostBuffer(backend, sizeof(cfgPost), cfgPost, "cfgP");
+  m_cfgHwDraw = makeHostBuffer(backend, sizeof(cfgHwDraw), cfgHwDraw, "cfgHD");
 
   const usize listBytes = m_instanceCount * sizeof(u32);
   const usize pairBytes = usize(maxPairs) * sizeof(glm::uvec2);
@@ -136,7 +161,7 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
     // [5] = post-revived count, [6] = cut-triangle accumulation (the
     // cull counters and the post convert share this buffer via cfg[2]
     // src slots; post_cull adds the revived share into [6]).
-    m_cullCnt[s] = makeHostBuffer(backend, 28, nullptr, "chain-cullCnt");
+    m_cullCnt[s] = makeHostBuffer(backend, 32, nullptr, "chain-cullCnt");
     m_pairs[s] = makeDeviceBuffer(backend, pairBytes, nullptr, "chain-pairs");
     m_rasterParams[s] = makeHostBuffer(backend, 12 * sizeof(glm::vec4), nullptr,
                                        "chain-rasterParams");
@@ -151,6 +176,10 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
                                      "chain-postParams");
     m_postRasterCnt[s] =
         makeHostBuffer(backend, 16, nullptr, "chain-postRasterCnt");
+    m_hwPairs[s] =
+        makeDeviceBuffer(backend, pairBytes, nullptr, "chain-hwPairs");
+    m_hwParams[s] = makeHostBuffer(backend, 8 * sizeof(glm::vec4), nullptr,
+                                   "chain-hwParams");
     // Indirect dispatch reads these at the DRAW_INDIRECT stage: the
     // usage bit is mandatory (validation rejects storage-only buffers).
     const auto makeArgs = [&](const char* name) {
@@ -165,6 +194,7 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
     m_argsCull[s] = makeArgs("argsC");
     m_argsRaster[s] = makeArgs("argsR");
     m_argsPostRaster[s] = makeArgs("argsPR");
+    m_hwDrawArgs[s] = makeArgs("argsHW");
   }
   resize(backend, width, height);
   return true;
@@ -230,8 +260,8 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
         occActive ? m_prevVP[prevSlot][c] : glm::vec4(c == 0 ? 1.0f : 0.0f);
   cullParams[6] =
       glm::vec4(occActive ? 1.0f : 0.0f, f32(in.width), f32(in.height),
-                1.0f / std::abs(in.proj[1][1]));         // tanHalf
-  cullParams[7] = glm::vec4(m_prevCam[prevSlot], 0.0f);  // reserved
+                1.0f / std::abs(in.proj[1][1]));  // tanHalf
+  cullParams[7] = glm::vec4(f32(in.hwMode), in.hwThresholdPx, 0.0f, 0.0f);
   std::memcpy(backend.mappedPtr(m_cullParams[slot]), cullParams,
               sizeof(cullParams));
   std::memset(backend.mappedPtr(m_cullCnt[slot]), 0, 28);
@@ -249,6 +279,15 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   }
   pp[6] = glm::vec4(1.0f, f32(in.width), f32(in.height),
                     1.0f / std::abs(in.proj[1][1]));
+  // raster_hw's params: [0..3] the CURRENT viewProj (the VS's clip
+  // space), [4] = (w, h) - the VisBuffer/viewport the PS indexes.
+  glm::vec4* hp = static_cast<glm::vec4*>(backend.mappedPtr(m_hwParams[slot]));
+  for (int c = 0; c < 8; ++c) hp[c] = glm::vec4(0.0f);
+  {
+    const glm::mat4 vpHw = in.proj * in.view;
+    for (int c = 0; c < 4; ++c) hp[c] = vpHw[c];
+  }
+  hp[4] = glm::vec4(f32(in.width), f32(in.height), 0.0f, 0.0f);
   {
     // rasterize_sw's params (float4[12]): [0..3] view, [4..7] proj
     // (glm raw), [8] = (w, h, pairCount(unused by the guard), nearZ),
@@ -297,15 +336,16 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   b(m_argsCull[slot]);
   b(m_cullCnt[slot]);
 
-  const u32 clusterHandles[10] = {m_cullParams[slot], m_clusterBuffer,
-                                  m_groupBuffer,      m_workItems[slot],
-                                  m_instanceBuffer,   m_pairs[slot],
-                                  m_cullCnt[slot],    m_hzb[prevSlot],
-                                  m_aabbBuffer,       m_pendingPairs[slot]};
-  backend.dispatchComputeIndirect(m_pipeCluster, clusterHandles, 10,
+  const u32 clusterHandles[11] = {
+      m_cullParams[slot],   m_clusterBuffer,  m_groupBuffer,
+      m_workItems[slot],    m_instanceBuffer, m_pairs[slot],
+      m_cullCnt[slot],      m_hzb[prevSlot],  m_aabbBuffer,
+      m_pendingPairs[slot], m_hwPairs[slot]};
+  backend.dispatchComputeIndirect(m_pipeCluster, clusterHandles, 11,
                                   m_argsCull[slot], 0);
   b(m_pairs[slot]);
   b(m_pendingPairs[slot]);
+  b(m_hwPairs[slot]);
   b(m_cullCnt[slot]);
 
   const u32 cv3[4] = {m_cullCnt[slot], m_cfgRaster, m_argsRaster[slot],
@@ -319,6 +359,28 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       m_instanceBuffer,     m_pairs[slot],    m_vis[slot],   m_rasterCnt[slot]};
   backend.dispatchComputeIndirect(m_pipeRaster, rasterHandles, 8,
                                   m_argsRaster[slot], 0);
+
+  // ---- M4.2 hardware raster: the routed clusters draw through the
+  // fixed function (zero attachments; the PS re-runs the SW coverage
+  // test on the quantized triangle and atomically writes the SAME
+  // VisBuffer). Runs every frame the routing is on - with occlusion
+  // active or not (routing is orthogonal to it).
+  if (in.hwMode > 0) {
+    const u32 cvHw[3] = {m_cullCnt[slot], m_cfgHwDraw, m_hwDrawArgs[slot]};
+    backend.dispatchCompute(m_pipeCountToDraw, cvHw, 3, 1, 1, 1);
+    backend.barrierIndirectArgs(m_hwDrawArgs[slot]);
+    backend.barrierGraphicsRw(m_hwPairs[slot]);
+    backend.barrierGraphicsRw(m_vis[slot]);
+    const u32 hwHandles[7] = {
+        m_hwParams[slot], m_hwPairs[slot],  m_clusterBuffer, m_positionBuffer,
+        m_indexBuffer,    m_instanceBuffer, m_vis[slot]};
+    backend.drawNullIndirect(m_pipeHwRaster, hwHandles, 7, m_hwDrawArgs[slot],
+                             0, in.width, in.height);
+    // The PS's atomic writes must be ordered before every later
+    // compute read of the vis (the post section's HZB builds, the
+    // decode's fragment read via the tail barriers).
+    backend.barrierGraphicsToCompute(m_vis[slot]);
+  }
 
   if (occActive) {
     // ---- M3.3 post half (Karis Slide 75): build THIS frame's
@@ -397,12 +459,12 @@ u32 VisBufferChain::visBuffer(backend::IRenderBackend& backend) const {
 }
 
 bool VisBufferChain::readStats(backend::IRenderBackend& backend,
-                               u32 out[12]) const {
+                               u32 out[13]) const {
   const u32 slot = backend.lastCompletedFrameSlot();
   if (slot == 0xFFFFFFFFu) return false;  // no completed frame yet
-  std::vector<u8> a(8), c(28), r(16);
+  std::vector<u8> a(8), c(32), r(16);
   if (!backend.readbackBuffer(m_cntA[slot], 0, 8, a)) return false;
-  if (!backend.readbackBuffer(m_cullCnt[slot], 0, 28, c)) return false;
+  if (!backend.readbackBuffer(m_cullCnt[slot], 0, 32, c)) return false;
   if (!backend.readbackBuffer(m_rasterCnt[slot], 0, 16, r)) return false;
   std::vector<u8> e(8);
   if (!backend.readbackBuffer(m_expCnt[slot], 0, 8, e)) return false;
@@ -425,6 +487,7 @@ bool VisBufferChain::readStats(backend::IRenderBackend& backend,
   out[9] = cc[5];                               // post-pass revived
   out[10] = prc[1];                             // post-raster px writes
   out[11] = cc[6];                              // cut tris (main + revived)
+  out[12] = cc[7];                              // HW-routed clusters
   return true;
 }
 
@@ -447,15 +510,16 @@ bool VisBufferChain::readIndirectArgs(backend::IRenderBackend& backend,
 }
 
 void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
-  const u32 pipes[11] = {m_pipeCull,       m_pipeExpand,     m_pipeCluster,
+  const u32 pipes[12] = {m_pipeCull,       m_pipeExpand,     m_pipeCluster,
                          m_pipeRaster,     m_pipeRasterPost, m_pipeHzb,
                          m_pipeHzbFinal,   m_pipePostCull,   m_pipeConvert[0],
-                         m_pipeConvert[1], m_pipeConvert[2]};
+                         m_pipeConvert[1], m_pipeConvert[2], m_pipeCountToDraw};
   const u32 pipes2[1] = {m_pipeConvert[3]};
   for (const u32 p : pipes)
     if (p != ~0u) backend.destroyComputePipeline(p);
   for (const u32 p : pipes2)
     if (p != ~0u) backend.destroyComputePipeline(p);
+  if (m_pipeHwRaster != ~0u) backend.destroyNullPipeline(m_pipeHwRaster);
   for (u32 s = 0; s < kSlots; ++s) {
     for (const u32 h :
          {m_planes[s],     m_cntA[s],          m_visibleList[s],
@@ -464,13 +528,14 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
           m_rasterCnt[s],  m_vis[s],           m_hzb[s],
           m_hzbParams[s],  m_pendingPairs[s],  m_postPairs[s],
           m_postParams[s], m_postRasterCnt[s], m_argsExpand[s],
-          m_argsCull[s],   m_argsRaster[s],    m_argsPostRaster[s]})
+          m_argsCull[s],   m_argsRaster[s],    m_argsPostRaster[s],
+          m_hwPairs[s],    m_hwParams[s],      m_hwDrawArgs[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
   }
   for (const u32 h :
        {m_instanceBuffer, m_meshRangeBuffer, m_clusterBuffer, m_groupBuffer,
         m_positionBuffer, m_indexBuffer, m_cfgExpand, m_cfgCull, m_cfgRaster,
-        m_cfgPost, m_aabbBuffer})
+        m_cfgPost, m_cfgHwDraw, m_aabbBuffer})
     if (h != kInvalid && h != 0) backend.destroyBuffer(h);
 }
 

@@ -93,7 +93,7 @@ class IRenderBackend {
   struct Job {
     // 8 slots: the cluster-cull pass binds params + clusters + groups +
     // work items + instances + outputs; 4 was the S1.4 smoke-test shape.
-    static constexpr u32 kMaxBuffers = 10;
+    static constexpr u32 kMaxBuffers = 11;  // 10 = the HW pair list (M4.2)
     struct Buffer {
       const void* initData = nullptr;  // host data copied in (may be null)
       usize size = 0;                  // bytes, 0 = slot unused
@@ -233,6 +233,27 @@ class IRenderBackend {
     usize fsBytes = 0;
   };
   virtual u32 createFullscreenPipeline(const FullscreenPipelineInfo& info) = 0;
+  /// M4.2 hardware raster path: VS+FS with ZERO attachments (the PS
+  /// writes the VisBuffer SSBO atomically). Same info shape as the
+  /// fullscreen pipeline (vsMain/psMain from one .slang file).
+  virtual u32 createNullPipeline(const FullscreenPipelineInfo& info) = 0;
+  virtual void destroyNullPipeline(u32 pipeline) = 0;
+  /// Draw the HW-routed clusters: opens a no-attachment rendering
+  /// scope, binds `pipeline`'s SSBO set (buffers[i] -> binding i, the
+  /// FS's reflected layout) and issues ONE indirect draw reading the
+  /// VkDrawIndirectCommand at argsBuffer[argsOffset] (the chain's
+  /// count_to_draw conversion writes it). Self-contained: closes its
+  /// own scope.
+  virtual void drawNullIndirect(u32 pipeline, const u32* bufferHandles,
+                                u32 bufferCount, u32 argsBuffer,
+                                usize argsOffset, u32 width, u32 height) = 0;
+  /// M4.2 barrier variants: compute -> indirect-draw-args read, and
+  /// compute -> vertex/fragment read+write (the HW pass reads the pair
+  /// lists in its VS and atomically writes the VisBuffer in its PS).
+  virtual void barrierIndirectArgs(u32 buffer) = 0;
+  virtual void barrierGraphicsRw(u32 buffer) = 0;
+  /// ...and the way back: fragment-written -> compute read/write.
+  virtual void barrierGraphicsToCompute(u32 buffer) = 0;
   /// Draw the fullscreen triangle in the CURRENT frame scope.
   /// bufferHandles[i] binds to SSBO binding i (as declared by the FS);
   /// `push` is copied into the 128-byte push block.

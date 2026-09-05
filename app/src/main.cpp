@@ -213,6 +213,7 @@ struct VgDebugState {
   kenshin::u32 visibleClusters = 0, cutTris = 0, pxWrites = 0;
   kenshin::u32 occCulled = 0;
   kenshin::u32 revived = 0;
+  kenshin::u32 hwClusters = 0;
   bool occlusion = true;
   kenshin::f32 coveragePct = 0.0f;
   std::vector<float> clusterHist, triHist, coverHist;
@@ -377,9 +378,10 @@ int main(int argc, char** argv) {
           ImGui::Separator();
           ImGui::Text(
               "clusters %u  tris %u  writes %u  cover %.1f%%\n"
-              "occ-culled %u  revived %u",
+              "occ-culled %u  revived %u  hw %u",
               vgDebug.visibleClusters, vgDebug.cutTris, vgDebug.pxWrites,
-              vgDebug.coveragePct, vgDebug.occCulled, vgDebug.revived);
+              vgDebug.coveragePct, vgDebug.occCulled, vgDebug.revived,
+              vgDebug.hwClusters);
           ImGui::Checkbox("occlusion", &vgDebug.occlusion);
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
                            int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
@@ -559,13 +561,14 @@ int main(int argc, char** argv) {
         // Panel stats: sample the chain counters every 8th frame (the
         // readback is blocking - per-frame would reintroduce stalls).
         if (frame % 8 == 0) {
-          kenshin::u32 cs[12];
+          kenshin::u32 cs[13];
           if (chainReady && chain.readStats(*vgBackend, cs)) {
             vgDebug.visibleClusters = cs[2];
             vgDebug.cutTris = cs[11];
             vgDebug.pxWrites = cs[5] + cs[10];  // main + post raster
             vgDebug.occCulled = cs[8];
             vgDebug.revived = cs[9];
+            vgDebug.hwClusters = cs[12];
             const kenshin::f32 cover =
                 100.0f * static_cast<kenshin::f32>(cs[5] + cs[10]) /
                 (ci.width * ci.height);

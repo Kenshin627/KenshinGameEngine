@@ -141,6 +141,10 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
   inputs.width = W;
   inputs.height = H;
   for (int p = 0; p < 6; ++p) inputs.planes[p] = planes[p];
+  // Pure SW on both sides: the one-shot reference has no HW path, and
+  // HW depth bits are perspective-correct (a documented divergence) -
+  // this differential pins chain-vs-one-shot structural equivalence.
+  inputs.hwMode = 0;
 
   backend::FrameBeginInfo frameInfo;
   frameInfo.width = W;
@@ -160,7 +164,7 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
   REQUIRE(backend->readbackBuffer(chain.visBuffer(*backend), 0,
                                   usize(W) * H * sizeof(u64), visBytes));
   const u64* visInFrame = reinterpret_cast<const u64*>(visBytes.data());
-  u32 stats[8] = {};
+  u32 stats[13] = {};
   REQUIRE(chain.readStats(*backend, stats));
   u32 ax[3], cx[1], rx[1];
   REQUIRE(chain.readIndirectArgs(*backend, ax, cx, rx));

@@ -46,6 +46,9 @@ struct ChainInputs {
   u32 height = 0;
   glm::vec4 planes[6]{};
   bool occlusionEnabled = true;  // A/B + first-run safety toggle
+  u32 hwMode = 1;                // M4.2: 0 = all SW, 1 = route by
+                                 // threshold, 2 = force all HW
+  f32 hwThresholdPx = 18.0f;     // UE's GNaniteMinPixelsPerEdgeHW
 };
 
 class VisBufferChain {
@@ -84,7 +87,7 @@ class VisBufferChain {
   /// [6] backface, [7] near-clipped, [8] occlusion-culled (pending),
   /// [9] post-pass revived, [10] post-raster px writes,
   /// [11] cut tris (main + revived).
-  bool readStats(backend::IRenderBackend& backend, u32 out[12]) const;
+  bool readStats(backend::IRenderBackend& backend, u32 out[13]) const;
   /// Debug probe: the three indirect dispatch commands as written by
   /// the conversions (x = group count).
   bool readIndirectArgs(backend::IRenderBackend& backend, u32 expandX[3],
@@ -105,8 +108,10 @@ class VisBufferChain {
   // descriptor set may only be updated once per frame slot, and the
   // post raster / final HZB build run in the SAME frame as their
   // main-pass twins with different bindings.
-  u32 m_pipeRasterPost = ~0u;  // M3.3: revived pairs' re-raster
-  u32 m_pipeHzbFinal = ~0u;    // M3.3: HZB #2 (post-pass-inclusive)
+  u32 m_pipeRasterPost = ~0u;   // M3.3: revived pairs' re-raster
+  u32 m_pipeHzbFinal = ~0u;     // M3.3: HZB #2 (post-pass-inclusive)
+  u32 m_pipeHwRaster = ~0u;     // M4.2: null-attachment graphics pass
+  u32 m_pipeCountToDraw = ~0u;  // M4.2: counters[7] -> draw command
   u32 m_instanceBuffer = ~0u, m_meshRangeBuffer = ~0u;
   u32 m_clusterBuffer = ~0u, m_groupBuffer = ~0u;
   u32 m_positionBuffer = ~0u, m_indexBuffer = ~0u;
@@ -117,7 +122,8 @@ class VisBufferChain {
   u32 m_rasterParams[kSlots]{}, m_rasterCnt[kSlots]{}, m_vis[kSlots]{};
   // Static conversion configs + per-slot indirect args.
   u32 m_cfgExpand = ~0u, m_cfgCull = ~0u, m_cfgRaster = ~0u;
-  u32 m_cfgPost = ~0u;  // post convert: {1 group/item, fwd 0, src 5}
+  u32 m_cfgPost = ~0u;    // post convert: {1 group/item, fwd 0, src 5}
+  u32 m_cfgHwDraw = ~0u;  // M4.2: {384 verts, 0, src = counters[7]}
   u32 m_argsExpand[kSlots]{}, m_argsCull[kSlots]{}, m_argsRaster[kSlots]{};
   u32 m_argsPostRaster[kSlots]{};
   // M3.3 post pass (per slot): the Main cull's occluded items, the
@@ -125,6 +131,9 @@ class VisBufferChain {
   // (current-frame viewProj - the preliminary HZB's space).
   u32 m_pendingPairs[kSlots]{}, m_postPairs[kSlots]{};
   u32 m_postRasterCnt[kSlots]{}, m_postParams[kSlots]{};
+  // M4.2 hardware raster: the routed pair list, its draw command
+  // (VkDrawIndirectCommand via count_to_draw) and the pass params.
+  u32 m_hwPairs[kSlots]{}, m_hwDrawArgs[kSlots]{}, m_hwParams[kSlots]{};
   // M3.2b/M3.3 occlusion: per-slot HZB pyramids. SEMANTICS (M3.3):
   // m_hzb[s] holds the pyramid built at the END of slot s's most
   // recent frame (build #1 after the Main raster feeds the same

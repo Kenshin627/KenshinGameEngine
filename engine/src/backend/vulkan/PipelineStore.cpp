@@ -96,6 +96,14 @@ void PipelineStore::shutdown(VkDevice device) {
     vkDestroyDescriptorSetLayout(device, f.setLayout, nullptr);
   }
   m_fullscreen.clear();
+  for (const Fullscreen& f : m_nullRaster) {
+    if (!f.valid) continue;
+    vkDestroyPipeline(device, f.pipeline, nullptr);
+    vkDestroyPipelineLayout(device, f.layout, nullptr);
+    vkDestroyDescriptorPool(device, f.pool, nullptr);
+    vkDestroyDescriptorSetLayout(device, f.setLayout, nullptr);
+  }
+  m_nullRaster.clear();
   for (const Compute& c : m_compute) {
     if (!c.valid) continue;
     vkDestroyPipeline(device, c.pipeline, nullptr);
@@ -300,6 +308,164 @@ u32 PipelineStore::createFullscreen(
   return static_cast<u32>(m_fullscreen.size());
 }
 
+u32 PipelineStore::createNullRaster(
+    VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
+  if (info.vsSpirv == nullptr || info.vsBytes == 0 || info.fsSpirv == nullptr ||
+      info.fsBytes == 0)
+    return IRenderBackend::kInvalidPipelineHandle;
+
+  const VkShaderModuleCreateInfo vsInfo{
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = info.vsBytes,
+      .pCode = info.vsSpirv,
+  };
+  VkShaderModule vs = VK_NULL_HANDLE;
+  if (!KE_VK(vkCreateShaderModule(device, &vsInfo, nullptr, &vs)))
+    return IRenderBackend::kInvalidPipelineHandle;
+  const VkShaderModuleCreateInfo fsInfo{
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = info.fsBytes,
+      .pCode = info.fsSpirv,
+  };
+  VkShaderModule fs = VK_NULL_HANDLE;
+  if (!KE_VK(vkCreateShaderModule(device, &fsInfo, nullptr, &fs))) {
+    vkDestroyShaderModule(device, vs, nullptr);
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
+
+  const VkPipelineShaderStageCreateInfo stages[2] = {
+      VkPipelineShaderStageCreateInfo{
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = vs,
+          .pName = "main",
+      },
+      VkPipelineShaderStageCreateInfo{
+          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = fs,
+          .pName = "main",
+      },
+  };
+
+  // The VS and FS share the file-scope bindings (one .slang, two entry
+  // points), so the FS reflection covers the VS's reads too.
+  u32 bindingCount = 0;
+  const VkDescriptorSetLayout setLayout = DescriptorCache::createStorageLayout(
+      device, info.fsSpirv, info.fsBytes / sizeof(u32), &bindingCount);
+  if (setLayout == VK_NULL_HANDLE) {
+    vkDestroyShaderModule(device, vs, nullptr);
+    vkDestroyShaderModule(device, fs, nullptr);
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
+  VkDescriptorPool pool = DescriptorCache::createStoragePool(
+      device, setLayout, bindingCount, kMaxFramesInFlight);
+  VkDescriptorSet sets[kMaxFramesInFlight] = {};
+  const bool setOk = pool != VK_NULL_HANDLE &&
+                     DescriptorCache::allocateSets(device, pool, setLayout,
+                                                   sets, kMaxFramesInFlight);
+
+  const VkPipelineLayoutCreateInfo layoutInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &setLayout,
+  };
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+  const bool layoutOk =
+      KE_VK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout));
+
+  const VkPipelineVertexInputStateCreateInfo vertexInput{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+  };
+  const VkPipelineInputAssemblyStateCreateInfo inputAssembly{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+  };
+  const VkPipelineViewportStateCreateInfo viewportState{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .scissorCount = 1,
+  };
+  // Cull BACK / front CCW: the same half the SW rasterizer drops under
+  // the Y-flipped projection (the baseline pipeline's convention).
+  const VkPipelineRasterizationStateCreateInfo rasterization{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_BACK_BIT,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .lineWidth = 1.0f,
+  };
+  const VkPipelineMultisampleStateCreateInfo multisample{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+  const VkPipelineDepthStencilStateCreateInfo depthStencil{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+  };
+  const VkPipelineColorBlendStateCreateInfo colorBlend{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+  };
+  const VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT,
+                                           VK_DYNAMIC_STATE_SCISSOR};
+  const VkPipelineDynamicStateCreateInfo dynamicState{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = 2,
+      .pDynamicStates = dynamicStates,
+  };
+  // ZERO attachments: the only output is the VisBuffer SSBO atomic in
+  // the PS (UE's null-targets form - one output buffer, no OM state,
+  // async-compute-overlap friendly).
+  const VkPipelineRenderingCreateInfoKHR renderingInfo{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+  };
+
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  bool pipeOk = false;
+  if (layoutOk) {
+    const VkGraphicsPipelineCreateInfo createInfo{
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &renderingInfo,
+        .stageCount = 2,
+        .pStages = stages,
+        .pVertexInputState = &vertexInput,
+        .pInputAssemblyState = &inputAssembly,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterization,
+        .pMultisampleState = &multisample,
+        .pDepthStencilState = &depthStencil,
+        .pColorBlendState = &colorBlend,
+        .pDynamicState = &dynamicState,
+        .layout = layout,
+    };
+    pipeOk = KE_VK(vkCreateGraphicsPipelines(device, m_cache, 1, &createInfo,
+                                             nullptr, &pipeline));
+  }
+  vkDestroyShaderModule(device, vs, nullptr);
+  vkDestroyShaderModule(device, fs, nullptr);
+
+  if (!setOk || !layoutOk || !pipeOk) {
+    if (pipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(device, pipeline, nullptr);
+    if (layout != VK_NULL_HANDLE)
+      vkDestroyPipelineLayout(device, layout, nullptr);
+    if (pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, pool, nullptr);
+    if (setLayout != VK_NULL_HANDLE)
+      vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
+    KENSHIN_ERROR("[vulkan] null-raster pipeline creation failed");
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
+
+  m_nullRaster.emplace_back();
+  Fullscreen& entry = m_nullRaster.back();
+  entry.layout = layout;
+  entry.pipeline = pipeline;
+  entry.setLayout = setLayout;
+  entry.pool = pool;
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i) entry.sets[i] = sets[i];
+  entry.valid = true;
+  return static_cast<u32>(m_nullRaster.size());
+}
+
 u32 PipelineStore::createCompute(
     VkDevice device, const IRenderBackend::ComputePipelineInfo& info) {
   if (info.csSpirv == nullptr || info.csBytes == 0)
@@ -326,10 +492,9 @@ u32 PipelineStore::createCompute(
   VkDescriptorPool pool = DescriptorCache::createStoragePool(
       device, setLayout, bindingCount, kMaxFramesInFlight);
   VkDescriptorSet sets[kMaxFramesInFlight] = {};
-  const bool setOk =
-      pool != VK_NULL_HANDLE &&
-      DescriptorCache::allocateSets(device, pool, setLayout, sets,
-                                    kMaxFramesInFlight);
+  const bool setOk = pool != VK_NULL_HANDLE &&
+                     DescriptorCache::allocateSets(device, pool, setLayout,
+                                                   sets, kMaxFramesInFlight);
 
   const VkPipelineLayoutCreateInfo layoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -360,8 +525,10 @@ u32 PipelineStore::createCompute(
   vkDestroyShaderModule(device, module, nullptr);
 
   if (!setOk || !layoutOk || !pipeOk) {
-    if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, pipeline, nullptr);
-    if (layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, layout, nullptr);
+    if (pipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(device, pipeline, nullptr);
+    if (layout != VK_NULL_HANDLE)
+      vkDestroyPipelineLayout(device, layout, nullptr);
     if (pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, pool, nullptr);
     if (setLayout != VK_NULL_HANDLE)
       vkDestroyDescriptorSetLayout(device, setLayout, nullptr);

@@ -19,8 +19,10 @@
 //                          [2..5] PREV frame viewProj columns (glm raw,
 //                          Y-flipped - the space the HZB lives in)
 //                          [6]=(occEnabled, screenW, screenH, tanHalfFov)
-//                          [7] reserved (was prevCamPos; the AABB test
-//                          needs no nearest-point ray)
+//                          [7]=(hwMode, hwThresholdPx, 0, 0): 0 = all
+//                          SW, 1 = route by threshold, 2 = force all
+//                          HW (the differential switch, UE's
+//                          RENDER_FLAG_FORCE_HW_RASTER)
 //   1: GpuCluster clusters[]  - 48B, mirrors packGpuCluster
 //   2: GpuGroup groups[]      - 32B, mirrors packGpuGroup
 //   3: uint2 workItems[]      - (instanceIdx, clusterIdx)
@@ -28,19 +30,24 @@
 //   5: uint2 visiblePairs[]   - out: surviving (instanceIdx, clusterIdx)
 //   7: uint hzb[]             - the PREV frame's HZB pyramid (M3.2;
 //                              only read when occEnabled)
-//   8: float4 aabbs[]         - 2 per cluster (min.xyz, max.xyz);
-//                              cluster-local, instance-transformed in
-//                              the test (M3.2b - derived at runtime,
-//                              not serialized)
+//   8: float4 aabbs[]         - 3 per cluster: (min.xyz,0), (max.xyz,0),
+//                              (maxEdgeLen,0,0,0) - object-space, the
+//                              occlusion rect projects min/max and the
+//                              M4.2 routing reads maxEdgeLen (derived
+//                              at runtime, not serialized)
 //   9: uint2 pendingPairs[]   - out (M3.3): occluded items, kept for
 //                              the post pass's retest instead of being
 //                              dropped
-//   6: uint counters[7]       - [4] occlusion-culled count (out),
+//   10: uint2 hwPairs[]       - out (M4.2): selected items routed to
+//                              the hardware rasterizer (UE
+//                              SmallEnoughToDraw, 18px default)
+//   6: uint counters[8]       - [4] occlusion-culled count (out),
 //                              [5] post-revived count (written by the
 //                              POST cull, zero here),
 //                              [6] cut-triangle accumulation (out,
 //                              M3.4: surviving clusters' indexCount/3,
-//                              the post cull adds its revived share);
+//                              the post cull adds its revived share),
+//                              [7] HW-routed count (out, M4.2);
 //                              [3] work item count (in; GPU-written by
 //                              the in-frame chain or pre-filled one-shot),
 //                              [0] visible count (zero-init out);
@@ -85,6 +92,7 @@ struct GpuInstance {
 [[vk::binding(7)]] StructuredBuffer<uint> hzb;
 [[vk::binding(8)]] StructuredBuffer<float4> aabbs;
 [[vk::binding(9)]] RWStructuredBuffer<uint2> pendingPairs;
+[[vk::binding(10)]] RWStructuredBuffer<uint2> hwPairs;
 
 bool fireable(uint groupIdx, float4x4 model) {
   const GpuGroup g = groups[groupIdx];
@@ -107,8 +115,8 @@ bool fireable(uint groupIdx, float4x4 model) {
 bool occluded(uint2 item, float4x4 model)
 {
     const uint W = uint(params[6].y), H = uint(params[6].z);
-    const float3 mn = aabbs[2u * item.y + 0u].xyz;
-    const float3 mx = aabbs[2u * item.y + 1u].xyz;
+    const float3 mn = aabbs[3u * item.y + 0u].xyz;
+    const float3 mx = aabbs[3u * item.y + 1u].xyz;
 
     // 8 cluster-local corners -> world (explicit glm-column
     // combination per corner), projected with the PREV viewProj
@@ -221,6 +229,39 @@ bool occluded(uint2 item, float4x4 model)
     InterlockedAdd(counters[4], 1, pend);
     pendingPairs[pend] = item;
     return;
+  }
+
+  // M4.2 routing (UE SmallEnoughToDraw / D6.4): project the cluster's
+  // max object-space edge through the instance's max scale at the
+  // bounds sphere's nearest point (axis-distance approximation of
+  // UE's Min projected-edge scale; routing is a soft perf decision,
+  // both paths are correct). edgePx >= threshold (18px, UE default)
+  // -> hardware rasterizer.
+  if (params[7].x > 0.5) {
+    bool hw = params[7].x > 1.5;
+    if (!hw) {
+      const float maxScale = max(length(model[0].xyz),
+                                 max(length(model[1].xyz),
+                                     length(model[2].xyz)));
+      const float3 c = model[0].xyz * cluster.bounds.x +
+                       model[1].xyz * cluster.bounds.y +
+                       model[2].xyz * cluster.bounds.z + model[3].xyz;
+      const float dist =
+          max(distance(c, params[0].xyz) - cluster.bounds.w * maxScale,
+              0.1);
+      const float pxPerUnit =
+          (params[6].z * 0.5) / (max(params[6].w, 1e-6) * dist);
+      const float edgePx =
+          aabbs[3u * item.y + 2u].x * maxScale * pxPerUnit;
+      hw = edgePx >= params[7].y;
+    }
+    if (hw) {
+      uint hs = 0;
+      InterlockedAdd(counters[7], 1, hs);
+      hwPairs[hs] = item;
+      InterlockedAdd(counters[6], cluster.indexCount / 3u);
+      return;
+    }
   }
 
   uint slot = 0;

@@ -42,6 +42,14 @@ class VulkanBackend final : public IRenderBackend {
   bool readbackBuffer(u32 buffer, usize offset, usize bytes,
                       std::vector<u8>& out) override;
   u32 createFullscreenPipeline(const FullscreenPipelineInfo& info) override;
+  u32 createNullPipeline(const FullscreenPipelineInfo& info) override;
+  void destroyNullPipeline(u32 pipeline) override;
+  void drawNullIndirect(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
+                        u32 argsBuffer, usize argsOffset, u32 width,
+                        u32 height) override;
+  void barrierIndirectArgs(u32 buffer) override;
+  void barrierGraphicsRw(u32 buffer) override;
+  void barrierGraphicsToCompute(u32 buffer) override;
   void drawFullscreen(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                       const void* push, usize pushBytes) override;
   u32 createComputePipeline(const ComputePipelineInfo& info) override;

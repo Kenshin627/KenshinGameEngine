@@ -64,6 +64,28 @@ void CommandContext::beginViewportPass(VkImageView color, VkImageView depth,
   m_passOpen = true;
 }
 
+void CommandContext::beginNullPass(u32 width, u32 height) {
+  const VkRenderingInfo renderingInfo{
+      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea = {0, 0, width, height},
+      .layerCount = 1,
+  };
+  vkCmdBeginRendering(m_cmd, &renderingInfo);
+
+  const VkViewport viewport{
+      .x = 0.0f,
+      .y = 0.0f,
+      .width = static_cast<f32>(width),
+      .height = static_cast<f32>(height),
+      .minDepth = 0.0f,
+      .maxDepth = 1.0f,
+  };
+  const VkRect2D scissor{{0, 0}, {width, height}};
+  vkCmdSetViewport(m_cmd, 0, 1, &viewport);
+  vkCmdSetScissor(m_cmd, 0, 1, &scissor);
+  m_passOpen = true;
+}
+
 void CommandContext::endPass() {
   if (m_passOpen) {
     vkCmdEndRendering(m_cmd);
