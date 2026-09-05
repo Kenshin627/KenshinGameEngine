@@ -123,6 +123,8 @@ struct Args {
   bool noOcclusion = false;  // A/B: disable the occlusion cull chain
   bool multi = false;        // S4.6 acceptance: near/mid/far instances
   bool dense = false;        // M3.4 acceptance: front-back occluders
+  int grid = 0;              // --grid N: N-instance occlusion carpet
+                             // (1..32; the VisBuffer payload's 5b)
   // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
   // controller's interactive defaults.
   bool hasCam = false;
@@ -164,6 +166,8 @@ Args parseArgs(int argc, char** argv) {
       args.multi = true;
     else if (std::strcmp(argv[i], "--dense") == 0)
       args.dense = true;
+    else if (std::strcmp(argv[i], "--grid") == 0 && i + 1 < argc)
+      args.grid = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc) {
       const int n = sscanf_s(argv[++i], "%f,%f,%f,%f,%f,%f", &args.camYaw,
                              &args.camPitch, &args.camDist, &args.camTarget[0],
@@ -340,7 +344,29 @@ int main(int argc, char** argv) {
                         mesh.boundsSphere.w * scale);
           return inst;
         };
-        if (args.multi) {
+        if (args.grid > 0) {
+          // Occlusion stress carpet: a near-square XZ grid of the mesh
+          // - from any low-angle camera, front rows hide back rows and
+          // the cull has real work to save. 32 max (VisBuffer payload
+          // packs 5 instance bits).
+          const int n = std::clamp(args.grid, 1, 32);
+          // DEPTH-major: 8-deep lines along +x (the view axis of the
+          // demo camera), the rest across z. From head-on each line is
+          // a dense occluder stack - the configuration the cull pays
+          // in (M3.4: scattered carpets lose to background pollution).
+          const int depth = std::max(1, std::min(8, (n + 3) / 4));
+          const kenshin::f32 step = 2.25f;  // dense-like: neighbors'
+                                            // silhouettes overlap
+          std::vector<kenshin::renderer::VgInstance> vgInsts;
+          for (int i = 0; i < n; ++i) {
+            const glm::vec3 o((i % depth) * step, 0.0f,
+                              (i / depth) * step);
+            const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
+            chainInstances.push_back(makeInst(m));
+            vgInsts.push_back({m, vgMeshId});
+          }
+          vgScene.setInstances(vgInsts);
+        } else if (args.multi) {
           // S4.6 acceptance scene: the same mesh at near/mid/far along
           // +x - one threshold, visibly different LOD levels per
           // instance. --dense (M3.4) pulls them close instead: a
