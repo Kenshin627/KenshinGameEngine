@@ -541,11 +541,15 @@ bool VisBufferChain::readStats(backend::IRenderBackend& backend,
 
 bool VisBufferChain::readStatsMapped(backend::IRenderBackend& backend,
                                      u32 out[13]) const {
-  // The counter buffers are HOST_VISIBLE + persistently mapped; the
-  // worst a read can be is one frame stale (panels cannot tell). The
-  // last COMPLETED frame's slot holds settled values.
-  const u32 slot = backend.lastCompletedFrameSlot();
-  if (slot == 0xFFFFFFFFu) return false;
+  // The counter buffers are HOST_VISIBLE + persistently mapped. Read
+  // the CURRENT slot, called BEFORE this frame's execute: its last
+  // use was the frame-before-last, which beginFrame's pacing wait
+  // has PROVEN complete - the values are settled. (The previously
+  // submitted frame is NOT safe: a submitted frame may still be
+  // executing - single-queue submissions overlap - and reading its
+  // counters races the GPU's writes.)
+  const u32 slot = backend.currentFrameSlot();
+  if (m_cullCnt[slot] == kInvalid || m_cullCnt[slot] == 0) return false;
   const u32* cc = static_cast<const u32*>(backend.mappedPtr(m_cullCnt[slot]));
   const u32* rc = static_cast<const u32*>(backend.mappedPtr(m_rasterCnt[slot]));
   const u32* prc =

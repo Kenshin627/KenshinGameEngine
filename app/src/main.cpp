@@ -125,6 +125,7 @@ struct Args {
   bool dense = false;        // M3.4 acceptance: front-back occluders
   int grid = 0;              // --grid N: N-instance occlusion carpet
                              // (1..32; the VisBuffer payload's 5b)
+  bool wall = false;         // --wall: big occluder + hidden fleet
   // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
   // controller's interactive defaults.
   bool hasCam = false;
@@ -168,6 +169,8 @@ Args parseArgs(int argc, char** argv) {
       args.dense = true;
     else if (std::strcmp(argv[i], "--grid") == 0 && i + 1 < argc)
       args.grid = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--wall") == 0)
+      args.wall = true;
     else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc) {
       const int n = sscanf_s(argv[++i], "%f,%f,%f,%f,%f,%f", &args.camYaw,
                              &args.camPitch, &args.camDist, &args.camTarget[0],
@@ -218,6 +221,7 @@ struct VgDebugState {
   kenshin::u32 occCulled = 0;
   kenshin::u32 revived = 0;
   kenshin::u32 hwClusters = 0;
+  kenshin::u32 workItems = 0, tooCoarse = 0, srcTooCoarse = 0;
   bool occlusion = true;
   kenshin::f32 coveragePct = 0.0f;
   std::vector<float> clusterHist, triHist, coverHist;
@@ -344,7 +348,32 @@ int main(int argc, char** argv) {
                         mesh.boundsSphere.w * scale);
           return inst;
         };
-        if (args.grid > 0) {
+        if (args.wall) {
+          // Big-occluder scene (the UE5-faithful occlusion demo): one
+          // 6x-scaled sphere at the origin as a wall, 24 unit spheres
+          // in a 6-wide x 4-deep block BEHIND it (positive x; the
+          // yaw-270 demo camera looks along +x from -x). The wall
+          // covers a large screen fraction at range - the condition
+          // under which the conservative HZB band still culls (the
+          // D4 edge conservatism is official Nanite behavior; the
+          // win comes from big occluders, not pyramid tricks).
+          std::vector<kenshin::renderer::VgInstance> vgInsts;
+          {
+            const glm::mat4 m =
+                glm::translate(glm::mat4(1.0f), glm::vec3(0, 0, 0)) *
+                glm::scale(glm::mat4(1.0f), glm::vec3(6.0f));
+            chainInstances.push_back(makeInst(m));
+            vgInsts.push_back({m, vgMeshId});
+          }
+          for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 6; ++col) {
+              const glm::vec3 o(3.0f + 2.25f * row, 0.0f, (col - 2.5f) * 2.25f);
+              const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
+              chainInstances.push_back(makeInst(m));
+              vgInsts.push_back({m, vgMeshId});
+            }
+          vgScene.setInstances(vgInsts);
+        } else if (args.grid > 0) {
           // Occlusion stress carpet: a near-square XZ grid of the mesh
           // - from any low-angle camera, front rows hide back rows and
           // the cull has real work to save. 32 max (VisBuffer payload
@@ -359,8 +388,7 @@ int main(int argc, char** argv) {
                                             // silhouettes overlap
           std::vector<kenshin::renderer::VgInstance> vgInsts;
           for (int i = 0; i < n; ++i) {
-            const glm::vec3 o((i % depth) * step, 0.0f,
-                              (i / depth) * step);
+            const glm::vec3 o((i % depth) * step, 0.0f, (i / depth) * step);
             const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
             chainInstances.push_back(makeInst(m));
             vgInsts.push_back({m, vgMeshId});
@@ -582,11 +610,15 @@ int main(int argc, char** argv) {
         kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
                                                 ci.planes);
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
-        chain.execute(*vgBackend, ci);
-
-        // Panel stats: NON-BLOCKING mapped snapshot (the blocking
-        // readStats submits+idles the queue - periodic calls degraded
-        // presentation 5x over ~2k frames; see readStatsMapped).
+        // Panel stats: NON-BLOCKING mapped snapshot, taken BEFORE this
+        // frame's execute. At this point the CURRENT slot's counters
+        // still hold the frame-before-last's final values, and
+        // beginFrame's pacing wait has PROVEN that frame complete -
+        // reading after execute (the old site) raced the GPU's own
+        // writes to the not-yet-finished previous submission (a
+        // "submitted" frame is not an "executed" frame: single-queue
+        // submissions may overlap), which showed up as torn counters
+        // - intermittent zero clusters, wildly varying write counts.
         {
           kenshin::u32 cs[13];
           if (chainReady && chain.readStatsMapped(*vgBackend, cs)) {
@@ -596,6 +628,9 @@ int main(int argc, char** argv) {
             vgDebug.occCulled = cs[8];
             vgDebug.revived = cs[9];
             vgDebug.hwClusters = cs[12];
+            vgDebug.workItems = cs[1];
+            vgDebug.tooCoarse = cs[3];
+            vgDebug.srcTooCoarse = cs[4];
             const kenshin::f32 cover =
                 100.0f * static_cast<kenshin::f32>(cs[5] + cs[10]) /
                 (ci.width * ci.height);
@@ -603,6 +638,8 @@ int main(int argc, char** argv) {
             vgDebug.pushHistory();
           }
         }
+
+        chain.execute(*vgBackend, ci);
 
         decodeParams.camPos = camera.position();
         decodeParams.view =
@@ -621,10 +658,19 @@ int main(int argc, char** argv) {
     engine.endFrame();
 
     stats.push(dt * 1000.0f);
-    if (frame > 0 && frame % 60 == 0)
+    if (frame > 0 && frame % 60 == 0) {
       KENSHIN_INFO("[pacing] avg={:.3f}ms std={:.3f}ms max={:.3f}ms fps={:.1f}",
                    stats.averageMs(), stats.stddevMs(), stats.maxMs(),
                    stats.fps());
+      if (chainReady)
+        KENSHIN_INFO(
+            "[vgstats] work {} clusters {} tris {} writes {} occ {} "
+            "revived {} hw {} tooCoarse {} srcTooCoarse {} gpuMs {}",
+            vgDebug.workItems, vgDebug.visibleClusters, vgDebug.cutTris,
+            vgDebug.pxWrites, vgDebug.occCulled, vgDebug.revived,
+            vgDebug.hwClusters, vgDebug.tooCoarse, vgDebug.srcTooCoarse,
+            vgBackend->gpuTimings().frameMs);
+    }
 
     if (exiting) {
       if (!args.screenshot.empty())

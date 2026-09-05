@@ -19,6 +19,8 @@ cmake_minimum_required(VERSION 3.24)
                 smoke.cpp src / vgchain_tests.cpp src / hzb_tests.cpp src /
                 crash_main.cpp)
 
+#crash_main.cpp provides main() with the SEH crash filter(the app's
+#crashLogFilter twin) : Catch2WithMain carries its own main.
                 target_link_libraries(
                     kenshin_tests PRIVATE kenshin::engine Catch2::Catch2)
 
