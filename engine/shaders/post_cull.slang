@@ -148,7 +148,6 @@ bool occluded(uint2 item, float4x4 model)
 void main(uint tid : SV_DispatchThreadID)
 {
     if (tid >= counters[4]) return;
-
     const uint2 item = pendingPairs[tid];
     if (occluded(item, instances[item.x].model)) return;  // still hidden
 

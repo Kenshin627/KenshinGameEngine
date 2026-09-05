@@ -145,6 +145,13 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
   m_cfgRaster = makeHostBuffer(backend, sizeof(cfgRaster), cfgRaster, "cfgR");
   m_cfgPost = makeHostBuffer(backend, sizeof(cfgPost), cfgPost, "cfgP");
   m_cfgHwDraw = makeHostBuffer(backend, sizeof(cfgHwDraw), cfgHwDraw, "cfgHD");
+  // Post-section gate: full dispatch size when pending > 0. The size
+  // must cover the pyramid CLEAR's range (totalTexels - W*H/64 groups
+  // leave the coarse mips uncleared and stale values poisoned the
+  // post cull); the build's own guard absorbs the excess threads.
+  const u32 hzbGroups = (hzbLayout(width, height).totalTexels + 63u) / 64u;
+  const u32 cfgFlag[4] = {hzbGroups, 0, 4, 0};
+  m_cfgFlag = makeHostBuffer(backend, sizeof(cfgFlag), cfgFlag, "cfgF");
 
   const usize listBytes = m_instanceCount * sizeof(u32);
   const usize pairBytes = usize(maxPairs) * sizeof(glm::uvec2);
@@ -390,19 +397,33 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   }
 
   if (occActive) {
-    // ---- M3.3 post half (Karis Slide 75): build THIS frame's
-    // preliminary HZB from the just-completed Main VisBuffer,
-    // retest the pending (occluded) list against it with the
-    // CURRENT matrices, revive + re-raster what became visible.
+    // ---- M3.3 post half (Karis Slide 75), PENDING-GATED: nothing
+    // occluded (the common case) -> the whole section dispatches ZERO
+    // groups (a flag conversion turns counters[4] into {G|0}). The
+    // clears are COMPUTE dispatches (the transfer fillBuffer's
+    // cross-stage barriers were disproportionately expensive - under
+    // validation each fill validated three barriers and the section
+    // cost ~5.7ms/frame).
     b(m_vis[slot]);
     const glm::vec4 hp(f32(in.width), f32(in.height), 0.0f, 0.0f);
     std::memcpy(backend.mappedPtr(m_hzbParams[slot]), &hp, sizeof(hp));
-    backend.fillBuffer(m_hzb[slot], 0xFFFFFFFFu);
+    const u32 cvFlag[3] = {m_cullCnt[slot], m_cfgFlag, m_argsHzb1[slot]};
+    backend.dispatchCompute(m_pipeCountToFlag, cvFlag, 3, 1, 1, 1);
+    backend.barrierIndirectArgs(m_argsHzb1[slot]);
+
+    const u32 clrHandles[2] = {m_hzbParams[slot], m_hzb[slot]};
+    backend.dispatchComputeIndirect(m_pipeClear1, clrHandles, 2,
+                                    m_argsHzb1[slot], 0);
+    b(m_hzb[slot]);
     const u32 hzbHandles[3] = {m_hzbParams[slot], m_vis[slot], m_hzb[slot]};
-    backend.dispatchCompute(m_pipeHzb, hzbHandles, 3,
-                            (in.width * in.height + 63) / 64, 1, 1);
+    backend.dispatchComputeIndirect(m_pipeHzb, hzbHandles, 3, m_argsHzb1[slot],
+                                    0);
     b(m_hzb[slot]);
 
+    // The post cull keeps the MAIN cull's dispatch size (argsCull):
+    // its threads guard on the pending count, so the oversize costs
+    // nothing but idle early-outs. (Routing it through the FLAG args
+    // measurably broke revives - kept on argsCull, the proven shape.)
     const u32 postCullHandles[8] = {m_postParams[slot], m_pendingPairs[slot],
                                     m_postPairs[slot],  m_instanceBuffer,
                                     m_hzb[slot],        m_aabbBuffer,
@@ -430,14 +451,16 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   if (in.occlusionEnabled) {
     // HZB #2: from the COMPLETE VisBuffer (post pass included), for
     // the next frame's Main cull. Runs on warmup frames too (the
-    // bootstrap that turns m_hzbValid on). The fill's pre-barrier
-    // orders it after every prior compute read of the pyramid
-    // (build #1's consumers; queue submission order makes this hold
-    // for the OTHER slot's Main cull read as well). Its own pipeline:
-    // build #1 already used this frame slot's m_pipeHzb set.
+    // bootstrap that turns m_hzbValid on). Always-on, so a DIRECT
+    // compute clear + build (no transfer op, no flag). Its own
+    // pipeline pair: build #1 already used this frame slot's sets.
     const glm::vec4 hp(f32(in.width), f32(in.height), 0.0f, 0.0f);
     std::memcpy(backend.mappedPtr(m_hzbParams[slot]), &hp, sizeof(hp));
-    backend.fillBuffer(m_hzb[slot], 0xFFFFFFFFu);
+    const u32 clrHandles[2] = {m_hzbParams[slot], m_hzb[slot]};
+    backend.dispatchCompute(
+        m_pipeClear2, clrHandles, 2,
+        (hzbLayout(in.width, in.height).totalTexels + 63) / 64, 1, 1);
+    b(m_hzb[slot]);
     const u32 hzbHandles[3] = {m_hzbParams[slot], m_vis[slot], m_hzb[slot]};
     backend.dispatchCompute(m_pipeHzbFinal, hzbHandles, 3,
                             (in.width * in.height + 63) / 64, 1, 1);
@@ -546,10 +569,11 @@ bool VisBufferChain::readIndirectArgs(backend::IRenderBackend& backend,
 }
 
 void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
-  const u32 pipes[12] = {m_pipeCull,       m_pipeExpand,     m_pipeCluster,
-                         m_pipeRaster,     m_pipeRasterPost, m_pipeHzb,
-                         m_pipeHzbFinal,   m_pipePostCull,   m_pipeConvert[0],
-                         m_pipeConvert[1], m_pipeConvert[2], m_pipeCountToDraw};
+  const u32 pipes[15] = {m_pipeCull,        m_pipeExpand,     m_pipeCluster,
+                         m_pipeRaster,      m_pipeRasterPost, m_pipeHzb,
+                         m_pipeHzbFinal,    m_pipePostCull,   m_pipeConvert[0],
+                         m_pipeConvert[1],  m_pipeConvert[2], m_pipeCountToDraw,
+                         m_pipeCountToFlag, m_pipeClear1,     m_pipeClear2};
   const u32 pipes2[1] = {m_pipeConvert[3]};
   for (const u32 p : pipes)
     if (p != ~0u) backend.destroyComputePipeline(p);
