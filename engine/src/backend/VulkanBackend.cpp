@@ -916,10 +916,19 @@ void VulkanBackend::destroyNullPipeline(u32 pipeline) {
   PipelineStore::Fullscreen& e = const_cast<PipelineStore::Fullscreen&>(
       impl.pipelines.nullRaster(pipeline));
   if (!e.valid) return;
-  vkDestroyPipeline(impl.device.device, e.pipeline, nullptr);
-  vkDestroyPipelineLayout(impl.device.device, e.layout, nullptr);
-  vkDestroyDescriptorPool(impl.device.device, e.pool, nullptr);
-  vkDestroyDescriptorSetLayout(impl.device.device, e.setLayout, nullptr);
+  // Same deferred discipline as destroyComputePipeline.
+  VkDevice device = impl.device.device;
+  const VkPipeline pipelineRaw = e.pipeline;
+  const VkPipelineLayout layoutRaw = e.layout;
+  const VkDescriptorPool poolRaw = e.pool;
+  const VkDescriptorSetLayout setLayoutRaw = e.setLayout;
+  impl.frameSync.slots[impl.frameSync.frameIndex].deletionQueue.push(
+      [device, pipelineRaw, layoutRaw, poolRaw, setLayoutRaw] {
+        vkDestroyPipeline(device, pipelineRaw, nullptr);
+        vkDestroyPipelineLayout(device, layoutRaw, nullptr);
+        vkDestroyDescriptorPool(device, poolRaw, nullptr);
+        vkDestroyDescriptorSetLayout(device, setLayoutRaw, nullptr);
+      });
   e = {};
 }
 
@@ -1055,10 +1064,24 @@ void VulkanBackend::destroyComputePipeline(u32 pipeline) {
   PipelineStore::Compute& c =
       const_cast<PipelineStore::Compute&>(impl.pipelines.compute(pipeline));
   if (!c.valid) return;
-  vkDestroyPipeline(impl.device.device, c.pipeline, nullptr);
-  vkDestroyPipelineLayout(impl.device.device, c.layout, nullptr);
-  vkDestroyDescriptorPool(impl.device.device, c.pool, nullptr);
-  vkDestroyDescriptorSetLayout(impl.device.device, c.setLayout, nullptr);
+  // DEFERRED destroy (the immediate form died with vkDestroyPipeline
+  // "currently in use" warnings at app teardown - the last frame's
+  // command buffer references the pipeline): push onto this slot's
+  // deletion queue (flushed after the shutdown device-idle; also at
+  // slot reuse), clear the entry so the store's own shutdown skips
+  // it (no double destroy).
+  VkDevice device = impl.device.device;
+  const VkPipeline pipelineRaw = c.pipeline;
+  const VkPipelineLayout layoutRaw = c.layout;
+  const VkDescriptorPool poolRaw = c.pool;
+  const VkDescriptorSetLayout setLayoutRaw = c.setLayout;
+  impl.frameSync.slots[impl.frameSync.frameIndex].deletionQueue.push(
+      [device, pipelineRaw, layoutRaw, poolRaw, setLayoutRaw] {
+        vkDestroyPipeline(device, pipelineRaw, nullptr);
+        vkDestroyPipelineLayout(device, layoutRaw, nullptr);
+        vkDestroyDescriptorPool(device, poolRaw, nullptr);
+        vkDestroyDescriptorSetLayout(device, setLayoutRaw, nullptr);
+      });
   c = {};
 }
 
