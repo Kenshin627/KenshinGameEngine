@@ -137,6 +137,38 @@ bool VulkanDevice::init(const VulkanContext& context) {
   graphicsFamily = context.graphicsFamily;
   computeFamily = context.computeFamily;
   transferFamily = context.transferFamily;
+  asyncComputeFamily = context.asyncComputeFamily;
+  sameFamilyAsyncCompute = context.sameFamilyAsyncCompute;
+
+  // M4.3 async compute: the chain records onto a SECOND queue so the
+  // cull/raster compute overlaps the graphics queue's decode/present.
+  // A dedicated compute-only family is a true second engine; a second
+  // queue from the graphics family still gives submission-level
+  // concurrency on single-engine parts (UE5's same fallback).
+  u32 asyncFamily = 0xFFFFFFFFu, asyncIndex = 0;
+  if (asyncComputeFamily != 0xFFFFFFFFu) {
+    asyncFamily = asyncComputeFamily;
+    asyncIndex = 0;
+  } else if (sameFamilyAsyncCompute) {
+    asyncFamily = graphicsFamily;
+    asyncIndex = 1;
+  }
+  if (asyncFamily != 0xFFFFFFFFu) {
+    bool covered = false;
+    for (auto& info : queueInfos)
+      if (info.queueFamilyIndex == asyncFamily) {
+        covered = true;
+        // The graphics family's entry needs TWO queues now.
+        if (asyncFamily == graphicsFamily) info.queueCount = 2;
+      }
+    if (!covered)
+      queueInfos.push_back(VkDeviceQueueCreateInfo{
+          .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+          .queueFamilyIndex = asyncFamily,
+          .queueCount = 1,
+          .pQueuePriorities = &priority,
+      });
+  }
 
   std::vector<const char*> deviceExtensions;
   if (context.surfaceEnabled)
@@ -164,6 +196,11 @@ bool VulkanDevice::init(const VulkanContext& context) {
   vkGetDeviceQueue(device, context.graphicsFamily, 0, &graphicsQueue);
   vkGetDeviceQueue(device, context.computeFamily, 0, &computeQueue);
   vkGetDeviceQueue(device, context.transferFamily, 0, &transferQueue);
+  if (asyncFamily != 0xFFFFFFFFu) {
+    vkGetDeviceQueue(device, asyncFamily, asyncIndex, &asyncComputeQueue);
+    KENSHIN_INFO("[vulkan] async compute queue: family {} index {}",
+                 asyncFamily, asyncIndex);
+  }
 
   VmaVulkanFunctions vmaFns;
   fillVmaVulkanFunctions(vmaFns);

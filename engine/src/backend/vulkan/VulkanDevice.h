@@ -21,10 +21,13 @@ struct VulkanDevice {
   u32 graphicsFamily = 0xFFFFFFFFu;
   u32 computeFamily = 0xFFFFFFFFu;
   u32 transferFamily = 0xFFFFFFFFu;
+  u32 asyncComputeFamily = 0xFFFFFFFFu;  // M4.3 (compute-only family)
+  bool sameFamilyAsyncCompute = false;   // M4.3 (graphics family #2)
   VkQueue graphicsQueue = VK_NULL_HANDLE;
   VkQueue computeQueue = VK_NULL_HANDLE;
   VkQueue transferQueue =
       VK_NULL_HANDLE;  // aliases graphicsQueue when same family
+  VkQueue asyncComputeQueue = VK_NULL_HANDLE;  // M4.3 chain target
   VmaAllocator allocator = VK_NULL_HANDLE;
 
   // Features actually enabled at device creation

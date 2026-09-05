@@ -79,6 +79,7 @@
 （随手记，格式：`- [ ] 事项 —— 备注/日期`）
 
 - [x] HZB 遮挡体侧"盒光栅"调研 ✅ 2026-09-05 撤销：查证 nanite.md D4.1——**UE5 官方 HZB = 深度缓冲 min 归约金字塔（reversed-Z 下 2×2 取最远），无包围盒光栅进 mip 的操作**；边缘保守带（背景像素=0 污染 tile min）是官方接受的保守性，D4.3 明言"cluster 粒度 HiZ 无法像素级遮挡融合"是 Nanite 已知缺陷。我们的逐级归约 + ≤4×4 mip 测试已与 D4.1/D4.2 逐条一致，无算法差距。远距剔除收益的正解 = 场景侧大遮挡体（--wall 演示场景），不是改金字塔（曾误记"Nanite 式盒光栅"并当成既定技术路线，已纠正——教训：把想法标上引擎出处之前先查主文档核实）
+- [ ] **CONCURRENT 共享是雷点（用户 2026-09-05 判定）**：M4.3 为跨队列族（graphics family 0 + async compute family 2）把 BufferStore 全部缓冲改成 VK_SHARING_MODE_CONCURRENT——①"UE5 同款"说法**未证实**（训练记忆印象，Epic 仓库访问受限无法核对，已撤回归因，依据降级为规范论证）；② CONCURRENT 在部分驱动/硬件上并非零成本（放弃压缩优化等），且掩盖了本应显式建模的跨队列依赖；③ 改完 CONCURRENT 后 M3.2b/M3.3/M4.2 三个测试**仍失败**（occ 结果噪声化），说明跨队列问题没这么简单。候选方向：显式 ownership transfer（每帧链边界 release/acquire，屏障税但依赖显式）、或回退同族第二队列（family 0 queueCount=16，无跨族问题但无真异步引擎）、或查真正的失败根因后再定
 
 - [ ] CommandContext 记 last-bound 状态（pipeline/顶点/索引缓冲），`draw()` 跳过重复绑定——当前每帧 draw 数个位数、驱动对冗余绑定有优化，纯属顺手加固；改动只在 backend 内部，不动 API —— 2026-09-02
 - [ ] one-shot 链入帧化（当前视角变化触发阻塞式 5 段 one-shot compute,交互帧率受限;运动中 VisBuffer 落后相机一帧导致剪影处闪烁/破洞,停止即恢复——链入帧+VisBuffer 按帧槽双缓冲可同时解决卡顿与错位;ShaderManager 的 SPIR-V 缓存已就位为前置）—— S4.5 落地后,M2 后续

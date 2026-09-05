@@ -50,6 +50,9 @@ class VulkanBackend final : public IRenderBackend {
   void barrierIndirectArgs(u32 buffer) override;
   void barrierGraphicsRw(u32 buffer) override;
   void barrierGraphicsToCompute(u32 buffer) override;
+  bool beginChain() override;
+  void submitChain() override;
+  bool chainOnComputeQueue() const override;
   void drawFullscreen(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                       const void* push, usize pushBytes) override;
   u32 createComputePipeline(const ComputePipelineInfo& info) override;

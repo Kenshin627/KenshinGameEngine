@@ -41,6 +41,16 @@ struct FrameSlot {
   // the queue family lacks timestamp support.
   VkQueryPool timingQueries = VK_NULL_HANDLE;
 
+  // M4.3 async compute: this slot's chain command buffers on the
+  // compute queue. cbA = the cull chain (cull -> expand -> cluster
+  // cull -> conversions -> count_to_draw), cbB = the raster chain
+  // (SW raster -> post section -> final HZB). Split so the graphics
+  // queue's HW draw can wait ONLY on A and run CONCURRENTLY with B
+  // (both atomically write the same VisBuffer - order-free max).
+  VkCommandPool computePool = VK_NULL_HANDLE;
+  VkCommandBuffer computeCullCb = VK_NULL_HANDLE;
+  VkCommandBuffer computeRasterCb = VK_NULL_HANDLE;
+
   bool initialized() const { return commandPool != VK_NULL_HANDLE; }
 };
 
@@ -54,11 +64,29 @@ struct FrameSync {
   // value k; a frame waits for (k - kMaxFramesInFlight) before reusing a
   // slot's resources. Replaces the per-slot fences (Raptor shape).
   VkSemaphore frameTimeline = VK_NULL_HANDLE;
-  u64 timelineValue = 0;      // value of the last signaled submit
-  u64 completedValue = 0;     // timeline value of `lastCompleted`
+  u64 timelineValue = 0;   // value of the last signaled submit
+  u64 completedValue = 0;  // timeline value of `lastCompleted`
+
+  // M4.3: the async-compute chain's OWN timeline (independent of the
+  // graphics frame pacing - a chain's completion is not the frame's).
+  // Per frame N: valueA = 2N+1 (cull cb), valueB = 2N+2 (raster cb).
+  // The graphics frame waits valueA before the HW draw (vertex/
+  // indirect stages) and valueB before the decode (fragment stage).
+  VkSemaphore computeTimeline = VK_NULL_HANDLE;
+  u64 computeValue = 0;             // value of the last signaled chain submit
+  bool asyncComputeActive = false;  // queue + pools created
 
   bool init(const VulkanDevice& device, bool timestamps);
   void shutdown(const VulkanDevice& device);
+
+  /// M4.3: per-slot compute pools + cull/raster command buffers and
+  /// the compute timeline. No-op (false) when the device lacks an
+  /// async compute queue - the chain then stays on the graphics
+  /// queue exactly as before.
+  bool initAsyncCompute(const VulkanDevice& device);
+
+  /// Block the host until the compute timeline reaches `value`.
+  bool waitCompute(const VulkanDevice& device, u64 value) const;
 
   /// Block the host until the timeline reaches `value`.
   bool waitTimeline(const VulkanDevice& device, u64 value) const;

@@ -26,11 +26,23 @@ u32 BufferStore::create(const VulkanDevice& device, VkCommandPool pool,
   if (desc.usage & IRenderBackend::BufferTransferDst)
     usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
+  // M4.3: buffers are touched from BOTH the graphics family (one-shot
+  // paths, readbacks) and the async compute family (the in-frame
+  // chain) - EXCLUSIVE sharing across families is undefined. When an
+  // async family exists every buffer is created CONCURRENT over both
+  // (the driver-side cost is negligible for buffers on modern parts).
+  const u32 shareFamilies[2] = {device.graphicsFamily,
+                                device.asyncComputeFamily};
+  const bool concurrent = device.asyncComputeQueue != VK_NULL_HANDLE &&
+                          device.asyncComputeFamily != device.graphicsFamily;
   const VkBufferCreateInfo bufferInfo{
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = static_cast<VkDeviceSize>(desc.size),
       .usage = usage,
-      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .sharingMode =
+          concurrent ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE,
+      .queueFamilyIndexCount = concurrent ? 2u : 0u,
+      .pQueueFamilyIndices = shareFamilies,
   };
   // Host-visible buffers (in-frame chain params, updated by CPU writes
   // between submits) stay persistently mapped; everything else is

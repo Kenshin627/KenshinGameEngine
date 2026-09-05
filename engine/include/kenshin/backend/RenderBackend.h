@@ -254,6 +254,25 @@ class IRenderBackend {
   virtual void barrierGraphicsRw(u32 buffer) = 0;
   /// ...and the way back: fragment-written -> compute read/write.
   virtual void barrierGraphicsToCompute(u32 buffer) = 0;
+
+  /// M4.3 async compute: record the cull/raster chain onto the
+  /// dedicated compute queue so it overlaps the graphics queue's
+  /// decode/present work (UE5's layout: SW chain on async compute,
+  /// HW raster + decode on graphics, both atomically writing the same
+  /// VisBuffer). v1: ONE chain command buffer per frame (cull ->
+  /// SW raster -> post -> final HZB) submitted as one compute
+  /// submission; the graphics frame waits its completion before the
+  /// HW draw + decode - frame N's chain overlaps frame N-1's
+  /// graphics work (pipelining). Same-frame HW||SW concurrency needs
+  /// the cull/raster submission split + a second graphics submission
+  /// (v2). Every call returns false when no async compute queue
+  /// exists - the caller then records everything onto the graphics
+  /// queue exactly as before (the chain's fallback).
+  virtual bool beginChain() = 0;
+  virtual void submitChain() = 0;
+  /// True when the last submitChain ran on the compute queue (the
+  /// frame submission then waits the chain's completion).
+  virtual bool chainOnComputeQueue() const = 0;
   /// Draw the fullscreen triangle in the CURRENT frame scope.
   /// bufferHandles[i] binds to SSBO binding i (as declared by the FS);
   /// `push` is copied into the 128-byte push block.

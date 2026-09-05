@@ -313,6 +313,27 @@ void VulkanContext::selectQueueFamilies() {
   transferFamily = dedicated != 0xFFFFFFFFu      ? dedicated
                    : asyncCompute != 0xFFFFFFFFu ? asyncCompute
                                                  : graphicsFamily;
+  // M4.3 async compute: a compute-only family (true second engine on
+  // some hardware) or a second queue from the graphics family.
+  asyncComputeFamily = asyncCompute;
+  sameFamilyAsyncCompute =
+      asyncComputeFamily == 0xFFFFFFFFu &&
+      (families[graphicsFamily].queueFlags & VK_QUEUE_COMPUTE_BIT) &&
+      families[graphicsFamily].queueCount >= 2;
+  for (u32 i = 0; i < familyCount; ++i) {
+    const auto& f = families[i];
+    KENSHIN_INFO("[vulkan] queue family {}: flags{}{}{} count {}", i,
+                 f.queueFlags & VK_QUEUE_GRAPHICS_BIT ? " graphics" : "",
+                 f.queueFlags & VK_QUEUE_COMPUTE_BIT ? " compute" : "",
+                 f.queueFlags & VK_QUEUE_TRANSFER_BIT ? " transfer" : "",
+                 f.queueCount);
+  }
+  KENSHIN_INFO(
+      "[vulkan] async compute: {}",
+      asyncComputeFamily != 0xFFFFFFFFu
+          ? "dedicated compute-only family"
+          : (sameFamilyAsyncCompute ? "second queue from the graphics family"
+                                    : "unavailable"));
 }
 
 bool VulkanContext::checkPresentSupport(void* hwnd) {

@@ -347,6 +347,13 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // every handoff.
   const auto b = [&](u32 handle) { backend.bufferBarrier(handle, false); };
 
+  // M4.3: the WHOLE chain records onto the async compute queue when
+  // available (single submission; the graphics frame waits its
+  // completion before the HW draw + decode, so frame N's chain
+  // overlaps frame N-1's graphics work). Without an async queue the
+  // same recording lands on the graphics buffer exactly as before.
+  const bool asyncChain = backend.beginChain();
+
   backend.fillBuffer(m_vis[slot], 0);
 
   const u32 cullHandles[4] = {m_planes[slot], m_instanceBuffer,
@@ -399,28 +406,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   backend.dispatchComputeIndirect(m_pipeRaster, rasterHandles, 8,
                                   m_argsRaster[slot], 0);
 
-  // ---- M4.2 hardware raster: the routed clusters draw through the
-  // fixed function (zero attachments; the PS re-runs the SW coverage
-  // test on the quantized triangle and atomically writes the SAME
-  // VisBuffer). Runs every frame the routing is on - with occlusion
-  // active or not (routing is orthogonal to it).
-  if (in.hwMode > 0) {
-    const u32 cvHw[3] = {m_cullCnt[slot], m_cfgHwDraw, m_hwDrawArgs[slot]};
-    backend.dispatchCompute(m_pipeCountToDraw, cvHw, 3, 1, 1, 1);
-    backend.barrierIndirectArgs(m_hwDrawArgs[slot]);
-    backend.barrierGraphicsRw(m_hwPairs[slot]);
-    backend.barrierGraphicsRw(m_vis[slot]);
-    const u32 hwHandles[7] = {
-        m_hwParams[slot], m_hwPairs[slot],  m_clusterBuffer, m_positionBuffer,
-        m_indexBuffer,    m_instanceBuffer, m_vis[slot]};
-    backend.drawNullIndirect(m_pipeHwRaster, hwHandles, 7, m_hwDrawArgs[slot],
-                             0, in.width, in.height);
-    // The PS's atomic writes must be ordered before every later
-    // compute read of the vis (the post section's HZB builds, the
-    // decode's fragment read via the tail barriers).
-    backend.barrierGraphicsToCompute(m_vis[slot]);
-  }
-
+  // ---- M3.3 post half + the final HZB stay on the CHAIN side (they
+  // are pure compute); the M4.2 HW draw moved AFTER the chain submit
+  // (it needs the graphics queue's rasterizer - running it there is
+  // the whole point of the async split).
   if (occActive) {
     // ---- M3.3 post half (Karis Slide 75), PENDING-GATED: nothing
     // occluded (the common case) -> the whole section dispatches ZERO
@@ -470,6 +459,14 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     b(m_vis[slot]);
   }
 
+  // Order EVERY prior write of the vis (the main SW raster - and, on
+  // the pre-M4.3 layout, the HW pass) before HZB #2's L0 read. The
+  // post section's leading b(m_vis) only covers the occActive path;
+  // warmup frames (occ off, post skipped) previously leaned on the
+  // HW section's trailing barrier - the M4.3 restructure moved that
+  // section after this loop and the race surfaced as a zero pyramid.
+  b(m_vis[slot]);
+
   if (in.occlusionEnabled) {
     // HZB #2: from the COMPLETE VisBuffer (post pass included), for
     // the next frame's Main cull - always-on (the bootstrap that
@@ -486,8 +483,34 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   }
 
   // Compute write -> fragment read (the decode pass consumes the vis).
+  // On the async path this in-cb barrier is advisory only - the real
+  // cross-queue handoff is the compute timeline wait on the graphics
+  // submission (see endFrame); harmless to keep for the fallback.
   backend.bufferBarrier(m_vis[slot], true);
   backend.bufferBarrier(m_vis[slot], false);
+
+  // Submit the chain (no-op on the graphics fallback path) BEFORE
+  // recording the graphics-side HW draw.
+  backend.submitChain();
+
+  // ---- M4.2 hardware raster (graphics queue): the routed clusters
+  // draw through the fixed function (zero attachments; the PS re-runs
+  // the SW coverage test on the quantized triangle and atomically
+  // writes the SAME VisBuffer). The draw's indirect args are
+  // GPU-written INSIDE the chain - count_to_draw runs at the chain's
+  // tail, and the graphics submission's timeline wait orders the
+  // DRAW_INDIRECT/vertex reads.
+  if (in.hwMode > 0) {
+    const u32 cvHw[3] = {m_cullCnt[slot], m_cfgHwDraw, m_hwDrawArgs[slot]};
+    backend.dispatchCompute(m_pipeCountToDraw, cvHw, 3, 1, 1, 1);
+    backend.barrierIndirectArgs(m_hwDrawArgs[slot]);
+    const u32 hwHandles[7] = {
+        m_hwParams[slot], m_hwPairs[slot],  m_clusterBuffer, m_positionBuffer,
+        m_indexBuffer,    m_instanceBuffer, m_vis[slot]};
+    backend.drawNullIndirect(m_pipeHwRaster, hwHandles, 7, m_hwDrawArgs[slot],
+                             0, in.width, in.height);
+  }
+  (void)asyncChain;
 
   // This frame's matrices become the slot's stored prev: the final
   // HZB just built from this slot's VisBuffer was rendered with

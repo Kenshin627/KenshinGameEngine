@@ -41,6 +41,25 @@ struct VulkanBackend::Impl {
   bool presentSupported = false;
   void* hwnd = nullptr;
 
+  // M4.3 async compute: when set, dispatch/barrier/fill calls record
+  // into this command buffer instead of the frame's graphics one (the
+  // chain's cull/raster segments). chainValueA/B are this frame's
+  // compute-timeline values for the graphics submission's waits.
+  VkCommandBuffer computeOverride = VK_NULL_HANDLE;
+  u64 chainValueA = 0, chainValueB = 0;
+  bool asyncActive = false;
+  // One chain submission per frame slot: a second beginChain before
+  // endFrame would re-begin the SAME command buffer whose previous
+  // submission may still be executing (two-chain test setups).
+  bool chainSubmittedThisFrame = false;
+
+  // The command buffer every chain-recording call targets (the
+  // compute override during beginChainCull/beginChainRaster, the
+  // frame's graphics buffer otherwise).
+  VkCommandBuffer rc() const {
+    return computeOverride != VK_NULL_HANDLE ? computeOverride : cmd.cmd();
+  }
+
   Swapchain swapchain;
   FrameSync frameSync;
   StagingRing staging;  // per-frame dynamic data slices (M2 consumer)
@@ -195,6 +214,11 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
     KENSHIN_ERROR("[vulkan] frame resources init failed");
     return false;
   }
+  // M4.3: async compute chain resources (optional - the chain falls
+  // back to the graphics queue without them).
+  m_impl->asyncActive = m_impl->frameSync.initAsyncCompute(m_impl->device);
+  if (m_impl->asyncActive)
+    KENSHIN_INFO("[vulkan] async compute chain: enabled");
   // 16MB per in-flight frame of mapped staging; M2's per-frame data
   // (culling inputs / instance tables) will slice out of this.
   if (!m_impl->staging.init(m_impl->device.allocator, 16ull * 1024 * 1024,
@@ -279,6 +303,17 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   if (nextTimelineValue > kMaxFramesInFlight)
     impl.frameSync.waitTimeline(impl.device,
                                 nextTimelineValue - kMaxFramesInFlight);
+  // M4.3: the same pacing for the slot's CHAIN command buffers - the
+  // compute timeline trails the graphics one by however long the
+  // compute queue lags, so its (kMaxFramesInFlight-ago) valueB must
+  // be waited separately before this slot's chain cbs are rewritten.
+  if (impl.asyncActive && impl.frameSync.computeValue >= 2 * kMaxFramesInFlight)
+    impl.frameSync.waitCompute(
+        impl.device, impl.frameSync.computeValue - 2 * kMaxFramesInFlight + 2);
+  // Per-frame chain value bookkeeping (chainOnComputeQueue gates the
+  // frame submission's waits; zeroed until this frame submits a chain).
+  impl.chainValueA = impl.chainValueB = 0;
+  impl.chainSubmittedThisFrame = false;
 
   // Harvest this slot's previous timing queries (the wait above proves
   // they completed). Guarded until every slot has recorded at least one
@@ -429,8 +464,24 @@ void VulkanBackend::endFrame() {
         .value = signalValue,
         .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
     };
+    // M4.3: the chain's compute-timeline waits. valueB waits at
+    // ALL_COMMANDS here (headless frames have no decode draws whose
+    // stage mask could order it, and the test readbacks that follow
+    // must observe the completed chain).
+    VkSemaphoreSubmitInfo chainWaits[2] = {};
+    u32 chainWaitCount = 0;
+    if (impl.chainValueB != 0) {
+      chainWaits[chainWaitCount++] = VkSemaphoreSubmitInfo{
+          .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+          .semaphore = impl.frameSync.computeTimeline,
+          .value = impl.chainValueB,
+          .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+      };
+    }
     const VkSubmitInfo2 submit{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .waitSemaphoreInfoCount = chainWaitCount,
+        .pWaitSemaphoreInfos = chainWaits,
         .commandBufferInfoCount = 1,
         .pCommandBufferInfos = &cmdSubmit,
         .signalSemaphoreInfoCount = 1,
@@ -571,10 +622,32 @@ void VulkanBackend::endFrame() {
       .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
   };
   const VkSemaphoreSubmitInfo signals[2] = {presentSignal, timelineSignal};
+  // M4.3: the chain's compute-timeline waits, stage-masked to keep
+  // the overlap real - valueA gates only the HW draw's indirect
+  // command + vertex fetches (it may then run CONCURRENTLY with the
+  // still-executing SW raster; both atomically max the same
+  // VisBuffer), valueB gates the decode's fragment-stage vis read.
+  VkSemaphoreSubmitInfo waits[3] = {waitSubmit, {}, {}};
+  u32 waitCount = 1;
+  if (impl.chainValueB != 0) {
+    waits[waitCount++] = VkSemaphoreSubmitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = impl.frameSync.computeTimeline,
+        .value = impl.chainValueA,
+        .stageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+                     VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+    };
+    waits[waitCount++] = VkSemaphoreSubmitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = impl.frameSync.computeTimeline,
+        .value = impl.chainValueB,
+        .stageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+    };
+  }
   const VkSubmitInfo2 submit{
       .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-      .waitSemaphoreInfoCount = 1,
-      .pWaitSemaphoreInfos = &waitSubmit,
+      .waitSemaphoreInfoCount = waitCount,
+      .pWaitSemaphoreInfos = waits,
       .commandBufferInfoCount = 1,
       .pCommandBufferInfos = &cmdSubmit,
       .signalSemaphoreInfoCount = 2,
@@ -835,6 +908,12 @@ void VulkanBackend::destroyBuffer(u32 buffer) {
 bool VulkanBackend::readbackBuffer(u32 buffer, usize offset, usize bytes,
                                    std::vector<u8>& out) {
   if (!m_impl->buffers.valid(buffer)) return false;
+  // M4.3: the chain may still be executing on the compute queue -
+  // BufferStore's vkQueueWaitIdle targets the GRAPHICS queue only.
+  // Host-wait the chain timeline so the copy observes final values.
+  if (m_impl->asyncActive)
+    m_impl->frameSync.waitCompute(m_impl->device,
+                                  m_impl->frameSync.computeValue);
   return BufferStore::readback(
       m_impl->device, m_impl->frameSync.slots[0].commandPool,
       {m_impl->buffers.buffer(buffer), {}, m_impl->buffers.size(buffer)},
@@ -982,6 +1061,72 @@ void VulkanBackend::drawNullIndirect(u32 pipeline, const u32* bufferHandles,
   impl.cmd.endPass();
 }
 
+bool VulkanBackend::beginChain() {
+  Impl& impl = *m_impl;
+  if (!impl.asyncActive || !impl.frameActive || impl.chainSubmittedThisFrame)
+    return false;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  vkResetCommandBuffer(slot.computeCullCb, 0);
+  const VkCommandBufferBeginInfo beginInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+  if (!KE_VK(vkBeginCommandBuffer(slot.computeCullCb, &beginInfo)))
+    return false;
+  impl.computeOverride = slot.computeCullCb;
+  return true;
+}
+
+void VulkanBackend::submitChain() {
+  Impl& impl = *m_impl;
+  if (!impl.asyncActive || impl.computeOverride == VK_NULL_HANDLE) return;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (!KE_VK(vkEndCommandBuffer(slot.computeCullCb))) return;
+
+  // The chain waits the PREVIOUS chain's completion (it reads the
+  // HZB the last frame's tail built - same queue, but submissions
+  // carry no implicit dependencies) and signals this frame's value,
+  // which the graphics submission waits before the HW draw + decode.
+  const u64 prev = impl.frameSync.computeValue;
+  const u64 value = prev + 1;
+  const VkSemaphoreSubmitInfo waitInfo{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+      .semaphore = impl.frameSync.computeTimeline,
+      .value = prev,
+      .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+  };
+  const VkSemaphoreSubmitInfo signalInfo{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+      .semaphore = impl.frameSync.computeTimeline,
+      .value = value,
+      .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+  };
+  const VkCommandBufferSubmitInfo cmdSubmit{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+      .commandBuffer = slot.computeCullCb,
+  };
+  const VkSubmitInfo2 submit{
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .waitSemaphoreInfoCount = prev > 0 ? 1u : 0u,
+      .pWaitSemaphoreInfos = &waitInfo,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos = &cmdSubmit,
+      .signalSemaphoreInfoCount = 1,
+      .pSignalSemaphoreInfos = &signalInfo,
+  };
+  if (KE_VK(vkQueueSubmit2(impl.device.asyncComputeQueue, 1, &submit,
+                           VK_NULL_HANDLE))) {
+    impl.frameSync.computeValue = value;
+    impl.chainValueA = impl.chainValueB = value;
+    impl.chainSubmittedThisFrame = true;
+  }
+  impl.computeOverride = VK_NULL_HANDLE;
+}
+
+bool VulkanBackend::chainOnComputeQueue() const {
+  return m_impl->asyncActive && m_impl->chainValueB != 0;
+}
+
 void VulkanBackend::barrierGraphicsToCompute(u32 buffer) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || !impl.buffers.valid(buffer)) return;
@@ -1004,7 +1149,7 @@ void VulkanBackend::barrierGraphicsToCompute(u32 buffer) {
       .bufferMemoryBarrierCount = 1,
       .pBufferMemoryBarriers = &barrier,
   };
-  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+  vkCmdPipelineBarrier2(impl.rc(), &dep);
 }
 
 void VulkanBackend::barrierIndirectArgs(u32 buffer) {
@@ -1025,7 +1170,7 @@ void VulkanBackend::barrierIndirectArgs(u32 buffer) {
       .bufferMemoryBarrierCount = 1,
       .pBufferMemoryBarriers = &barrier,
   };
-  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+  vkCmdPipelineBarrier2(impl.rc(), &dep);
 }
 
 void VulkanBackend::barrierGraphicsRw(u32 buffer) {
@@ -1051,7 +1196,7 @@ void VulkanBackend::barrierGraphicsRw(u32 buffer) {
       .bufferMemoryBarrierCount = 1,
       .pBufferMemoryBarriers = &barrier,
   };
-  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+  vkCmdPipelineBarrier2(impl.rc(), &dep);
 }
 
 u32 VulkanBackend::createComputePipeline(const ComputePipelineInfo& info) {
@@ -1122,10 +1267,10 @@ void VulkanBackend::dispatchCompute(u32 pipeline, const u32* bufferHandles,
   vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
                          nullptr);
 
-  vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE,
-                          c.layout, 0, 1, &set, 0, nullptr);
-  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
-  vkCmdDispatch(impl.cmd.cmd(), groupsX, groupsY, groupsZ);
+  vkCmdBindDescriptorSets(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c.layout,
+                          0, 1, &set, 0, nullptr);
+  vkCmdBindPipeline(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
+  vkCmdDispatch(impl.rc(), groupsX, groupsY, groupsZ);
 }
 
 void VulkanBackend::dispatchComputeIndirect(u32 pipeline,
@@ -1159,7 +1304,7 @@ void VulkanBackend::dispatchComputeIndirect(u32 pipeline,
         .bufferMemoryBarrierCount = 1,
         .pBufferMemoryBarriers = &argsBarrier,
     };
-    vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+    vkCmdPipelineBarrier2(impl.rc(), &dep);
   }
 
   std::vector<VkDescriptorBufferInfo> infos(bufferCount);
@@ -1184,10 +1329,10 @@ void VulkanBackend::dispatchComputeIndirect(u32 pipeline,
     };
   vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
                          nullptr);
-  vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE,
-                          c.layout, 0, 1, &set, 0, nullptr);
-  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
-  vkCmdDispatchIndirect(impl.cmd.cmd(), impl.buffers.buffer(countBuffer),
+  vkCmdBindDescriptorSets(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c.layout,
+                          0, 1, &set, 0, nullptr);
+  vkCmdBindPipeline(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
+  vkCmdDispatchIndirect(impl.rc(), impl.buffers.buffer(countBuffer),
                         static_cast<VkDeviceSize>(countOffset));
 }
 
@@ -1211,6 +1356,12 @@ u32 VulkanBackend::lastCompletedFrameSlot() const {
 void VulkanBackend::bufferBarrier(u32 buffer, bool toFragment) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || !impl.buffers.valid(buffer)) return;
+  // A toFragment barrier inside the async chain's command buffer is
+  // illegal (the compute-only family has no fragment stage) and
+  // meaningless - the chain-to-graphics handoff is the compute
+  // timeline wait on the frame submission. Drop it there; the
+  // fragment ordering still rides the timeline.
+  if (toFragment && impl.computeOverride != VK_NULL_HANDLE) return;
   const VkPipelineStageFlags2 dstStage =
       toFragment ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
                  : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -1229,7 +1380,7 @@ void VulkanBackend::bufferBarrier(u32 buffer, bool toFragment) {
       .bufferMemoryBarrierCount = 1,
       .pBufferMemoryBarriers = &barrier,
   };
-  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+  vkCmdPipelineBarrier2(impl.rc(), &dep);
 }
 
 void VulkanBackend::fillBuffer(u32 buffer, u32 value) {
@@ -1255,7 +1406,7 @@ void VulkanBackend::fillBuffer(u32 buffer, u32 value) {
       .bufferMemoryBarrierCount = 1,
       .pBufferMemoryBarriers = &warBarrier,
   };
-  vkCmdPipelineBarrier2(impl.cmd.cmd(), &warDep);
+  vkCmdPipelineBarrier2(impl.rc(), &warDep);
   const VkBufferMemoryBarrier2 barrier{
       .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
       .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -1272,13 +1423,13 @@ void VulkanBackend::fillBuffer(u32 buffer, u32 value) {
       .bufferMemoryBarrierCount = 1,
       .pBufferMemoryBarriers = &barrier,
   };
-  vkCmdFillBuffer(impl.cmd.cmd(), impl.buffers.buffer(buffer), 0, VK_WHOLE_SIZE,
+  vkCmdFillBuffer(impl.rc(), impl.buffers.buffer(buffer), 0, VK_WHOLE_SIZE,
                   value);
   // Self-contained: the fill's TRANSFER write is ordered after every
   // prior compute access and before any subsequent compute
   // read/write of the buffer (callers never need a manual barrier
   // around a fill).
-  vkCmdPipelineBarrier2(impl.cmd.cmd(), &dep);
+  vkCmdPipelineBarrier2(impl.rc(), &dep);
 }
 
 void VulkanBackend::draw(u32 pipeline, u32 meshHandle, const DrawData& data) {

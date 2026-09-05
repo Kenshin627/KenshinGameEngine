@@ -36,6 +36,11 @@ struct VulkanContext {
   u32 graphicsFamily = 0xFFFFFFFFu;
   u32 computeFamily = 0xFFFFFFFFu;
   u32 transferFamily = 0xFFFFFFFFu;
+  // M4.3 async compute: a compute-only family, or - when the
+  // graphics family also exposes compute with queueCount >= 2 - a
+  // second queue from it (sameFamilyAsyncCompute).
+  u32 asyncComputeFamily = 0xFFFFFFFFu;
+  bool sameFamilyAsyncCompute = false;
 
   /// @param enableValidation  add VK_LAYER_KHRONOS_validation + debug messenger
   /// @param needSurface       add instance-level surface extensions (Win32)

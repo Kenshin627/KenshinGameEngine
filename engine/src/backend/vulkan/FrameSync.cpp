@@ -1,8 +1,8 @@
 #include "FrameSync.h"
 
+#include "Vk.h"
 #include "VulkanDevice.h"
 #include "kenshin/core/Log.h"
-#include "Vk.h"
 
 KENSHIN_NS_BEGIN
 
@@ -18,7 +18,7 @@ bool FrameSync::init(const VulkanDevice& device, bool timestamps) {
         .queueFamilyIndex = device.graphicsFamily,
     };
     if (!KE_VK(vkCreateCommandPool(device.device, &poolInfo, nullptr,
-                            &slot.commandPool)))
+                                   &slot.commandPool)))
       return false;
 
     const VkCommandBufferAllocateInfo allocInfo{
@@ -28,14 +28,14 @@ bool FrameSync::init(const VulkanDevice& device, bool timestamps) {
         .commandBufferCount = 1,
     };
     if (!KE_VK(vkAllocateCommandBuffers(device.device, &allocInfo,
-                                 &slot.commandBuffer)))
+                                        &slot.commandBuffer)))
       return false;
 
     const VkSemaphoreCreateInfo semInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
     if (!KE_VK(vkCreateSemaphore(device.device, &semInfo, nullptr,
-                          &slot.imageAvailable)))
+                                 &slot.imageAvailable)))
       return false;
 
     if (timestamps) {
@@ -45,7 +45,7 @@ bool FrameSync::init(const VulkanDevice& device, bool timestamps) {
           .queryCount = 3,
       };
       if (!KE_VK(vkCreateQueryPool(device.device, &queryInfo, nullptr,
-                            &slot.timingQueries)))
+                                   &slot.timingQueries)))
         return false;
     }
   }
@@ -60,8 +60,60 @@ bool FrameSync::init(const VulkanDevice& device, bool timestamps) {
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
       .pNext = &timelineType,
   };
-  return KE_VK(vkCreateSemaphore(device.device, &timelineInfo, nullptr,
-                                 &frameTimeline));
+  return KE_VK(
+      vkCreateSemaphore(device.device, &timelineInfo, nullptr, &frameTimeline));
+}
+
+bool FrameSync::initAsyncCompute(const VulkanDevice& device) {
+  if (device.asyncComputeQueue == VK_NULL_HANDLE) return false;
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
+    FrameSlot& slot = slots[i];
+    const VkCommandPoolCreateInfo poolInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = device.asyncComputeFamily,
+    };
+    if (!KE_VK(vkCreateCommandPool(device.device, &poolInfo, nullptr,
+                                   &slot.computePool)))
+      return false;
+    const VkCommandBufferAllocateInfo allocInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = slot.computePool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    if (!KE_VK(vkAllocateCommandBuffers(device.device, &allocInfo,
+                                        &slot.computeCullCb)))
+      return false;
+    if (!KE_VK(vkAllocateCommandBuffers(device.device, &allocInfo,
+                                        &slot.computeRasterCb)))
+      return false;
+  }
+  const VkSemaphoreTypeCreateInfo timelineType{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+      .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+      .initialValue = 0,
+  };
+  const VkSemaphoreCreateInfo timelineInfo{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      .pNext = &timelineType,
+  };
+  if (!KE_VK(vkCreateSemaphore(device.device, &timelineInfo, nullptr,
+                               &computeTimeline)))
+    return false;
+  asyncComputeActive = true;
+  return true;
+}
+
+bool FrameSync::waitCompute(const VulkanDevice& device, u64 value) const {
+  if (computeTimeline == VK_NULL_HANDLE || value == 0) return true;
+  const VkSemaphoreWaitInfo wait{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+      .semaphoreCount = 1,
+      .pSemaphores = &computeTimeline,
+      .pValues = &value,
+  };
+  return KE_VK(vkWaitSemaphores(device.device, &wait, UINT64_MAX));
 }
 
 void FrameSync::shutdown(const VulkanDevice& device) {
@@ -72,6 +124,11 @@ void FrameSync::shutdown(const VulkanDevice& device) {
       vkDestroySemaphore(device.device, slot.imageAvailable, nullptr);
       slot.imageAvailable = VK_NULL_HANDLE;
     }
+    if (slot.computePool != VK_NULL_HANDLE) {
+      vkDestroyCommandPool(device.device, slot.computePool, nullptr);
+      slot.computePool = VK_NULL_HANDLE;
+      slot.computeCullCb = slot.computeRasterCb = VK_NULL_HANDLE;
+    }
     if (slot.commandPool != VK_NULL_HANDLE) {
       vkDestroyCommandPool(device.device, slot.commandPool, nullptr);
       slot.commandPool = VK_NULL_HANDLE;
@@ -80,6 +137,10 @@ void FrameSync::shutdown(const VulkanDevice& device) {
       vkDestroyQueryPool(device.device, slot.timingQueries, nullptr);
       slot.timingQueries = VK_NULL_HANDLE;
     }
+  }
+  if (computeTimeline != VK_NULL_HANDLE) {
+    vkDestroySemaphore(device.device, computeTimeline, nullptr);
+    computeTimeline = VK_NULL_HANDLE;
   }
   if (frameTimeline != VK_NULL_HANDLE) {
     vkDestroySemaphore(device.device, frameTimeline, nullptr);
