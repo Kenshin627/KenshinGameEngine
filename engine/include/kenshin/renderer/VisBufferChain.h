@@ -149,6 +149,7 @@ class VisBufferChain {
   glm::vec3 m_prevCam[kSlots]{};
   u32 m_aabbBuffer = ~0u;  // runtime-derived per-cluster AABBs (static)
   u32 m_instanceCount = 0, m_maxPairs = 0;
+  u32 m_clusterCount = 0, m_indexCount = 0, m_positionCount = 0;
   u32 m_width = 0, m_height = 0;
 };
 

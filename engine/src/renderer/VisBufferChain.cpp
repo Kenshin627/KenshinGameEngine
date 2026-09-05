@@ -107,6 +107,9 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
 
   m_instanceCount = static_cast<u32>(instances.size());
   m_maxPairs = maxPairs;
+  m_clusterCount = static_cast<u32>(clusterData.size() / 48);
+  m_indexCount = static_cast<u32>(indices.size());
+  m_positionCount = static_cast<u32>(positions4.size());
   m_width = width;
   m_height = height;
 
@@ -287,7 +290,11 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     const glm::mat4 vpHw = in.proj * in.view;
     for (int c = 0; c < 4; ++c) hp[c] = vpHw[c];
   }
-  hp[4] = glm::vec4(f32(in.width), f32(in.height), 0.0f, 0.0f);
+  // [4].zw / [5].x: the pool bounds every payload-driven index in the
+  // HW VS clamps into (the decode-pass device-lost workaround).
+  hp[4] = glm::vec4(f32(in.width), f32(in.height), f32(m_clusterCount),
+                    f32(m_indexCount));
+  hp[5] = glm::vec4(f32(m_positionCount), 0.0f, 0.0f, 0.0f);
   {
     // rasterize_sw's params (float4[12]): [0..3] view, [4..7] proj
     // (glm raw), [8] = (w, h, pairCount(unused by the guard), nearZ),

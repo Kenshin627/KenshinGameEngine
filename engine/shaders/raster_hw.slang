@@ -27,7 +27,13 @@
 //   0: float4 params[8] - [0..3] viewProj columns (glm raw, the
 //                         camera's Y-FLIPPED matrix - framebuffer rows
 //                         match the VisBuffer's convention),
-//                         [4] = (width, height, 0, 0)
+//                         [4] = (width, height, clusterCount,
+//                                indexCount), [5].x = positionCount
+//                         (every payload-driven index is CLAMPED into
+//                         these bounds - the driver device-losts on
+//                         multi-level payload-dependent addressing
+//                         chains, the decode pass's documented
+//                         workaround)
 //   1: uint2 hwPairs[]  - the routed (instanceIdx, clusterIdx) list
 //   2: GpuCluster clusters[] - 48B, mirrors packGpuCluster
 //   3: float4 positions[] - shared mesh-local vertex pool
@@ -94,22 +100,32 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
   o.q1 = float2(0.0, 0.0);
   o.q2 = float2(0.0, 0.0);
 
+  // Clamp EVERY payload-driven index into its pool's proven range
+  // (params[4].zw / [5].x): this driver device-losts on the
+  // multi-level addressing chain, the decode pass's workaround.
   const uint2 item = hwPairs[instanceId];
-  const GpuCluster cluster = clusters[item.y];
+  const uint clusterCount = max(uint(params[4].z), 1u);
+  const uint indexCount = max(uint(params[4].w), 1u);
+  const uint positionCount = max(uint(params[5].x), 1u);
+  const uint2 itemC =
+      uint2(min(item.x, 31u), min(item.y, clusterCount - 1u));
+  const GpuCluster cluster = clusters[itemC.y];
   const uint tri = vertexId / 3u;
   const uint corner = vertexId - tri * 3u;
 
-  if (tri < cluster.indexCount / 3u) {
+  if (tri < min(cluster.indexCount, 3u * kMaxTrisPerCluster) / 3u) {
     // NOTE: glm stores column-major and Slang reads the buffer vec4s
     // as rows - every transform below is an explicit combination of
     // the stored columns (the project-wide convention).
-    const float4x4 model = instances[item.x].model;
+    const float4x4 model = instances[itemC.x].model;
     const float4x4 vpCols = float4x4(params[0], params[1], params[2],
                                      params[3]);
     float2 q[3];
     for (uint k = 0; k < 3u; ++k) {
-      const uint vi = indices[cluster.indexOffset + tri * 3u + k];
-      const float3 lp = positions[cluster.vertexOffset + vi].xyz;
+      const uint ii = min(cluster.indexOffset + tri * 3u + k, indexCount - 1u);
+      const uint vi = min(indices[ii] + cluster.vertexOffset,
+                          positionCount - 1u);
+      const float3 lp = positions[vi].xyz;
       const float3 wp = model[0].xyz * lp.x + model[1].xyz * lp.y +
                         model[2].xyz * lp.z + model[3].xyz;
       const float4 clip = params[0] * wp.x + params[1] * wp.y +
@@ -123,9 +139,11 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
       if (k == corner) o.pos = clip;
     }
     // The SAME packPixel payload the SW rasterizer writes: cluster
-    // 20b | triangle 7b | instance 5b.
-    o.payload = ((item.y & 0xFFFFFu) << 12) | ((tri & 0x7Fu) << 5) |
-                (item.x & 0x1Fu);
+    // 20b | triangle 7b | instance 5b (the CLAMPED indices - a stale
+    // pair past the count renders wrong geometry for one frame
+    // instead of dying).
+    o.payload = ((itemC.y & 0xFFFFFu) << 12) | ((tri & 0x7Fu) << 5) |
+                (itemC.x & 0x1Fu);
     // Every vertex emits the full quantized triangle -> each varying
     // is constant across the triangle (flat interpolation of equal
     // values), so the PS sees the exact geometry it needs.
@@ -173,7 +191,10 @@ void psMain(HwVsOut i) {
     return;  // helper lanes / tie pixels owned by the other side
 
   const uint W = uint(params[4].x);
-  const uint2 pixel = uint2(i.pos.xy);
+  const uint H = max(uint(params[4].y), 1u);
+  const uint2 pixel =
+      uint2(min(uint(i.pos.x), uint(params[4].x) - 1u),
+            min(uint(i.pos.y), H - 1u));
   const float z = clamp(i.pos.z, 0.0, 1.0);
   const uint depthBits = uint((1.0 - z) * 4294967295.0);
   const uint64_t packed = (uint64_t(depthBits) << 32) | uint64_t(i.payload);
