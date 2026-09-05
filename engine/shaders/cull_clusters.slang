@@ -246,14 +246,19 @@ bool occluded(uint2 item, float4x4 model)
       const float3 c = model[0].xyz * cluster.bounds.x +
                        model[1].xyz * cluster.bounds.y +
                        model[2].xyz * cluster.bounds.z + model[3].xyz;
-      const float dist =
-          max(distance(c, params[0].xyz) - cluster.bounds.w * maxScale,
-              0.1);
+      const float sphereR = cluster.bounds.w * maxScale;
+      const float dist = max(distance(c, params[0].xyz) - sphereR, 0.1);
+      // Near-plane guard: a cluster whose bounds sphere reaches the
+      // near plane stays on SW - its crossing triangles need the
+      // Sutherland-Hodgman clip; the HW VS's screen-space quantized
+      // varyings go NaN on w<=0 corners and its PS drops the whole
+      // triangle (holes at close range).
+      if (dist < sphereR + params[1].z) hw = false;
       const float pxPerUnit =
           (params[6].z * 0.5) / (max(params[6].w, 1e-6) * dist);
       const float edgePx =
           aabbs[3u * item.y + 2u].x * maxScale * pxPerUnit;
-      hw = edgePx >= params[7].y;
+      hw = hw && edgePx >= params[7].y;
     }
     if (hw) {
       uint hs = 0;

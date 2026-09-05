@@ -558,11 +558,12 @@ int main(int argc, char** argv) {
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
         chain.execute(*vgBackend, ci);
 
-        // Panel stats: sample the chain counters every 8th frame (the
-        // readback is blocking - per-frame would reintroduce stalls).
-        if (frame % 8 == 0) {
+        // Panel stats: NON-BLOCKING mapped snapshot (the blocking
+        // readStats submits+idles the queue - periodic calls degraded
+        // presentation 5x over ~2k frames; see readStatsMapped).
+        {
           kenshin::u32 cs[13];
-          if (chainReady && chain.readStats(*vgBackend, cs)) {
+          if (chainReady && chain.readStatsMapped(*vgBackend, cs)) {
             vgDebug.visibleClusters = cs[2];
             vgDebug.cutTris = cs[11];
             vgDebug.pxWrites = cs[5] + cs[10];  // main + post raster

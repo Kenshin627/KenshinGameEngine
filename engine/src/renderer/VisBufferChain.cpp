@@ -257,7 +257,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   std::memset(backend.mappedPtr(m_expCnt[slot]), 0, 8);
   glm::vec4 cullParams[8];
   cullParams[0] = glm::vec4(in.camPos, in.pixelThreshold);
-  cullParams[1] = glm::vec4(in.worldPerPixel, 0.0f, 0.0f, 0.0f);
+  cullParams[1] = glm::vec4(in.worldPerPixel, 0.0f, in.nearZ, 0.0f);
   for (int c = 0; c < 4; ++c)
     cullParams[2 + c] =
         occActive ? m_prevVP[prevSlot][c] : glm::vec4(c == 0 ? 1.0f : 0.0f);
@@ -496,6 +496,35 @@ bool VisBufferChain::readStats(backend::IRenderBackend& backend,
   out[11] = cc[6];                              // cut tris (main + revived)
   out[12] = cc[7];                              // HW-routed clusters
   return true;
+}
+
+bool VisBufferChain::readStatsMapped(backend::IRenderBackend& backend,
+                                     u32 out[13]) const {
+  // The counter buffers are HOST_VISIBLE + persistently mapped; the
+  // worst a read can be is one frame stale (panels cannot tell). The
+  // last COMPLETED frame's slot holds settled values.
+  const u32 slot = backend.lastCompletedFrameSlot();
+  if (slot == 0xFFFFFFFFu) return false;
+  const u32* cc = static_cast<const u32*>(backend.mappedPtr(m_cullCnt[slot]));
+  const u32* rc = static_cast<const u32*>(backend.mappedPtr(m_rasterCnt[slot]));
+  const u32* prc =
+      static_cast<const u32*>(backend.mappedPtr(m_postRasterCnt[slot]));
+  const u32* ac = static_cast<const u32*>(backend.mappedPtr(m_cntA[slot]));
+  const u32* e = static_cast<const u32*>(backend.mappedPtr(m_expCnt[slot]));
+  out[0] = ac ? ac[0] : 0;
+  out[1] = e ? e[0] : 0;
+  out[2] = cc ? cc[0] : 0;
+  out[3] = cc ? cc[1] : 0;
+  out[4] = cc ? cc[2] : 0;
+  out[5] = rc ? rc[1] : 0;
+  out[6] = rc ? rc[2] : 0;
+  out[7] = rc ? rc[3] : 0;
+  out[8] = cc ? cc[4] : 0;
+  out[9] = cc ? cc[5] : 0;
+  out[10] = prc ? prc[1] : 0;
+  out[11] = cc ? cc[6] : 0;
+  out[12] = cc ? cc[7] : 0;
+  return cc != nullptr;
 }
 
 bool VisBufferChain::readIndirectArgs(backend::IRenderBackend& backend,

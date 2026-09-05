@@ -88,6 +88,14 @@ class VisBufferChain {
   /// [9] post-pass revived, [10] post-raster px writes,
   /// [11] cut tris (main + revived).
   bool readStats(backend::IRenderBackend& backend, u32 out[13]) const;
+  /// NON-BLOCKING stats snapshot for panels: memcpy straight off the
+  /// per-slot HOST-VISIBLE counter maps (no submit, no idle - the
+  /// values trail the GPU by however much the driver's writes lag,
+  /// which a debug panel cannot tell apart). The blocking readStats
+  /// stays for tests; calling IT periodically from the frame loop
+  /// degrades presentation progressively (measured: 6 queued idles
+  /// every 8 frames -> 5x frame-time growth over ~2k frames).
+  bool readStatsMapped(backend::IRenderBackend& backend, u32 out[13]) const;
   /// Debug probe: the three indirect dispatch commands as written by
   /// the conversions (x = group count).
   bool readIndirectArgs(backend::IRenderBackend& backend, u32 expandX[3],
