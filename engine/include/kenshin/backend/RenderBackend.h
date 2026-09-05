@@ -273,6 +273,9 @@ class IRenderBackend {
   /// True when the last submitChain ran on the compute queue (the
   /// frame submission then waits the chain's completion).
   virtual bool chainOnComputeQueue() const = 0;
+  /// M4.4 A/B: force the chain back onto the graphics queue even
+  /// when an async compute queue exists (frame-time comparisons).
+  virtual void setAsyncChainEnabled(bool enabled) = 0;
   /// Draw the fullscreen triangle in the CURRENT frame scope.
   /// bufferHandles[i] binds to SSBO binding i (as declared by the FS);
   /// `push` is copied into the 128-byte push block.

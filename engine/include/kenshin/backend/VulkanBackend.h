@@ -53,6 +53,7 @@ class VulkanBackend final : public IRenderBackend {
   bool beginChain() override;
   void submitChain() override;
   bool chainOnComputeQueue() const override;
+  void setAsyncChainEnabled(bool enabled) override;
   void drawFullscreen(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                       const void* push, usize pushBytes) override;
   u32 createComputePipeline(const ComputePipelineInfo& info) override;

@@ -1127,6 +1127,12 @@ bool VulkanBackend::chainOnComputeQueue() const {
   return m_impl->asyncActive && m_impl->chainValueB != 0;
 }
 
+void VulkanBackend::setAsyncChainEnabled(bool enabled) {
+  // Takes effect from the NEXT beginChain; an in-flight chain's
+  // waits stay armed on the frame submission regardless.
+  m_impl->asyncActive = m_impl->frameSync.asyncComputeActive && enabled;
+}
+
 void VulkanBackend::barrierGraphicsToCompute(u32 buffer) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || !impl.buffers.valid(buffer)) return;

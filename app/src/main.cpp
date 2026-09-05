@@ -121,6 +121,7 @@ struct Args {
   bool baseline = false;     // CPU-cut LOD preview (the pre-M3.4 default)
   bool checker = false;      // UV checkerboard debug view (decode path)
   bool noOcclusion = false;  // A/B: disable the occlusion cull chain
+  bool noAsync = false;      // M4.4 A/B: chain onto the graphics queue
   bool multi = false;        // S4.6 acceptance: near/mid/far instances
   bool dense = false;        // M3.4 acceptance: front-back occluders
   int grid = 0;              // --grid N: N-instance occlusion carpet
@@ -161,6 +162,8 @@ Args parseArgs(int argc, char** argv) {
       args.checker = true;
     else if (std::strcmp(argv[i], "--no-occ") == 0)
       args.noOcclusion = true;
+    else if (std::strcmp(argv[i], "--no-async") == 0)
+      args.noAsync = true;
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
@@ -226,18 +229,21 @@ struct VgDebugState {
   kenshin::f32 coveragePct = 0.0f;
   std::vector<float> clusterHist, triHist, coverHist;
   std::vector<float> occHist, reviveHist;  // M3.4: occlusion curves
+  std::vector<float> hwHist;               // M4.4: HW-routing curve
   void pushHistory() {
     clusterHist.push_back(static_cast<float>(visibleClusters));
     triHist.push_back(static_cast<float>(cutTris));
     coverHist.push_back(coveragePct);
     occHist.push_back(static_cast<float>(occCulled));
     reviveHist.push_back(static_cast<float>(revived));
+    hwHist.push_back(static_cast<float>(hwClusters));
     if (clusterHist.size() > 240) {
       clusterHist.erase(clusterHist.begin());
       triHist.erase(triHist.begin());
       coverHist.erase(coverHist.begin());
       occHist.erase(occHist.begin());
       reviveHist.erase(reviveHist.begin());
+      hwHist.erase(hwHist.begin());
     }
   }
 };
@@ -452,6 +458,9 @@ int main(int argc, char** argv) {
           ImGui::PlotLines("##revive", vgDebug.reviveHist.data(),
                            int(vgDebug.reviveHist.size()), 0, nullptr, 0.0f,
                            1500.0f, ImVec2(240, 40));
+          ImGui::PlotLines("##hw", vgDebug.hwHist.data(),
+                           int(vgDebug.hwHist.size()), 0, nullptr, 0.0f,
+                           1500.0f, ImVec2(240, 40));
           ImGui::End();
         }
       });
@@ -477,6 +486,7 @@ int main(int argc, char** argv) {
   if (virtualPath) {
     vgScene = &engine.get<kenshin::renderer::VirtualGeometryScene>();
     vgBackend = &engine.get<kenshin::backend::IRenderBackend>();
+    if (args.noAsync) vgBackend->setAsyncChainEnabled(false);  // M4.4 A/B
   }
 
   // --cam: fixed initial pose for the S4.6 acceptance screenshots
