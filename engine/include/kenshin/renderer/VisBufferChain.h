@@ -120,11 +120,16 @@ class VisBufferChain {
   u32 m_pipeHzbFinal = ~0u;     // M3.3: HZB #2 (post-pass-inclusive)
   u32 m_pipeHwRaster = ~0u;     // M4.2: null-attachment graphics pass
   u32 m_pipeCountToDraw = ~0u;  // M4.2: counters[7] -> draw command
-  // M4 follow-up: pending-gated post section (the flag conversion +
-  // the compute-side pyramid clears - no TRANSFER fills in the frame).
+  // M4 follow-up: pending-gated post section (the flag conversion)
+  // + the level-by-level HZB reduction (the atomic climb's
+  // same-address apex contention cost milliseconds at real sizes).
+  // One REDUCE pipeline per LEVEL-slot pair usage: #1 (flag-gated,
+  // indirect) and #2 (always-on, direct) each need their OWN set per
+  // LEVEL (the per-level params buffer differs within one frame).
+  static constexpr u32 kMaxHzbLevels = 16;
   u32 m_pipeCountToFlag = ~0u;  // counters[4] -> {G|0,1,1}
-  u32 m_pipeClear1 = ~0u;       // indirect, flag-gated (build #1)
-  u32 m_pipeClear2 = ~0u;       // direct, always-on (build #2)
+  u32 m_pipeReduce1[kMaxHzbLevels] = {};
+  u32 m_pipeReduce2[kMaxHzbLevels] = {};
   u32 m_instanceBuffer = ~0u, m_meshRangeBuffer = ~0u;
   u32 m_clusterBuffer = ~0u, m_groupBuffer = ~0u;
   u32 m_positionBuffer = ~0u, m_indexBuffer = ~0u;
@@ -141,6 +146,13 @@ class VisBufferChain {
   u32 m_argsExpand[kSlots]{}, m_argsCull[kSlots]{}, m_argsRaster[kSlots]{};
   u32 m_argsPostRaster[kSlots]{};
   u32 m_argsHzb1[kSlots]{};  // the flag: {fullscreenGroups|0,1,1}
+  // Per-level reduce params (baked per resolution in resize): one
+  // vec4 per level = (childW, childH, childOffset, dstOffset); the
+  // L0 pass uses (0, 0, 0, 0).
+  u32 m_hzbLevelParams[kMaxHzbLevels]{};
+  u32 m_hzbLevelTexels[kMaxHzbLevels]{};
+  u32 m_hzbLevelCount = 0;
+  u32 m_hzbL0Groups = 0;  // the flag size (largest dispatch)
   // M3.3 post pass (per slot): the Main cull's occluded items, the
   // revived subset, its raster counters, and the post cull's params
   // (current-frame viewProj - the preliminary HZB's space).
