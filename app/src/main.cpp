@@ -117,8 +117,9 @@ struct Args {
   std::string screenshot;
   std::string screenshotUi;  // full window incl. ImGui
   bool virtualPath = false;  // accepted no-op since M3.4: kgeo defaults
-                             // to the virtual chain (--baseline opts out)
-  bool baseline = false;     // CPU-cut LOD preview (the pre-M3.4 default)
+                             // to the virtual chain
+  bool baseline = false;     // accepted no-op since M4.4: the CPU-cut
+                             // render path retired (--virtual twin)
   bool checker = false;      // UV checkerboard debug view (decode path)
   bool noOcclusion = false;  // A/B: disable the occlusion cull chain
   bool noAsync = false;      // M4.4 A/B: chain onto the graphics queue
@@ -157,7 +158,7 @@ Args parseArgs(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--virtual") == 0)
       args.virtualPath = true;
     else if (std::strcmp(argv[i], "--baseline") == 0)
-      args.baseline = true;
+      args.baseline = true;  // no-op: CPU-cut path retired at M4.4
     else if (std::strcmp(argv[i], "--checker") == 0)
       args.checker = true;
     else if (std::strcmp(argv[i], "--no-occ") == 0)
@@ -226,6 +227,9 @@ struct VgDebugState {
   kenshin::u32 hwClusters = 0;
   kenshin::u32 workItems = 0, tooCoarse = 0, srcTooCoarse = 0;
   bool occlusion = true;
+  kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
+                                       // (moved off KgeoPreview at the
+                                       // M4.4 CPU-cut retirement)
   kenshin::f32 coveragePct = 0.0f;
   std::vector<float> clusterHist, triHist, coverHist;
   std::vector<float> occHist, reviveHist;  // M3.4: occlusion curves
@@ -309,14 +313,14 @@ int main(int argc, char** argv) {
   else if (args.checker)
     vgDebug.viewMode = 4;  // checker = DecodeView::Checker
 
-  // ---- .kgeo LOD preview (S3.4) ---------------------------------------
+  // ---- .kgeo data source (S3.4; CPU-cut render half retired M4.4) ---
   demo::KgeoPreview kgeoPreview;
   bool kgeoMode = false;
   if (!args.kgeo.empty()) {
     std::string kgeoLog;
     if (demo::loadKgeo(args.kgeo, kgeoPreview, kgeoLog)) {
       kgeoMode = true;
-      kgeoPreview.pixelThreshold = args.lodThreshold;
+      vgDebug.pixelThreshold = args.lodThreshold;
 
       // S4.1: the dag also goes to the GPU-resident virtual geometry
       // pools (cluster/group tables + shared vertex/index pools), CRC
@@ -328,10 +332,10 @@ int main(int argc, char** argv) {
       vgScene.flushPools();
       vgScene.setInstances(
           {kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}});
-      // M3.4 retirement step 1: kgeo defaults to the virtual chain;
-      // --baseline opts into the CPU-cut LOD preview (the A/B
-      // reference until the cut path is deleted).
-      if (!args.baseline) {
+      // M4.4 CPU-cut retirement: kgeo IS the virtual chain; the
+      // chain instances are set up unconditionally (--baseline is a
+      // logged no-op for old scripts).
+      {
         const kenshin::renderer::VgMeshRange& mesh = vgScene.meshes()[vgMeshId];
         const auto makeInst = [&](const glm::mat4& model) {
           kenshin::renderer::CullGpuInstance inst;
@@ -427,9 +431,9 @@ int main(int argc, char** argv) {
         for (kenshin::u32 i = 0; i < chainInstances.size(); ++i)
           chainMeshRanges.push_back({mesh.clusterBegin, mesh.clusterEnd});
       }
-      overlay.setExtraPanel([&kgeoPreview, &vgDebug, &args] {
+      overlay.setExtraPanel([&kgeoPreview, &vgDebug] {
         demo::drawLodPanel(kgeoPreview);
-        if (!args.baseline) {
+        {
           ImGui::Begin("Virtual Geometry");
           const char* names[] = {"final",     "LOD level", "error heat",
                                  "triangles", "checker",   "clusters"};
@@ -443,6 +447,8 @@ int main(int argc, char** argv) {
               vgDebug.coveragePct, vgDebug.occCulled, vgDebug.revived,
               vgDebug.hwClusters);
           ImGui::Checkbox("occlusion", &vgDebug.occlusion);
+          ImGui::SliderFloat("pixel error", &vgDebug.pixelThreshold, 0.05f,
+                             32.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
                            int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
                            1200.0f, ImVec2(240, 40));
@@ -480,7 +486,8 @@ int main(int argc, char** argv) {
   // The S4.x chain/decode APIs are engine-side renderer code that speaks
   // the backend interface; resolved from the registry the same way the
   // scene's own onInit does.
-  const bool virtualPath = kgeoMode && !args.baseline;
+  const bool virtualPath = kgeoMode;  // the only kgeo path since the
+                                      // M4.4 CPU-cut retirement
   kenshin::renderer::VirtualGeometryScene* vgScene = nullptr;
   kenshin::backend::IRenderBackend* vgBackend = nullptr;
   if (virtualPath) {
@@ -566,10 +573,6 @@ int main(int argc, char** argv) {
       cameraChecked = true;
     }
 
-    if (kgeoMode)
-      demo::updateCut(kgeoPreview, meshPool, camera, controller,
-                      static_cast<kenshin::u32>(vp.y));
-
     // Assemble this frame's draw stream (pure data; the renderer layer
     // consumes it between beginFrame and endFrame).
     const bool drawable = vp.x > 1.0f && vp.y > 1.0f;
@@ -579,10 +582,6 @@ int main(int argc, char** argv) {
         items.push_back({shape.handle,
                          glm::translate(glm::mat4(1.0f), shape.offset),
                          shape.kd});
-    } else if (kgeoMode && !virtualPath && drawable &&
-               kgeoPreview.meshHandle != kenshin::assets::kInvalidMeshHandle) {
-      items.push_back({kgeoPreview.meshHandle, glm::mat4(1.0f),
-                       glm::vec3(0.75f, 0.75f, 0.78f)});
     }
 
     const kenshin::renderer::FrameView view{
@@ -611,7 +610,7 @@ int main(int argc, char** argv) {
         ci.proj = camera.projMatrix();
         ci.nearZ = camera.nearPlane();
         ci.camPos = camera.position();
-        ci.pixelThreshold = kgeoPreview.pixelThreshold;
+        ci.pixelThreshold = vgDebug.pixelThreshold;
         ci.worldPerPixel = 2.0f *
                            std::tan(glm::radians(controller.fovYDeg) * 0.5f) /
                            static_cast<kenshin::f32>(vp.y);
