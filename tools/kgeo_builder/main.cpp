@@ -98,9 +98,10 @@ int main(int argc, char** argv) {
   }
   KENSHIN_INFO(
       "[builder] dag: {} clusters, {} groups, {} levels, {} roots, "
-      "{} monotonic fixes",
+      "{} monotonic fixes, hierarchy {} nodes (root {})",
       dagStats.clusterCount, dagStats.groupCount, dagStats.maxLevel,
-      dagStats.rootCount, dagStats.monotonicFixes);
+      dagStats.rootCount, dagStats.monotonicFixes, dag.hierarchyNodes.size(),
+      dag.hierarchyRoot);
 
   if (!kenshin::geometry::writeKGeo(output, dag, log)) {
     KENSHIN_ERROR("write failed: {}", log);

@@ -3,6 +3,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <filesystem>
+#include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -120,4 +122,49 @@ TEST_CASE("dag monotonic fixes reported", "[geometry][dag]") {
   // Either raw errors were already monotonic (0 fixes) or we raised some;
   // the invariant check is the real gate; just exercise the counter.
   REQUIRE(built.stats.monotonicFixes >= 0);
+}
+
+TEST_CASE("dag hierarchy (BVH8) invariants", "[geometry][dag]") {
+  // Structural facts (leaf-per-group, AABB/error bounds, tree shape) are
+  // enforced by verifyDagInvariants inside assemble - the REQUIRE(build)
+  // already gates them. Here: shape sanity the verifier does not assume.
+  for (const auto& mesh :
+       {kenshin::geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f),
+        kenshin::geometry::SphereGeometry::create(96, 48, 1.0f)}) {
+    Built built;
+    REQUIRE(buildProc(mesh, built));
+    INFO("log: " << built.log);
+    const auto& dag = built.dag;
+    // 1 leaf per group + internal nodes (8-ary: ~(G-1)/7 of them).
+    REQUIRE(dag.hierarchyNodes.size() >= dag.groups.size());
+    REQUIRE(dag.hierarchyNodes.size() < 2 * dag.groups.size());
+    REQUIRE(dag.hierarchyRoot == dag.hierarchyNodes.size() - 1);
+
+    // Every group appears as a leaf exactly once.
+    std::vector<kenshin::u32> leafHits(dag.groups.size(), 0);
+    std::function<void(kenshin::u32, kenshin::u32)> walk =
+        [&](kenshin::u32 nodeIdx, kenshin::u32 depth) {
+          const auto& node = dag.hierarchyNodes[nodeIdx];
+          if (node.childCount == 0) {
+            ++leafHits[node.children[0]];
+            REQUIRE(depth <= 8);  // log8(hundreds of groups) + slack
+            return;
+          }
+          REQUIRE(node.childCount >= 2);  // no single-child chains
+          for (kenshin::u32 i = 0; i < node.childCount; ++i)
+            walk(node.children[i], depth + 1);
+        };
+    walk(dag.hierarchyRoot, 1);
+    for (kenshin::u32 g = 0; g < dag.groups.size(); ++g)
+      REQUIRE(leafHits[g] == 1);
+
+    // Terminal groups (FLT_MAX simplify error) keep every subtree that
+    // contains one unprunable - the max must propagate to the root.
+    bool anyTerminal = false;
+    for (const auto& group : dag.groups)
+      anyTerminal |= group.simplifyError >= std::numeric_limits<float>::max();
+    if (anyTerminal)
+      REQUIRE(dag.hierarchyNodes[dag.hierarchyRoot].maxSimplifyError >=
+              std::numeric_limits<float>::max());
+  }
 }

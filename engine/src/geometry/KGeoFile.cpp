@@ -11,8 +11,8 @@ KENSHIN_NS_BEGIN
 namespace geometry {
 
 namespace {
-constexpr u32 kMagic = 0x314F474B;  // "KGO1"
-constexpr u32 kVersion = 1;
+constexpr u32 kMagic = 0x324F474B;  // "KGO2"
+constexpr u32 kVersion = 2;
 
 #pragma pack(push, 4)
 struct FileHeader {
@@ -28,6 +28,8 @@ struct FileHeader {
   u32 hasUvs;
   u32 sourceVertexCount;
   u32 sourceTriangleCount;
+  u32 hierarchyNodeCount;  // v2 (M5.1): the group BVH8
+  u32 hierarchyRoot;
 };
 
 struct GroupDisk {
@@ -56,6 +58,10 @@ struct ClusterDisk {
   u32 isRoot;
   u32 refinedGroup;  // clodCluster::refined, 0xFFFFFFFF = -1
 };
+
+// v2 (M5.1): the group BVH8 nodes, flat on disk exactly as the engine
+// struct (leaf = one group; see ClusterDag.h).
+static_assert(sizeof(DagHierarchyNode) == 64, "hierarchy node layout");
 #pragma pack(pop)
 
 /// Span arrays are packed end-inclusively: offsets[i] = start of
@@ -140,13 +146,16 @@ bool writeKGeo(const std::string& path, const ClusterDag& dag,
       .hasUvs = dag.uvs.size() / 2 == dag.positions.size() / 3 ? 1u : 0u,
       .sourceVertexCount = dag.sourceVertexCount,
       .sourceTriangleCount = dag.sourceTriangleCount,
+      .hierarchyNodeCount = static_cast<u32>(dag.hierarchyNodes.size()),
+      .hierarchyRoot = dag.hierarchyRoot,
   };
 
   const bool ok =
       std::fwrite(&header, sizeof(header), 1, file) == 1 &&
       writeVector(file, groups) && writeVector(file, clusters) &&
       writeVector(file, childIndices) && writeVector(file, memberIndices) &&
-      writeVector(file, parentIndices) && writeVector(file, dag.roots) &&
+      writeVector(file, parentIndices) &&
+      writeVector(file, dag.hierarchyNodes) && writeVector(file, dag.roots) &&
       writeVector(file, dag.positions) &&
       (header.hasNormals == 0 || writeVector(file, dag.normals)) &&
       (header.hasUvs == 0 || writeVector(file, dag.uvs)) &&
@@ -189,6 +198,7 @@ bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log) {
   }
   if (!readVector(file, memberIndices, memberTotal) ||
       !readVector(file, parentIndices, parentTotal) ||
+      !readVector(file, dag.hierarchyNodes, header.hierarchyNodeCount) ||
       !readVector(file, dag.roots, header.rootCount) ||
       !readVector(file, dag.positions, usize(header.poolVertexCount) * 3)) {
     log = "truncated (members/parents/roots/positions)";
@@ -253,6 +263,7 @@ bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log) {
   }
   dag.sourceVertexCount = header.sourceVertexCount;
   dag.sourceTriangleCount = header.sourceTriangleCount;
+  dag.hierarchyRoot = header.hierarchyRoot;
 
   return verifyDagInvariants(dag, log);
 }

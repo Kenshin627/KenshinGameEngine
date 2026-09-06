@@ -62,10 +62,35 @@ struct DagGroup {
   std::vector<u32> parents;   // groups whose clusters refined into us
 };
 
+/// M5.1: BVH8 node over ALL groups - the spatial acceleration view for
+/// hierarchical culling (Nanite builds its BVH over ClusterGroupParts; the
+/// DAG itself stays untouched - "any grouping structure works" since the LOD
+/// test only needs each node's own error data). Leaf = one group:
+/// childCount == 0 and children[0] = the group index; that group's clusters
+/// are a contiguous range of ClusterDag::clusters (assembly appends them
+/// per group, verifyDagInvariants enforces it) - M5.2's traversal emits
+/// pairs from the range without any member-index upload.
+/// The AABB conservatively boxes the subtree's group bounds SPHERES, and
+/// maxSimplifyError is the max over the subtree (terminal groups hold
+/// FLT_MAX, so subtrees containing them can never be LOD-pruned - exactly
+/// the "cut must reach the roots" safety). Flat 64 B, GPU-upload ready;
+/// bit packing is M7's business.
+struct DagHierarchyNode {
+  f32 aabbMin[3] = {0.0f, 0.0f, 0.0f};
+  f32 aabbMax[3] = {0.0f, 0.0f, 0.0f};
+  f32 maxSimplifyError = 0.0f;
+  u32 childCount = 0;    // 0 = leaf
+  u32 children[8] = {};  // node indices; leaf: children[0] = group index
+};
+
 struct ClusterDag {
   std::vector<DagCluster> clusters;
   std::vector<DagGroup> groups;
   std::vector<u32> roots;  // root cluster indices
+
+  // M5.1: the BVH8 over `groups` (single root; empty before M5.1 assembly).
+  std::vector<DagHierarchyNode> hierarchyNodes;
+  u32 hierarchyRoot = 0xFFFFFFFFu;
 
   // Cluster-local pools (positions/normals/uvs interleaved per vertex).
   std::vector<f32> positions;  // 3 per vertex
@@ -97,11 +122,18 @@ struct DagBuildStats {
 /// buildClusterLod's emit callback order: groups arrive in build order,
 /// groupId >= 0 identifies each; parent linkage via Cluster::parentGroupId).
 /// `mesh` supplies the vertex attributes referenced by cluster indices.
-/// On failure returns false with a message in `log`.
+/// Also builds the group BVH8 (M5.1). On failure returns false with a
+/// message in `log`.
 bool assembleClusterDag(const kenshin::assets::MeshData& mesh,
                         const std::vector<struct ClusterGroup>& builtGroups,
                         ClusterDag& dag, DagBuildStats& stats,
                         std::string& log);
+
+/// Build the BVH8 over `dag.groups` into `dag.hierarchyNodes/hierarchyRoot`
+/// (called by assembleClusterDag after the dominance pass; exposed for
+/// tests). Longest-axis median split into up to 8 contiguous chunks per
+/// node, leaf = single group. No SAH yet - measure first (M5 plan).
+bool buildGroupHierarchy(ClusterDag& dag, std::string& log);
 
 /// Structural invariants (used by tests and the LOD preview gate).
 bool verifyDagInvariants(const ClusterDag& dag, std::string& log);

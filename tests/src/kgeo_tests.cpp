@@ -58,6 +58,22 @@ TEST_CASE("kgeo roundtrip sphere", "[geometry][kgeo]") {
   }
   REQUIRE(loaded.indices == dag.indices);
   REQUIRE(loaded.positions == dag.positions);
+
+  // v2 (M5.1): the group BVH8 roundtrips exactly.
+  REQUIRE(loaded.hierarchyNodes.size() == dag.hierarchyNodes.size());
+  REQUIRE(loaded.hierarchyRoot == dag.hierarchyRoot);
+  for (kenshin::usize n = 0; n < dag.hierarchyNodes.size(); ++n) {
+    const auto& a = dag.hierarchyNodes[n];
+    const auto& b = loaded.hierarchyNodes[n];
+    REQUIRE(a.childCount == b.childCount);
+    REQUIRE(a.maxSimplifyError == b.maxSimplifyError);
+    for (int k = 0; k < 3; ++k) {
+      REQUIRE(a.aabbMin[k] == b.aabbMin[k]);
+      REQUIRE(a.aabbMax[k] == b.aabbMax[k]);
+    }
+    for (kenshin::u32 i = 0; i < 8; ++i)
+      REQUIRE(a.children[i] == b.children[i]);
+  }
   std::remove("out/roundtrip.kgeo");
 }
 
