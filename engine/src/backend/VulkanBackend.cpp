@@ -817,12 +817,7 @@ namespace backend
             if (slot.offscreen.image == VK_NULL_HANDLE ||
                 slot.imguiTextureImage == slot.offscreen.image)
                 continue;
-            if (slot.imguiTexture)
-            {
-                ImGui_ImplVulkan_RemoveTexture(
-                    static_cast<VkDescriptorSet>(slot.imguiTexture));
-                slot.imguiTexture = nullptr;
-            }
+            // PROBE leak: keep the old set + image alive (no free, no destroy)
                 KENSHIN_INFO("[telemetry] RemoveTexture slot={} frame={}", i,
                              m_impl ? m_impl->probeFrame : 0);
             KENSHIN_INFO("[telemetry] AddTexture slot={}", i);

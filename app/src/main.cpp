@@ -154,7 +154,7 @@ namespace
 {
     struct UiState
     {
-        ImVec2 viewportSize {1280.0f, 720.0f};
+        ImVec2 viewportSize {300.0f, 200.0f};  // PROBE: fixed-size offscreen, never resizes
         bool viewportHovered = false;
         int controllerIndex = 0; // 0 orbit, 1 first person
     };

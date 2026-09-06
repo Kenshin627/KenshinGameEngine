@@ -81,6 +81,9 @@ namespace backend
                 anyStale = true;
         if (!anyStale)
             return true;
+        if (std::getenv("KENSHIN_PROBE_NORESIZE") &&  // PROBE: keep the first-created offscreen forever
+            slots[0].offscreen.image != VK_NULL_HANDLE)
+            return true;
 
         // The other in-flight slot's command buffer may still reference the
         // old targets; a resize is rare, so a full idle wait is fine here.
@@ -91,7 +94,7 @@ namespace backend
             FrameSlot& slot = slots[i];
             if (slot.offscreen.matches(width, height, format))
                 continue;
-            slot.offscreen.destroy(device.allocator, device.device);
+            // PROBE leak: old offscreen intentionally kept alive (no destroy)
             if (!slot.offscreen.create(device.allocator, device.device, width, height,
                                        format, usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
