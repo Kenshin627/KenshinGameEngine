@@ -12,10 +12,9 @@
 //                                               decode (the default path
 //                                               since M3.4; the VisBuffer
 //                                               renders in-frame)
-//   KENSHINDemo --kgeo path.kgeo --baseline    the CPU-cut LOD preview
-//                                               (pre-M3.4 default; A/B
-//                                               reference until the cut
-//                                               path retires)
+//   KENSHINDemo --kgeo path.kgeo --baseline    no-op (the CPU-cut
+//                                               preview retired at M4.4;
+//                                               parses for old scripts)
 //   KENSHINDemo --kgeo path.kgeo --checker     UV checkerboard view
 //                                               (--virtual still parses,
 //                                               a no-op for old scripts)

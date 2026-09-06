@@ -79,7 +79,7 @@
 （随手记，格式：`- [ ] 事项 —— 备注/日期`）
 
 - [x] HZB 遮挡体侧"盒光栅"调研 ✅ 2026-09-05 撤销：查证 nanite.md D4.1——**UE5 官方 HZB = 深度缓冲 min 归约金字塔（reversed-Z 下 2×2 取最远），无包围盒光栅进 mip 的操作**；边缘保守带（背景像素=0 污染 tile min）是官方接受的保守性，D4.3 明言"cluster 粒度 HiZ 无法像素级遮挡融合"是 Nanite 已知缺陷。我们的逐级归约 + ≤4×4 mip 测试已与 D4.1/D4.2 逐条一致，无算法差距。远距剔除收益的正解 = 场景侧大遮挡体（--wall 演示场景），不是改金字塔（曾误记"Nanite 式盒光栅"并当成既定技术路线，已纠正——教训：把想法标上引擎出处之前先查主文档核实）
-- [ ] **CONCURRENT 共享是雷点（用户 2026-09-05 判定）**：M4.3 为跨队列族（graphics family 0 + async compute family 2）把 BufferStore 全部缓冲改成 VK_SHARING_MODE_CONCURRENT——①"UE5 同款"说法**未证实**（训练记忆印象，Epic 仓库访问受限无法核对，已撤回归因，依据降级为规范论证）；② CONCURRENT 在部分驱动/硬件上并非零成本（放弃压缩优化等），且掩盖了本应显式建模的跨队列依赖；③ 改完 CONCURRENT 后三测试仍失败，后经隔离实验定位真凶与跨队列无关（HZB#2 warmup 帧 vis 无序 + 双链同帧同 cb 重 begin 竞态，均已修，47 用例绿）——CONCURRENT 本身未被证伪但也未被单独验证过收益/成本，雷点判定维持，后续重审时以显式 ownership transfer 或同族第二队列为对照做干净 A/B
+- [x] **CONCURRENT 共享雷点复审 ✅ 2026-09-06**（用户 2026-09-05 判定雷点，本条为约定的对照 A/B）：KENSHIN_SAME_FAMILY_ASYNC 环境变量强制 async 链用同族第二队列（family 0 index 1，缓冲保持 EXCLUSIVE、零跨族共享）与默认跨族（family 2 compute-only，CONCURRENT）同二进制对照——**两种变体各自 47 用例全绿、画面逐字节一致**；性能：跨族 CONCURRENT 全面更快（knot 273 vs 250=+9%、wall@15 1153 vs 998=+16%、wall@25 1301 vs 1268=+3%）——同族第二队列共享图形引擎硬件、只有提交级并发且与 graphics 争引擎。结论：本机（RTX 5060 Ti）保留跨族 CONCURRENT，依据=自有测量而非"UE5 同款"（该出处说法维持撤回）；环境变量留作其他硬件复测入口。显式 ownership transfer 变体未做（同族对照已给出数量级：跨引擎收益 > 共享模式成本，transfer 的屏障税只会更差）
 
 - [ ] CommandContext 记 last-bound 状态（pipeline/顶点/索引缓冲），`draw()` 跳过重复绑定——当前每帧 draw 数个位数、驱动对冗余绑定有优化，纯属顺手加固；改动只在 backend 内部，不动 API —— 2026-09-02
 - [x] one-shot 链入帧化 ✅（VisBufferChain 即此产物，M3 系列全量入帧；one-shot 路径留作差分参照——M2 后续不再需要，2026-09-06 清理）

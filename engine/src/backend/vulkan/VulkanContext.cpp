@@ -7,6 +7,7 @@
 #define NOMINMAX
 #include <Windows.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -314,8 +315,15 @@ void VulkanContext::selectQueueFamilies() {
                    : asyncCompute != 0xFFFFFFFFu ? asyncCompute
                                                  : graphicsFamily;
   // M4.3 async compute: a compute-only family (true second engine on
-  // some hardware) or a second queue from the graphics family.
-  asyncComputeFamily = asyncCompute;
+  // some hardware) or a second queue from the graphics family. The
+  // KENSHIN_SAME_FAMILY_ASYNC env var forces the same-family variant -
+  // the A/B against the cross-family CONCURRENT-sharing default (the
+  // todoList risk-point review).
+  const bool forceSameFamily =
+      std::getenv("KENSHIN_SAME_FAMILY_ASYNC") != nullptr;
+  asyncComputeFamily =
+      (asyncCompute != 0xFFFFFFFFu && !forceSameFamily) ? asyncCompute
+                                                        : 0xFFFFFFFFu;
   sameFamilyAsyncCompute =
       asyncComputeFamily == 0xFFFFFFFFu &&
       (families[graphicsFamily].queueFlags & VK_QUEUE_COMPUTE_BIT) &&

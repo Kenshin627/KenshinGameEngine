@@ -152,6 +152,9 @@ bool VulkanDevice::init(const VulkanContext& context) {
   } else if (sameFamilyAsyncCompute) {
     asyncFamily = graphicsFamily;
     asyncIndex = 1;
+    // The compute pools/queue fetch below key off asyncComputeFamily;
+    // resolve it to the actual family in use.
+    asyncComputeFamily = graphicsFamily;
   }
   if (asyncFamily != 0xFFFFFFFFu) {
     bool covered = false;
