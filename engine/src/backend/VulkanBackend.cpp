@@ -63,6 +63,9 @@ struct VulkanBackend::Impl {
   Swapchain swapchain;
   FrameSync frameSync;
   StagingRing staging;  // per-frame dynamic data slices (M2 consumer)
+  // ImGui texture sets of retired offscreens, freed after a delay in
+  // beginFrame (see FrameSync::retired for the driver hazard).
+  std::vector<std::pair<void*, u64>> retiredImguiSets;
   bool frameActive = false;
   u32 activeWidth = 0;
   u32 activeHeight = 0;
@@ -243,6 +246,9 @@ void VulkanBackend::shutdown() {
   // or validation flags them destroyed-while-in-use.
   if (m_impl->device.device != VK_NULL_HANDLE)
     KE_VK(vkDeviceWaitIdle(m_impl->device.device));
+  for (auto& [set, frame] : m_impl->retiredImguiSets)
+    ImGui_ImplVulkan_RemoveTexture(static_cast<VkDescriptorSet>(set));
+  m_impl->retiredImguiSets.clear();
   if (m_impl->imguiInited) {
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplWin32_Shutdown();
@@ -341,6 +347,22 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
     return false;
   ensureViewportTextures();
+  impl.frameSync.drainRetired(impl.device);
+  {
+    // ImGui sets of retired offscreens are freed a few frames later too
+    // (same driver hazard as FrameSync::retired).
+    constexpr u64 kSetRetireDelay = 8;
+    for (u64 k = 0; k < impl.retiredImguiSets.size();) {
+      if (impl.frameSync.frameCounter - impl.retiredImguiSets[k].second >=
+          kSetRetireDelay) {
+        ImGui_ImplVulkan_RemoveTexture(
+            static_cast<VkDescriptorSet>(impl.retiredImguiSets[k].first));
+        impl.retiredImguiSets.erase(impl.retiredImguiSets.begin() + k);
+      } else {
+        ++k;
+      }
+    }
+  }
 
   // Acquire; rebuild once on out-of-date (e.g. window resize). The
   // headless path has nothing to acquire.
@@ -702,9 +724,12 @@ void VulkanBackend::ensureViewportTextures() {
     if (slot.offscreen.image == VK_NULL_HANDLE ||
         slot.imguiTextureImage == slot.offscreen.image)
       continue;
+    // Retire the old set (freed in beginFrame once aged) instead of freeing
+    // it here: same recently-sampled-resource driver hazard as the retired
+    // offscreen images in FrameSync.
     if (slot.imguiTexture) {
-      ImGui_ImplVulkan_RemoveTexture(
-          static_cast<VkDescriptorSet>(slot.imguiTexture));
+      m_impl->retiredImguiSets.push_back(
+          {slot.imguiTexture, m_impl->frameSync.frameCounter});
       slot.imguiTexture = nullptr;
     }
     slot.imguiTexture = ImGui_ImplVulkan_AddTexture(

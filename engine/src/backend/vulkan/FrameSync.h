@@ -7,6 +7,8 @@
 
 #include <volk.h>
 
+#include <vector>
+
 #include "DeletionQueue.h"
 #include "GpuImage.h"
 #include "kenshin/Common.h"
@@ -76,8 +78,23 @@ struct FrameSync {
   u64 computeValue = 0;             // value of the last signaled chain submit
   bool asyncComputeActive = false;  // queue + pools created
 
+  // Resized-out offscreen targets are retired, not destroyed: destroying a
+  // recently-sampled image mid-loop wedges the NVIDIA no-validation present
+  // path even after vkDeviceWaitIdle (isolated 2026-09-06: destroy+free at
+  // the frame-1 viewport resize = DEVICE_LOST; deferring both = clean).
+  // Destroyed once kRetireDelay frames have passed.
+  struct RetiredTarget {
+    GpuImage image;
+    u64 retireFrame = 0;
+  };
+  std::vector<RetiredTarget> retired;
+  u64 frameCounter = 0;
+
   bool init(const VulkanDevice& device, bool timestamps);
   void shutdown(const VulkanDevice& device);
+
+  /// Destroy retired offscreen targets that have aged past the delay.
+  void drainRetired(const VulkanDevice& device);
 
   /// M4.3: per-slot compute pools + cull/raster command buffers and
   /// the compute timeline. No-op (false) when the device lacks an
@@ -91,8 +108,8 @@ struct FrameSync {
   /// Block the host until the timeline reaches `value`.
   bool waitTimeline(const VulkanDevice& device, u64 value) const;
 
-  /// (Re)create offscreen targets for the given size/format when they
-  /// do not match. Destroys old ones first.
+  /// (Re)create offscreen targets for the given size/format when they do
+  /// not match. Old targets are retired (see RetiredTarget).
   bool ensureOffscreens(const VulkanDevice& device, u32 width, u32 height,
                         VkFormat format, VkImageUsageFlags usage);
 

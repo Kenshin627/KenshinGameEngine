@@ -117,6 +117,8 @@ bool FrameSync::waitCompute(const VulkanDevice& device, u64 value) const {
 }
 
 void FrameSync::shutdown(const VulkanDevice& device) {
+  for (auto& r : retired) r.image.destroy(device.allocator, device.device);
+  retired.clear();
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
     FrameSlot& slot = slots[i];
     slot.offscreen.destroy(device.allocator, device.device);
@@ -158,6 +160,19 @@ bool FrameSync::waitTimeline(const VulkanDevice& device, u64 value) const {
   return KE_VK(vkWaitSemaphores(device.device, &wait, UINT64_MAX));
 }
 
+void FrameSync::drainRetired(const VulkanDevice& device) {
+  ++frameCounter;
+  constexpr u64 kRetireDelay = 8;
+  for (u64 k = 0; k < retired.size();) {
+    if (frameCounter - retired[k].retireFrame >= kRetireDelay) {
+      retired[k].image.destroy(device.allocator, device.device);
+      retired.erase(retired.begin() + k);
+    } else {
+      ++k;
+    }
+  }
+}
+
 bool FrameSync::ensureOffscreens(const VulkanDevice& device, u32 width,
                                  u32 height, VkFormat format,
                                  VkImageUsageFlags usage) {
@@ -167,14 +182,14 @@ bool FrameSync::ensureOffscreens(const VulkanDevice& device, u32 width,
     if (!slots[i].offscreen.matches(width, height, format)) anyStale = true;
   if (!anyStale) return true;
 
-  // The other in-flight slot's command buffer may still reference the
-  // old targets; a resize is rare, so a full idle wait is fine here.
-  KE_VK(vkDeviceWaitIdle(device.device));
-
+  // Old targets are RETIRED, not destroyed: in-flight frames may still
+  // sample them, and destroying a recently-sampled image mid-loop wedges
+  // the NVIDIA no-validation present path (see RetiredTarget in the
+  // header). drainRetired() destroys them once aged past the delay.
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
     FrameSlot& slot = slots[i];
     if (slot.offscreen.matches(width, height, format)) continue;
-    slot.offscreen.destroy(device.allocator, device.device);
+    retired.push_back({slot.offscreen, frameCounter});
     if (!slot.offscreen.create(device.allocator, device.device, width, height,
                                format, usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
