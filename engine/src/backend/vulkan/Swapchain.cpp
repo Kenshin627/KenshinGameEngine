@@ -121,7 +121,11 @@ namespace backend
         std::vector<VkPresentModeKHR> modes(modeCount);
         vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &modeCount, modes.data());
         VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
-        for (const auto mode : modes)
+        // PROBE F: KENSHIN_PRESENT_FIFO=1 forces FIFO to test the
+        // MAILBOX+dynamic-rendering interaction.
+        const bool forceFifo = std::getenv("KENSHIN_PRESENT_FIFO") != nullptr;
+        if (!forceFifo)
+          for (const auto mode : modes)
             if (mode == VK_PRESENT_MODE_MAILBOX_KHR) { presentMode = mode; break; }
         m_presentModeName = presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO";
 

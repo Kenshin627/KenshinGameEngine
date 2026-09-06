@@ -309,6 +309,7 @@ namespace backend
         FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
         const VkImage dstImage = impl.swapchain.images[impl.swapchain.imageIndex];
 
+        vkDeviceWaitIdle(impl.device.device);  // PROBE C: drain before ImGui writes
         ImDrawData* drawData = nullptr;
         if (impl.imguiInited)
         {
@@ -343,6 +344,7 @@ namespace backend
         };
         vkCmdBeginRendering(slot.commandBuffer, &renderingInfo);
         if (drawData && drawData->CmdListsCount > 0)
+            // PROBE A: ImGui draw disabled - empty UI pass only
             ImGui_ImplVulkan_RenderDrawData(drawData, slot.commandBuffer);
         vkCmdEndRendering(slot.commandBuffer);
 
@@ -813,7 +815,7 @@ namespace backend
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
             .maxSets = 64,
-            .poolSizeCount = 2,
+            .poolSizeCount = 3,  // PROBE D: all three sizes counted
             .pPoolSizes = poolSizes,
         };
         if (vkCreateDescriptorPool(impl.device.device, &poolInfo, nullptr,

@@ -748,6 +748,7 @@ static void ImGui_ImplVulkan_DestroyTexture(ImTextureData* tex)
 
 void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
 {
+    fprintf(stderr, "[PROBE] enter UpdateTexture status=%d\n", (int)tex->Status);
     if (tex->Status == ImTextureStatus_OK)
         return;
     ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
@@ -942,7 +943,9 @@ void ImGui_ImplVulkan_UpdateTexture(ImTextureData* tex)
             check_vk_result(err);
         }
 
+        fprintf(stderr, "[PROBE] before waitIdle\n");
         err = vkQueueWaitIdle(v->Queue); // FIXME-OPT: Suboptimal!
+        fprintf(stderr, "[PROBE] after waitIdle\n");
         check_vk_result(err);
         vkDestroyBuffer(v->Device, upload_buffer, v->Allocator);
         vkFreeMemory(v->Device, upload_buffer_memory, v->Allocator);
