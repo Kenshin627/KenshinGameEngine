@@ -40,6 +40,8 @@ namespace backend
 
         // Full-frame capture (UI included; dev/visual checks only)
         bool captureFull = false;
+        u64 probeFrame = 0;
+
         bool fullCaptured = false;
         VkBuffer captureStaging = VK_NULL_HANDLE;
         VmaAllocation captureAlloc = VK_NULL_HANDLE;
@@ -229,7 +231,21 @@ namespace backend
 
         FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
 
-        vkWaitForFences(impl.device.device, 1, &slot.inFlight, VK_TRUE, UINT64_MAX);
+        if (vkWaitForFences(impl.device.device, 1, &slot.inFlight, VK_TRUE,
+                            UINT64_MAX) != VK_SUCCESS)
+        {
+            u32 n = 16;
+            VkCheckpointDataNV cpdata[16]{};
+            for (u32 i = 0; i < n; ++i)
+                cpdata[i].sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV;
+            vkGetQueueCheckpointDataNV(impl.device.graphicsQueue, &n, cpdata);
+            for (u32 i = 0; i < n; ++i)
+                KENSHIN_ERROR("[cp:fence] stage={} marker={}", (int)cpdata[i].stage,
+                              cpdata[i].pCheckpointMarker
+                                  ? static_cast<const char*>(cpdata[i].pCheckpointMarker)
+                                  : "(null)");
+            return false;
+        }
         vkResetFences(impl.device.device, 1, &slot.inFlight);
 
         // (Re)create per-frame offscreen targets on size/format change.
@@ -301,6 +317,11 @@ namespace backend
 
     void VulkanBackend::endFrame()
     {
+        const u64 pf = ++m_impl->probeFrame;
+        static const char* kCp1 = "cp:pre-ui-barrier";
+        static const char* kCp2 = "cp:pre-imgui";
+        static const char* kCp3 = "cp:post-imgui";
+        static const char* kCp4 = "cp:pre-submit";
         Impl& impl = *m_impl;
         if (!impl.frameActive)
             return;
@@ -319,6 +340,7 @@ namespace backend
 
         // swapchain image: UNDEFINED -> COLOR_ATTACHMENT (ImGui draws the
         // whole window through dynamic rendering).
+        vkCmdSetCheckpointNV(slot.commandBuffer, kCp1);
         recordBarrier(slot.commandBuffer,
                       imageBarrier(dstImage, VK_IMAGE_LAYOUT_UNDEFINED,
                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -343,10 +365,15 @@ namespace backend
             .pColorAttachments = &colorAttachment,
         };
         vkCmdBeginRendering(slot.commandBuffer, &renderingInfo);
+        vkCmdSetCheckpointNV(slot.commandBuffer, kCp2);
         if (drawData && drawData->CmdListsCount > 0)
-            // PROBE A: ImGui draw disabled - empty UI pass only
             ImGui_ImplVulkan_RenderDrawData(drawData, slot.commandBuffer);
+        vkCmdSetCheckpointNV(slot.commandBuffer, kCp3);
         vkCmdEndRendering(slot.commandBuffer);
+        if (drawData && pf < 40)
+            KENSHIN_INFO("[telemetry] f={} lists={} vtx={} idx={}", pf,
+                         drawData->CmdListsCount, drawData->TotalVtxCount,
+                         drawData->TotalIdxCount);
 
         // swapchain image: COLOR_ATTACHMENT -> PRESENT (via a capture copy
         // when a full-frame screenshot was requested).
@@ -386,6 +413,7 @@ namespace backend
                                        VK_ACCESS_2_MEMORY_READ_BIT));
         }
 
+        vkCmdSetCheckpointNV(slot.commandBuffer, kCp4);
         if (vkEndCommandBuffer(slot.commandBuffer) != VK_SUCCESS)
         {
             KENSHIN_ERROR("[vulkan] vkEndCommandBuffer failed");
@@ -418,6 +446,18 @@ namespace backend
         if (vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, slot.inFlight) != VK_SUCCESS)
         {
             KENSHIN_ERROR("[vulkan] vkQueueSubmit2 failed");
+            {
+                u32 n = 16;
+                VkCheckpointDataNV cpdata[16]{};
+                for (u32 i = 0; i < n; ++i)
+                    cpdata[i].sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV;
+                vkGetQueueCheckpointDataNV(impl.device.graphicsQueue, &n, cpdata);
+                for (u32 i = 0; i < n; ++i)
+                    KENSHIN_ERROR("[cp] stage={} marker={}", (int)cpdata[i].stage,
+                                  cpdata[i].pCheckpointMarker
+                                      ? static_cast<const char*>(cpdata[i].pCheckpointMarker)
+                                      : "(null)");
+            }
             return;
         }
 
@@ -783,6 +823,9 @@ namespace backend
                     static_cast<VkDescriptorSet>(slot.imguiTexture));
                 slot.imguiTexture = nullptr;
             }
+                KENSHIN_INFO("[telemetry] RemoveTexture slot={} frame={}", i,
+                             m_impl ? m_impl->probeFrame : 0);
+            KENSHIN_INFO("[telemetry] AddTexture slot={}", i);
             slot.imguiTexture = ImGui_ImplVulkan_AddTexture(
                 slot.offscreen.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             slot.imguiTextureImage = slot.offscreen.image;

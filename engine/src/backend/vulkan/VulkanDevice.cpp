@@ -8,6 +8,7 @@
 #include <vma/vk_mem_alloc.h>
 #pragma warning(pop)
 
+#include <cstring>
 #include <vector>
 
 KENSHIN_NS_BEGIN
@@ -102,6 +103,33 @@ namespace backend
         std::vector<const char*> deviceExtensions;
         if (context.surfaceEnabled)
             deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+        // PROBE telemetry: NV diagnostic checkpoints if present
+        {
+            u32 extCount = 0;
+            vkEnumerateDeviceExtensionProperties(context.physicalDevice, nullptr,
+                                                 &extCount, nullptr);
+            std::vector<VkExtensionProperties> exts(extCount);
+            vkEnumerateDeviceExtensionProperties(context.physicalDevice, nullptr,
+                                                 &extCount, exts.data());
+            for (const auto& e : exts)
+                if (std::strcmp(e.extensionName,
+                                VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME) == 0)
+                    deviceExtensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        }
+        {
+            u32 extCount = 0;
+            vkEnumerateDeviceExtensionProperties(context.physicalDevice, nullptr,
+                                                 &extCount, nullptr);
+            std::vector<VkExtensionProperties> exts(extCount);
+            vkEnumerateDeviceExtensionProperties(context.physicalDevice, nullptr,
+                                                 &extCount, exts.data());
+            for (const auto& e : exts) {
+                if (std::strcmp(e.extensionName,
+                                VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME) == 0)
+                    deviceExtensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+            }
+        }
 
         const VkDeviceCreateInfo createInfo {
             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,

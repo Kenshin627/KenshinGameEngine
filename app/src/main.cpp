@@ -166,24 +166,87 @@ namespace
                 kenshin::scene::OrbitCameraController& orbit,
                 kenshin::scene::FirstPersonCameraController& firstPerson)
     {
+        // PROBE MIN-UI: engine draws only the minimal probe window (plus the
+        // viewport Image) - isolates UI content volume from the frame path.
+        // UILEVEL bits: 1=dockspace, 2=stats panel, 4=camera widgets.
+        if (const char* lvl = std::getenv("KENSHIN_PROBE_UILEVEL"))
+        {
+            const int level = std::atoi(lvl);
+            if (level & 1)
+                ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
+                                             ImGuiDockNodeFlags_PassthruCentralNode);
+            ImGui::Begin(std::getenv("KENSHIN_PROBE_ASVP") ? "Viewport" : "probe");
+            ImGui::Text("frame ui minimal");
+            static int clicked = 0;
+            if (ImGui::Button("click")) ++clicked;
+            ImGui::Text("clicked %d", clicked);
+            static float pl[120] = {};
+            ImGui::PlotLines("##ms", pl, 120, 0, nullptr, 0.0f, 50.0f, ImVec2(0, 60));
+            const ImVec2 avail0 = ImGui::GetContentRegionAvail();
+            if (avail0.x >= 1.0f && avail0.y >= 1.0f)
+                ui.viewportSize = avail0;  // PROBE: enable the resize/recreate path
+            if (viewportTexture && avail0.x >= 1.0f && avail0.y >= 1.0f)
+                ImGui::Image(ImTextureRef(viewportTexture), avail0);
+            ImGui::End();
+            if (level & 2)
+            {
+                ImGui::Begin("Frame Stats");
+                ImGui::Text("FPS %.1f", stats.fps());
+                ImGui::Text("avg  %.3f ms", stats.averageMs());
+                ImGui::Text("std  %.3f ms", stats.stddevMs());
+                ImGui::Text("max  %.3f ms", stats.maxMs());
+                ImGui::Text("samples %zu", stats.count());
+                ImGui::Separator();
+                static float intervals[240] = {};
+                kenshin::usize count = 0;
+                stats.copyTo(intervals, count);
+                if (count > 1)
+                    ImGui::PlotLines("##intervals", intervals, static_cast<int>(count), 0,
+                                     nullptr, 0.0f, 50.0f, ImVec2(0, 60));
+                ImGui::End();
+            }
+            if (level & 4)
+            {
+                ImGui::Begin("Camera");
+                const char* items[] = { orbit.name(), firstPerson.name() };
+                int ci = 0;
+                ImGui::Combo("controller", &ci, items, 2);
+                ImGui::SliderFloat("yaw", &camera.yawDeg, -180.0f, 180.0f, "%.1f deg");
+                ImGui::SliderFloat("pitch", &camera.pitchDeg, -89.0f, 89.0f, "%.1f deg");
+                ImGui::SliderFloat("fov", &camera.fovYDeg, 20.0f, 120.0f, "%.0f deg");
+                ImGui::SliderFloat("distance", &orbit.distance, 0.1f, 200.0f, "%.2f m");
+                ImGui::DragFloat3("target", &orbit.target.x, 0.05f);
+                const glm::vec3 pos = camera.position;
+                ImGui::Text("pos (%.2f, %.2f, %.2f)", pos.x, pos.y, pos.z);
+                ImGui::End();
+            }
+            return;
+        }
+
         // Full-window dockspace host: every panel (viewport included) can be
         // dragged out, docked, split; layout persists across sessions.
         ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
                                      ImGuiDockNodeFlags_PassthruCentralNode);
 
         // ---- Viewport panel --------------------------------------------
+        if (!std::getenv("KENSHIN_PROBE_NOVIEWPORT")) {  // PROBE R6
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::SetNextWindowPos(ImVec2(60.0f, 60.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(640.0f, 480.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Viewport");
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         if (avail.x >= 1.0f && avail.y >= 1.0f)
-            ui.viewportSize = avail;
+            ui.viewportSize = ImVec2(300.0f, 200.0f);  // PROBE R8: pin offscreen size
         if (viewportTexture && avail.x >= 1.0f && avail.y >= 1.0f)
-            ImGui::Image(ImTextureRef(viewportTexture), avail);
+        {
+            const ImVec2 capped(avail.x < 300.0f ? avail.x : 300.0f,
+                              avail.y < 300.0f ? avail.y : 300.0f);
+            ImGui::Image(ImTextureRef(viewportTexture), capped);  // PROBE R7
+        }
         ui.viewportHovered = ImGui::IsItemHovered();
         ImGui::End();
         ImGui::PopStyleVar();
+        }  // PROBE R6
 
         // ---- Frame pacing stats ----------------------------------------
         ImGui::SetNextWindowPos(ImVec2(740.0f, 60.0f), ImGuiCond_FirstUseEver);
