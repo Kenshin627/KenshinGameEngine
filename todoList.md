@@ -70,7 +70,7 @@
 
 （详见 docs/vulkan-rhi-plan.md，2026-09-01 调研定稿）
 
-- [ ] P0（M2 前置）：拆 CommandContext/DeletionQueue/DescriptorCache/UploadEngine + 每帧单一 rendering scope + staging ring
+- [x] P0（M2 前置）：拆 CommandContext/DeletionQueue/DescriptorCache/UploadEngine + 每帧单一 rendering scope + staging ring ✅ 2026-09-02（工作块 0-3 落地、4(vk-bootstrap) 取消，详见 vulkan-rhi-plan.md §五）
 - [x] P1（M4 前置）：timeline semaphore + compute 队列 + GPU timer ✅（timeline+GPU timer 随 P0 于 2026-09-02 落地；compute 队列随 M4.3 2026-09-05 落地）
 - [ ] P2（M6 前置）：分页上传/传输队列/驻留预算
 
@@ -82,9 +82,10 @@
 - [x] **CONCURRENT 共享雷点复审 ✅ 2026-09-06**（用户 2026-09-05 判定雷点，本条为约定的对照 A/B）：KENSHIN_SAME_FAMILY_ASYNC 环境变量强制 async 链用同族第二队列（family 0 index 1，缓冲保持 EXCLUSIVE、零跨族共享）与默认跨族（family 2 compute-only，CONCURRENT）同二进制对照——**两种变体各自 47 用例全绿、画面逐字节一致**；性能：跨族 CONCURRENT 全面更快（knot 273 vs 250=+9%、wall@15 1153 vs 998=+16%、wall@25 1301 vs 1268=+3%）——同族第二队列共享图形引擎硬件、只有提交级并发且与 graphics 争引擎。结论：本机（RTX 5060 Ti）保留跨族 CONCURRENT，依据=自有测量而非"UE5 同款"（该出处说法维持撤回）；环境变量留作其他硬件复测入口。显式 ownership transfer 变体未做（同族对照已给出数量级：跨引擎收益 > 共享模式成本，transfer 的屏障税只会更差）
 
 - [ ] CommandContext 记 last-bound 状态（pipeline/顶点/索引缓冲），`draw()` 跳过重复绑定——当前每帧 draw 数个位数、驱动对冗余绑定有优化，纯属顺手加固；改动只在 backend 内部，不动 API —— 2026-09-02
+- [ ] **no-validation 呈现路径 DEVICE_LOST：重启不愈、疑似换驱动不愈，签名已收窄（2026-09-06 复测）**：2026-09-05 曾判"驱动劣化，重启后复测"，今日复测推翻劣化残留说——机器当日 16:39 全新启动、driverVersion 2559737856→2584739840（疑似换过驱动）、HEAD 2d1ec19 Release 构建：`--no-validation --frames 2000` 窗口呈现三次全灭（全链 / --no-occ / --no-async），死亡时刻高度一致（in-frame chain ready 后 ~6.0s；首个报错 = FrameSync.cpp:158 waitTimeline 的 vkWaitSemaphores——纯检测点非事发点，其后全部 submit 秒败 = 死设备空转模式）；**--no-occ 照死、--no-async 照死**——遮挡链与跨族 async 均排除，触发面收窄到"validation 关闭 + 呈现路径"（09-05 曾验证 S2 旧代码也死，跨代码版本）；**同参 validation 开 2000 帧零 DEVICE_LOST**。绕行 = 开发期保持 validation 开（M3/M4 全程如此运行）；候选下一步：DDU 干净重装驱动复测、Nsight/Aftermath 抓现场、或暂时搁置 —— 2026-09-06
 - [x] one-shot 链入帧化 ✅（VisBufferChain 即此产物，M3 系列全量入帧；one-shot 路径留作差分参照——M2 后续不再需要，2026-09-06 清理）
 - [ ] 软光栅差分盲区对策：GPU/CPU 差分两边共享实现缺陷时不可见（S4.4 半像素行偏移、双重 view 两个 bug 都是 S4.5 对 HW 基线对比才暴露的）；后续可加一条 float64 独立地面真值 raster 校验 —— 2026-09-02
-- [ ] M3.4 后退役 CPU 割切割渲染路径（分三步,依赖图 2026-09-04 盘点）：① ✅ 2026-09-05 —— kgeo 默认转正虚拟链（`--virtual` 保留解析为 no-op,历史验收命令仍可复现），基线路径降级 `--baseline` 开关（验证：无开关 kgeo 截图与显式 --virtual 逐字节一致、--baseline 路径可用、校验层零错误）；② M4 期间 pixelThreshold 滑条状态搬离 KgeoPreview（"切割三角形数"已随 M3.4 进链统计 readStats[11]）；③ 删 updateCut/rebuildCutMesh/meshHandle 网格重建半边。**永留**：loadKgeo+dag（GPU 路径数据源头）、selectLodCut（LOD 语义地面真值——M5 换遍历结构时"新遍历集合==selectLodCut 集合"是最便宜的语义回归）
+- [x] M3.4 后退役 CPU 割切割渲染路径 ✅ 2026-09-06 全三步完成（依赖图 2026-09-04 盘点）：① ✅ 2026-09-05 —— kgeo 默认转正虚拟链（`--virtual` 保留解析为 no-op,历史验收命令仍可复现），基线路径降级 `--baseline` 开关（验证：无开关 kgeo 截图与显式 --virtual 逐字节一致、--baseline 路径可用、校验层零错误）；② ③ ✅ 2026-09-06（commit 801a5ec）—— pixelThreshold 滑条搬进 Virtual Geometry 面板（vgDebug，--kgeo 从 --lod-threshold 初始化；"切割三角形数"已随 M3.4 进链统计 readStats[11]）、updateCut/rebuildCutMesh/meshHandle 全删、KgeoPreview 缩为 dag 装载器+静态信息面板、--baseline 变 logged no-op（同 --virtual）；render_kgeo ctest 参考图自 M3.4 后过期未察觉，按文档流程重生成后两条 ctest 全过。**永留**：loadKgeo+dag（GPU 路径数据源头）、selectLodCut（LOD 语义地面真值——M5 换遍历结构时"新遍历集合==selectLodCut 集合"是最便宜的语义回归）
 - [x] M3.2b 遮挡包围体收紧（提前，随链内遮挡接线一起做）✅ 2026-09-05（簇 AABB 8 顶点投影紧矩形替换球的 ±R 方形；AABB 运行时从簇顶点导出（每簇 2×vec4，.kgeo/GpuCluster 不动）；HZB 接入帧内链——每槽金字塔建于帧首、源是同槽滞后两帧的 VisBuffer（可证完备），首帧/resize 由 m_hzbValid 门控；occ-culled 计数入 readStats[8] 与调试面板；fillBuffer 自带 TRANSFER→COMPUTE 屏障。修：readStats/readIndirectArgs 首帧前无守卫致 app frame-0 崩溃、host 统计缓冲 + vis 缺 TRANSFER_SRC。验收：单测帧内遮挡保守精确（VisBuffer 逐位一致 + pair 守恒）；app 实心球沿轴机位 occ-culled 0→1；球/结两场景与无遮挡 HEAD 同参截图逐字节一致；校验层零错误（顺带消除 HEAD 的 binding-7 未更新遗留）。注：结类镂空几何 HZB mip 混洞深度、遮挡收益天然低，量化 RECT 收紧收益待 M3.3 后用大遮挡体场景测）
 - [ ] （示例）调研 clusterlod.h 的 clodConfig 各参数含义 —— 对应 S3.1
 - [ ] RenderView 抽象（多视口/多窗口时引入；Filament View=Scene+Camera、renderEngine RenderView 同位）—— 2026-09-01 Renderer/IRenderPipeline 落地时明确推迟
