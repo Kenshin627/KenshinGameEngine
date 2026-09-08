@@ -17,6 +17,24 @@
 #include "kenshin/geometry/ClusterLodBuilder.h"
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
+
+namespace {
+// M5.2: hierarchy chain-init inputs from a single-mesh dag (base 0).
+void hierInputs(const kenshin::geometry::ClusterDag& dag,
+                std::vector<kenshin::u8>& hierData,
+                std::vector<glm::uvec2>& groupRanges,
+                std::vector<kenshin::u32>& roots) {
+  const auto* beg =
+      reinterpret_cast<const kenshin::u8*>(dag.hierarchyNodes.data());
+  hierData.assign(beg, beg + dag.hierarchyNodes.size() *
+                                 sizeof(kenshin::geometry::DagHierarchyNode));
+  groupRanges.clear();
+  for (const auto& g : dag.groups)
+    groupRanges.emplace_back(g.clusters.empty() ? 0 : g.clusters.front(),
+                             static_cast<kenshin::u32>(g.clusters.size()));
+  roots.assign(1, dag.hierarchyRoot);
+}
+}  // namespace
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/renderer/ClusterCullPass.h"
 #include "kenshin/renderer/HzbPass.h"
@@ -366,9 +384,14 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   renderer::extractFrustumPlanes(proj * view, planes);
 
   renderer::VisBufferChain chain;
+  std::vector<u8> hierData;
+  std::vector<glm::uvec2> groupRanges;
+  std::vector<u32> hierRoots;
+  hierInputs(dag, hierData, groupRanges, hierRoots);
   REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
-                     groupData, instances, meshRanges,
-                     static_cast<u32>(2 * dag.clusters.size()), W, H));
+                     groupData, hierData, groupRanges, hierRoots, instances,
+                     meshRanges, static_cast<u32>(2 * dag.clusters.size()), W,
+                     H));
   renderer::ChainInputs inputs;
   inputs.view = view;
   inputs.proj = proj;
@@ -494,12 +517,18 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
   proj[1][1] *= -1.0f;
 
   renderer::VisBufferChain chainOff, chainOn;
+  std::vector<u8> hierData;
+  std::vector<glm::uvec2> groupRanges;
+  std::vector<u32> hierRoots;
+  hierInputs(dag, hierData, groupRanges, hierRoots);
   REQUIRE(chainOff.init(*backend, shaders, positions4, dag.indices, clusterData,
-                        groupData, instances, meshRanges,
-                        static_cast<u32>(2 * dag.clusters.size()), W, H));
+                        groupData, hierData, groupRanges, hierRoots, instances,
+                        meshRanges, static_cast<u32>(2 * dag.clusters.size()),
+                        W, H));
   REQUIRE(chainOn.init(*backend, shaders, positions4, dag.indices, clusterData,
-                       groupData, instances, meshRanges,
-                       static_cast<u32>(2 * dag.clusters.size()), W, H));
+                       groupData, hierData, groupRanges, hierRoots, instances,
+                       meshRanges, static_cast<u32>(2 * dag.clusters.size()), W,
+                       H));
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
   const int kFrames = 7;
@@ -622,12 +651,18 @@ TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
   renderer::extractFrustumPlanes(proj * view, planes);
 
   renderer::VisBufferChain chainOff, chainOn;
+  std::vector<u8> hierData;
+  std::vector<glm::uvec2> groupRanges;
+  std::vector<u32> hierRoots;
+  hierInputs(dag, hierData, groupRanges, hierRoots);
   REQUIRE(chainOff.init(*backend, shaders, positions4, dag.indices, clusterData,
-                        groupData, instances, meshRanges,
-                        static_cast<u32>(3 * dag.clusters.size()), W, H));
+                        groupData, hierData, groupRanges, hierRoots, instances,
+                        meshRanges, static_cast<u32>(3 * dag.clusters.size()),
+                        W, H));
   REQUIRE(chainOn.init(*backend, shaders, positions4, dag.indices, clusterData,
-                       groupData, instances, meshRanges,
-                       static_cast<u32>(3 * dag.clusters.size()), W, H));
+                       groupData, hierData, groupRanges, hierRoots, instances,
+                       meshRanges, static_cast<u32>(3 * dag.clusters.size()), W,
+                       H));
 
   renderer::ChainInputs ci;
   ci.view = view;
@@ -751,11 +786,17 @@ TEST_CASE("M4.2 HW raster path - force-HW vs all-SW coverage",
   renderer::extractFrustumPlanes(proj * view, planes);
 
   renderer::VisBufferChain chainSw, chainHw;
+  std::vector<kenshin::u8> hierData2;
+  std::vector<glm::uvec2> groupRanges2;
+  std::vector<kenshin::u32> hierRoots2;
+  hierInputs(dag, hierData2, groupRanges2, hierRoots2);
   REQUIRE(chainSw.init(*backend, shaders, positions4, dag.indices, clusterData,
-                       groupData, instances, meshRanges,
+                       groupData, hierData2, groupRanges2, hierRoots2,
+                       instances, meshRanges,
                        static_cast<u32>(2 * dag.clusters.size()), W, H));
   REQUIRE(chainHw.init(*backend, shaders, positions4, dag.indices, clusterData,
-                       groupData, instances, meshRanges,
+                       groupData, hierData2, groupRanges2, hierRoots2,
+                       instances, meshRanges,
                        static_cast<u32>(2 * dag.clusters.size()), W, H));
 
   renderer::ChainInputs ci;

@@ -110,6 +110,30 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
   m_clusterCount += static_cast<u32>(dag.clusters.size());
   range.clusterEnd = m_clusterCount;
 
+  // M5.2: the group BVH8 (built in M5.1) - flat 64B nodes appended to
+  // the shared hierarchy pool; the mesh's root is rebased by the node
+  // base. Group -> cluster spans come from the contiguity invariant
+  // (verifyDagInvariants enforces it; the traversal never needs the
+  // member indices). Cluster indices rebased into the shared pool.
+  if (!dag.hierarchyNodes.empty()) {
+    const u32 nodeBase = static_cast<u32>(m_hierarchyData.size() /
+                                          sizeof(geometry::DagHierarchyNode));
+    m_hierarchyData.insert(
+        m_hierarchyData.end(),
+        reinterpret_cast<const u8*>(dag.hierarchyNodes.data()),
+        reinterpret_cast<const u8*>(dag.hierarchyNodes.data()) +
+            dag.hierarchyNodes.size() * sizeof(geometry::DagHierarchyNode));
+    range.hierarchyRoot = dag.hierarchyRoot == 0xFFFFFFFFu
+                              ? 0xFFFFFFFFu
+                              : dag.hierarchyRoot + nodeBase;
+  }
+  for (const auto& group : dag.groups) {
+    const u32 begin = group.clusters.empty()
+                          ? range.clusterBegin
+                          : group.clusters.front() + range.clusterBegin;
+    m_groupRanges.emplace_back(begin, static_cast<u32>(group.clusters.size()));
+  }
+
   // vec4/vec2 pools (std430 vec3 arrays stride 16; shaders read float4).
   for (usize v = 0; v < dag.positions.size() / 3; ++v)
     m_pos4.emplace_back(dag.positions[v * 3], dag.positions[v * 3 + 1],

@@ -49,6 +49,10 @@ struct ChainInputs {
   u32 hwMode = 1;                // M4.2: 0 = all SW, 1 = route by
                                  // threshold, 2 = force all HW
   f32 hwThresholdPx = 18.0f;     // UE's GNaniteMinPixelsPerEdgeHW
+  /// M5.2: 0 = linear expand+per-cluster cull (differential reference),
+  /// 1 = BVH8 hierarchy traversal (level-wise dispatch). Forced to 0 at
+  /// init when no hierarchy data was provided.
+  u32 cullMode = 1;
 };
 
 class VisBufferChain {
@@ -57,11 +61,15 @@ class VisBufferChain {
 
   /// Compile the five shaders, create the persistent pipelines and
   /// buffers. `maxPairs` bounds work items AND pairs (worst case
-  /// visible instances x total clusters).
+  /// visible instances x total clusters). The M5.2 hierarchy arguments
+  /// may be empty - the chain then forces cullMode 0 (linear).
   bool init(backend::IRenderBackend& backend, manager::ShaderManager& shaders,
             std::span<const glm::vec4> positions4, std::span<const u32> indices,
             const std::vector<u8>& clusterData,
             const std::vector<u8>& groupData,
+            const std::vector<u8>& hierarchyData,
+            std::span<const glm::uvec2> groupRanges,
+            std::span<const u32> meshHierRoots,
             std::span<const CullGpuInstance> instances,
             std::span<const GpuMeshRangePair> meshRanges, u32 maxPairs,
             u32 width, u32 height);
@@ -101,6 +109,12 @@ class VisBufferChain {
   bool readIndirectArgs(backend::IRenderBackend& backend, u32 expandX[3],
                         u32 cullX[1], u32 rasterX[1]) const;
 
+  /// Test/debug: read back the most recently ENDED frame's visiblePairs
+  /// (count from readStats[2]) - the M5.2 hierarchy-vs-selectLodCut set
+  /// equality assertions read this.
+  bool readVisiblePairs(backend::IRenderBackend& backend,
+                        std::vector<glm::uvec2>& out) const;
+
   void onShutdown(backend::IRenderBackend& backend);
 
  private:
@@ -109,8 +123,9 @@ class VisBufferChain {
   // Three SEPARATE conversion pipelines (same shader): a descriptor set
   // updated mid-command-buffer invalidates already-recorded uses, so each
   // conversion site needs its own set - hence its own pipeline. The 4th
-  // (M3.3) feeds the post raster from the cull counters' revived slot.
-  u32 m_pipeConvert[4] = {~0u, ~0u, ~0u, ~0u};
+  // (M3.3) feeds the post raster from the cull counters' revived slot;
+  // the 5th (M5.2) sizes the post CULL dispatch by the pending count.
+  u32 m_pipeConvert[5] = {~0u, ~0u, ~0u, ~0u, ~0u};
   u32 m_pipePostCull = ~0u;  // M3.3: pending retest vs current HZB
   // Same SPIR-V, SEPARATE pipeline objects: a pipeline's per-slot
   // descriptor set may only be updated once per frame slot, and the
@@ -175,6 +190,32 @@ class VisBufferChain {
   glm::mat4 m_prevVP[kSlots]{};
   glm::vec3 m_prevCam[kSlots]{};
   u32 m_aabbBuffer = ~0u;  // runtime-derived per-cluster AABBs (static)
+
+  // ---- M5.2: the BVH8 hierarchy path ----------------------------------
+  static constexpr u32 kMaxHierLevels = 16;
+  // Static: the node pool (flat 64B DagHierarchyNodes), per-group
+  // (clusterBegin, count) spans, per-mesh root node indices.
+  u32 m_hierBuffer = ~0u, m_groupRangeBuffer = ~0u, m_meshHierRootBuffer = ~0u;
+  // Per-slot: ping-pong active-node lists (uint2 = instance, node), the
+  // two 4B ping-pong count buffers (in/out cursors per level parity),
+  // and per-level indirect args.
+  u32 m_activeNodes[kSlots][2]{};
+  u32 m_hierCnt[kSlots][2]{};
+  u32 m_hierParams[kSlots]{};  // cullParams copy + [1].y/[7].zw counts
+  u32 m_argsHier[kMaxHierLevels][kSlots]{};
+  // Pipelines: the seed, the two level PARITIES (in/out list bindings
+  // differ - one descriptor-set update per site per frame), and one
+  // convert site per level (the args dst differs per level).
+  u32 m_pipeHierSeed = ~0u;
+  u32 m_pipeHierLevel[2] = {~0u, ~0u};
+  u32 m_pipeConvertHier[kMaxHierLevels] = {};
+  u32 m_cfgHier[kMaxHierLevels]{};
+  u32 m_hierDepth = 0;  // levels actually dispatched (1 = root only)
+  bool m_hierReady = false;
+  u32 m_hierNodeCount = 0;  // for the shader-side index clamps
+  u32 m_groupCount = 0;
+  u32 m_argsPostCull[kSlots]{};
+  u32 m_cfgPostCull = ~0u;
   u32 m_instanceCount = 0, m_maxPairs = 0;
   u32 m_clusterCount = 0, m_indexCount = 0, m_positionCount = 0;
   u32 m_width = 0, m_height = 0;

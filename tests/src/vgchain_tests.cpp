@@ -126,10 +126,25 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
     REQUIRE(rasterStats[1] > 0);  // something actually rasterized
   }
 
-  // ---- Subject: the in-frame chain, on a headless frame.
+  // ---- Subject: the in-frame chain, on a headless frame - BOTH cull
+  // modes (M5.2): linear (the expand+per-cluster reference shape) and
+  // the level-wise BVH8 traversal. Each must reproduce the one-shot
+  // bits exactly; the pair (linear, hierarchy) also pins the two
+  // modes against each other transitively.
+  const std::vector<u8> hierarchyData(
+      reinterpret_cast<const u8*>(dag.hierarchyNodes.data()),
+      reinterpret_cast<const u8*>(dag.hierarchyNodes.data()) +
+          dag.hierarchyNodes.size() *
+              sizeof(kenshin::geometry::DagHierarchyNode));
+  std::vector<glm::uvec2> groupRanges;
+  for (const auto& g : dag.groups)
+    groupRanges.emplace_back(g.clusters.empty() ? 0 : g.clusters.front(),
+                             static_cast<u32>(g.clusters.size()));
+  const std::vector<u32> meshHierRoots{dag.hierarchyRoot};
   renderer::VisBufferChain chain;
   REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
-                     groupData, instances, meshRanges,
+                     groupData, hierarchyData, groupRanges, meshHierRoots,
+                     instances, meshRanges,
                      static_cast<u32>(2 * dag.clusters.size()), W, H));
   renderer::ChainInputs inputs;  // (planes cannot be aggregate-named)
   inputs.view = view;
@@ -146,42 +161,42 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
   // this differential pins chain-vs-one-shot structural equivalence.
   inputs.hwMode = 0;
 
-  backend::FrameBeginInfo frameInfo;
-  frameInfo.width = W;
-  frameInfo.height = H;
-  REQUIRE(backend->beginFrame(frameInfo));
-  chain.execute(*backend, inputs);
-  backend->endFrame();
+  const auto runChainMode = [&](u32 cullMode) {
+    inputs.cullMode = cullMode;
+    backend::FrameBeginInfo frameInfo;
+    frameInfo.width = W;
+    frameInfo.height = H;
+    // Two frames per mode (both slots): proves per-slot isolation (the
+    // first frame's intermediates must not leak into or be clobbered
+    // by this one).
+    REQUIRE(backend->beginFrame(frameInfo));
+    chain.execute(*backend, inputs);
+    backend->endFrame();
+    REQUIRE(backend->beginFrame(frameInfo));
+    chain.execute(*backend, inputs);
+    backend->endFrame();
 
-  // Second frame on the OTHER slot: proves per-slot isolation (the
-  // first frame's intermediates must not leak into or be clobbered by
-  // this one).
-  REQUIRE(backend->beginFrame(frameInfo));
-  chain.execute(*backend, inputs);
-  backend->endFrame();
-
-  std::vector<u8> visBytes;
-  REQUIRE(backend->readbackBuffer(chain.visBuffer(*backend), 0,
-                                  usize(W) * H * sizeof(u64), visBytes));
-  const u64* visInFrame = reinterpret_cast<const u64*>(visBytes.data());
-  u32 stats[13] = {};
-  REQUIRE(chain.readStats(*backend, stats));
-  u32 ax[3], cx[1], rx[1];
-  REQUIRE(chain.readIndirectArgs(*backend, ax, cx, rx));
-  INFO("chain stats: visibleInst "
-       << stats[0] << ", workItems " << stats[1] << ", pairs " << stats[2]
-       << ", writes " << stats[5] << "; indirect x: expand " << ax[0]
-       << ", cull " << cx[0] << ", raster " << rx[0] << "; expCnt cursor "
-       << ax[1] << ", fwd " << ax[2]);
-  REQUIRE(stats[0] > 0);  // instances survived the cull
-  REQUIRE(stats[2] > 0);  // clusters cut
-  REQUIRE(stats[5] > 0);  // px writes
-
-  usize mismatches = 0;
-  for (usize i = 0; i < visOneShot.size(); ++i)
-    if (visOneShot[i] != visInFrame[i]) ++mismatches;
-  INFO("vis pixels " << visOneShot.size() << ", mismatches " << mismatches);
-  REQUIRE(mismatches == 0);
+    std::vector<u8> visBytes;
+    REQUIRE(backend->readbackBuffer(chain.visBuffer(*backend), 0,
+                                    usize(W) * H * sizeof(u64), visBytes));
+    const u64* visInFrame = reinterpret_cast<const u64*>(visBytes.data());
+    u32 stats[13] = {};
+    REQUIRE(chain.readStats(*backend, stats));
+    INFO("cullMode " << cullMode << " chain stats: visibleInst " << stats[0]
+                     << ", workItems " << stats[1] << ", pairs " << stats[2]
+                     << ", writes " << stats[5]);
+    REQUIRE(stats[0] > 0);  // instances survived the cull
+    REQUIRE(stats[2] > 0);  // clusters cut
+    REQUIRE(stats[5] > 0);  // px writes
+    usize mismatches = 0;
+    for (usize i = 0; i < visOneShot.size(); ++i)
+      if (visOneShot[i] != visInFrame[i]) ++mismatches;
+    INFO("cullMode " << cullMode << ": vis pixels " << visOneShot.size()
+                     << ", mismatches " << mismatches);
+    REQUIRE(mismatches == 0);
+  };
+  runChainMode(0);  // linear: the expand+per-cluster reference shape
+  runChainMode(1);  // M5.2: the level-wise BVH8 traversal
 
   chain.onShutdown(*backend);
   backend->shutdown();

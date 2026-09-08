@@ -69,12 +69,15 @@ inline void packGpuGroup(std::vector<u8>& out, f32 boundsX, f32 boundsY,
 
 /// Mesh registry entry: where this mesh's clusters live in the shared
 /// pools (clusters [clusterBegin, clusterEnd) of the cluster table; the
-/// group range covers every group its clusters belong to).
+/// group range covers every group its clusters belong to). hierarchyRoot
+/// is the mesh's BVH8 root NODE index in the shared hierarchy pool
+/// (0xFFFFFFFF when the mesh has no hierarchy - M5.1 built data).
 struct VgMeshRange {
   u32 clusterBegin = 0;
   u32 clusterEnd = 0;
   u32 groupBegin = 0;
   u32 groupEnd = 0;
+  u32 hierarchyRoot = 0xFFFFFFFFu;
   glm::vec4 boundsSphere{0.0f, 0.0f, 0.0f, -1.0f};  // union of cluster
                                                     // bounds (instance
                                                     // cull input)
@@ -136,6 +139,13 @@ class VirtualGeometryScene {
   const std::vector<glm::vec4>& positions4() const { return m_pos4; }
   const std::vector<u32>& indices() const { return m_indices; }
 
+  // M5.2 hierarchy inputs (mirrors for the chain's static uploads):
+  // the flat DagHierarchyNode pool, and per-group (clusterBegin,
+  // clusterCount) pairs derived from the clusters-contiguous-per-group
+  // invariant (cluster indices already rebased into the shared pool).
+  const std::vector<u8>& hierarchyData() const { return m_hierarchyData; }
+  const std::vector<glm::uvec2>& groupRanges() const { return m_groupRanges; }
+
   void onShutdown();
 
  private:
@@ -151,6 +161,8 @@ class VirtualGeometryScene {
   // (std430 vec3 arrays stride 16 - the shaders read float4).
   std::vector<u8> m_clusterData;
   std::vector<u8> m_groupData;
+  std::vector<u8> m_hierarchyData;        // M5.2: flat 64B nodes
+  std::vector<glm::uvec2> m_groupRanges;  // M5.2: per-group cluster spans
   std::vector<glm::vec4> m_pos4;
   std::vector<glm::vec4> m_norm4;
   std::vector<glm::vec2> m_uv2;

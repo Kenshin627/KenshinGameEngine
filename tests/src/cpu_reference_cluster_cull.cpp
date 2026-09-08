@@ -25,6 +25,7 @@
 #include "kenshin/renderer/ClusterCullPass.h"
 #include "kenshin/renderer/InstanceCullPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
+#include "kenshin/renderer/VisBufferChain.h"
 
 namespace {
 
@@ -217,5 +218,118 @@ TEST_CASE("cluster cull GPU/CPU differential", "[gpu][clustercull]") {
                               << expected.size());
   }
 
+  backend->shutdown();
+}
+
+// M5.2: the hierarchy chain's identity-instance cut must equal the CPU
+// selectLodCut cluster-for-cluster (the permanent LOD semantic ground
+// truth), across a threshold sweep. Occlusion off + pure SW: the cut
+// is then purely the LOD rule, exactly what selectLodCut computes.
+TEST_CASE("hierarchy chain identity cut == selectLodCut",
+          "[gpu][vgchain][lodcut]") {
+  using namespace kenshin;
+  Built built;
+  REQUIRE(
+      build(geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
+  const auto& dag = built.dag;
+
+  manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+  auto backend = backend::createVulkanBackend();
+  backend::BackendInitParams params;  // windowless
+  REQUIRE(backend->initialize(params));
+
+  std::vector<u8> clusterData, groupData;
+  for (const auto& c : dag.clusters)
+    renderer::packGpuCluster(clusterData, c.group, c.boundsSphere.x,
+                             c.boundsSphere.y, c.boundsSphere.z,
+                             c.boundsSphere.w, c.error, c.parentError,
+                             c.vertexOffset, c.vertexCount, c.indexOffset,
+                             c.indexCount, c.refinedGroup);
+  for (const auto& g : dag.groups)
+    renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
+                           g.boundsSphere.z, g.boundsSphere.w, g.maxError,
+                           g.simplifyError, static_cast<u32>(g.lodLevel));
+  std::vector<glm::vec4> positions4(dag.positions.size() / 3);
+  for (usize v = 0; v < positions4.size(); ++v)
+    positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
+                              dag.positions[v * 3 + 2], 0.0f);
+  const std::vector<u8> hierarchyData(
+      reinterpret_cast<const u8*>(dag.hierarchyNodes.data()),
+      reinterpret_cast<const u8*>(dag.hierarchyNodes.data()) +
+          dag.hierarchyNodes.size() * sizeof(geometry::DagHierarchyNode));
+  std::vector<glm::uvec2> groupRanges;
+  for (const auto& g : dag.groups)
+    groupRanges.emplace_back(g.clusters.empty() ? 0 : g.clusters.front(),
+                             static_cast<u32>(g.clusters.size()));
+
+  std::vector<renderer::CullGpuInstance> instances;
+  {
+    renderer::CullGpuInstance identity;
+    identity.bounds = glm::vec4(0.0f, 0.0f, 0.0f, 3.2f);
+    instances.push_back(identity);
+  }
+  const std::vector<renderer::GpuMeshRangePair> meshRanges = {
+      {0u, static_cast<u32>(dag.clusters.size())}};
+
+  const glm::vec3 cam(2.5f, 3.0f, 2.0f);
+  const u32 W = 1280, H = 720;
+  glm::mat4 view = glm::lookAtRH(cam, {0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f});
+  glm::mat4 proj =
+      glm::perspectiveRH_ZO(glm::radians(60.0f), 16.0f / 9.0f, 0.1f, 100.0f);
+  proj[1][1] *= -1.0f;
+  glm::vec4 planes[6];
+  renderer::extractFrustumPlanes(proj * view, planes);
+  const f32 worldPerPixel =
+      2.0f * std::tan(glm::radians(60.0f) * 0.5f) / static_cast<f32>(H);
+
+  renderer::VisBufferChain chain;
+  const std::vector<u32> meshHierRoots{dag.hierarchyRoot};
+  REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
+                     groupData, hierarchyData, groupRanges, meshHierRoots,
+                     instances, meshRanges,
+                     static_cast<u32>(dag.clusters.size()), W, H));
+  renderer::ChainInputs inputs;
+  inputs.view = view;
+  inputs.proj = proj;
+  inputs.nearZ = 0.1f;
+  inputs.camPos = cam;
+  inputs.worldPerPixel = worldPerPixel;
+  inputs.width = W;
+  inputs.height = H;
+  for (int p = 0; p < 6; ++p) inputs.planes[p] = planes[p];
+  inputs.occlusionEnabled = false;
+  inputs.hwMode = 0;
+  inputs.cullMode = 1;  // the hierarchy traversal under test
+
+  backend::FrameBeginInfo frameInfo;
+  frameInfo.width = W;
+  frameInfo.height = H;
+  const float camArr[3] = {cam.x, cam.y, cam.z};
+  kenshin::usize lastCount = ~kenshin::usize(0);
+  for (const f32 threshold : {0.25f, 1.0f, 4.0f}) {
+    inputs.pixelThreshold = threshold;
+    REQUIRE(backend->beginFrame(frameInfo));
+    chain.execute(*backend, inputs);
+    backend->endFrame();
+
+    std::vector<glm::uvec2> pairs;
+    REQUIRE(chain.readVisiblePairs(*backend, pairs));
+    std::multiset<u32> got;
+    for (const auto& p : pairs) got.insert(p.y);
+    std::vector<u32> cpuCut;
+    geometry::selectLodCut(dag, threshold, H, 60.0f, camArr, cpuCut);
+    REQUIRE(got.size() == cpuCut.size());
+    std::set<u32> expected(cpuCut.begin(), cpuCut.end());
+    for (const u32 c : got) REQUIRE(expected.count(c) == 1);
+    INFO("threshold " << threshold << ": hierarchy cut " << got.size()
+                      << " == selectLodCut " << cpuCut.size());
+    // Coarser thresholds can only shrink the cut (monotonicity, as the
+    // lodcut tests assert for the CPU side).
+    REQUIRE(got.size() <= lastCount);
+    lastCount = got.size();
+  }
+
+  chain.onShutdown(*backend);
   backend->shutdown();
 }

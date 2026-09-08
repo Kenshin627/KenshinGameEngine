@@ -122,6 +122,7 @@ struct Args {
   bool checker = false;      // UV checkerboard debug view (decode path)
   bool noOcclusion = false;  // A/B: disable the occlusion cull chain
   bool noAsync = false;      // M4.4 A/B: chain onto the graphics queue
+  bool cullLinear = false;   // M5.2 A/B: force the linear expand path
   bool multi = false;        // S4.6 acceptance: near/mid/far instances
   bool dense = false;        // M3.4 acceptance: front-back occluders
   int grid = 0;              // --grid N: N-instance occlusion carpet
@@ -164,6 +165,8 @@ Args parseArgs(int argc, char** argv) {
       args.noOcclusion = true;
     else if (std::strcmp(argv[i], "--no-async") == 0)
       args.noAsync = true;
+    else if (std::strcmp(argv[i], "--cull-linear") == 0)
+      args.cullLinear = true;
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
@@ -226,6 +229,7 @@ struct VgDebugState {
   kenshin::u32 hwClusters = 0;
   kenshin::u32 workItems = 0, tooCoarse = 0, srcTooCoarse = 0;
   bool occlusion = true;
+  bool hierCull = true;  // M5.2: BVH8 traversal (off = linear A/B)
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
                                        // (moved off KgeoPreview at the
                                        // M4.4 CPU-cut retirement)
@@ -446,6 +450,7 @@ int main(int argc, char** argv) {
               vgDebug.coveragePct, vgDebug.occCulled, vgDebug.revived,
               vgDebug.hwClusters);
           ImGui::Checkbox("occlusion", &vgDebug.occlusion);
+          ImGui::Checkbox("BVH8 cull", &vgDebug.hierCull);
           ImGui::SliderFloat("pixel error", &vgDebug.pixelThreshold, 0.05f,
                              32.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
@@ -592,10 +597,14 @@ int main(int argc, char** argv) {
       // Lazy init (pools ready; vis buffers start 1x1, first execute
       // resizes).
       if (!chainReady) {
+        std::vector<kenshin::u32> meshHierRoots;
+        for (const auto& mesh : vgScene->meshes())
+          meshHierRoots.push_back(mesh.hierarchyRoot);
         chainReady = chain.init(
             *vgBackend, shaders, vgScene->positions4(), vgScene->indices(),
-            vgScene->clusterData(), vgScene->groupData(), chainInstances,
-            chainMeshRanges,
+            vgScene->clusterData(), vgScene->groupData(),
+            vgScene->hierarchyData(), vgScene->groupRanges(), meshHierRoots,
+            chainInstances, chainMeshRanges,
             kenshin::u32(chainInstances.size()) * vgScene->clusterCount(), 1,
             1);
         if (chainReady) KENSHIN_INFO("[vgchain] in-frame chain ready");
@@ -618,6 +627,7 @@ int main(int argc, char** argv) {
         kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
                                                 ci.planes);
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
+        ci.cullMode = (vgDebug.hierCull && !args.cullLinear) ? 1u : 0u;
         // Panel stats: NON-BLOCKING mapped snapshot, taken BEFORE this
         // frame's execute. At this point the CURRENT slot's counters
         // still hold the frame-before-last's final values, and
