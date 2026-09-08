@@ -208,6 +208,12 @@ bool VisBufferChain::init(backend::IRenderBackend& backend,
     m_argsRaster[s] = makeArgs("argsR");
     m_argsPostRaster[s] = makeArgs("argsPR");
     m_hwDrawArgs[s] = makeArgs("argsHW");
+    // The pending-gated HZB#1 flag args. Missing since 087c551: the zero
+    // handle made the backend silently drop the flag conversion AND the
+    // indirect HZB#1 dispatches, leaving the post pass testing against a
+    // two-frame-old pyramid instead of the intended same-frame preliminary
+    // one (M5.2 pre-fix).
+    m_argsHzb1[s] = makeArgs("argsHzb1");
   }
   resize(backend, width, height);
   return true;
@@ -645,7 +651,8 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
           m_hzbParams[s],  m_pendingPairs[s],  m_postPairs[s],
           m_postParams[s], m_postRasterCnt[s], m_argsExpand[s],
           m_argsCull[s],   m_argsRaster[s],    m_argsPostRaster[s],
-          m_hwPairs[s],    m_hwParams[s],      m_hwDrawArgs[s]})
+          m_hwPairs[s],    m_hwParams[s],      m_hwDrawArgs[s],
+          m_argsHzb1[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
   }
   for (const u32 h :
