@@ -123,8 +123,7 @@ class VisBufferChain {
   // Three SEPARATE conversion pipelines (same shader): a descriptor set
   // updated mid-command-buffer invalidates already-recorded uses, so each
   // conversion site needs its own set - hence its own pipeline. The 4th
-  // (M3.3) feeds the post raster from the cull counters' revived slot;
-  // the 5th (M5.2) sizes the post CULL dispatch by the pending count.
+  // (M3.3) feeds the post raster from the cull counters' revived slot.
   u32 m_pipeConvert[5] = {~0u, ~0u, ~0u, ~0u, ~0u};
   u32 m_pipePostCull = ~0u;  // M3.3: pending retest vs current HZB
   // Same SPIR-V, SEPARATE pipeline objects: a pipeline's per-slot
@@ -207,15 +206,15 @@ class VisBufferChain {
   // differ - one descriptor-set update per site per frame), and one
   // convert site per level (the args dst differs per level).
   u32 m_pipeHierSeed = ~0u;
-  u32 m_pipeHierLevel[2] = {~0u, ~0u};
+  u32 m_pipeHierLevel[kMaxHierLevels] = {};
   u32 m_pipeConvertHier[kMaxHierLevels] = {};
   u32 m_cfgHier[kMaxHierLevels]{};
   u32 m_hierDepth = 0;  // levels actually dispatched (1 = root only)
   bool m_hierReady = false;
   u32 m_hierNodeCount = 0;  // for the shader-side index clamps
-  u32 m_groupCount = 0;
   u32 m_argsPostCull[kSlots]{};
   u32 m_cfgPostCull = ~0u;
+  u32 m_groupCount = 0;
   u32 m_instanceCount = 0, m_maxPairs = 0;
   u32 m_clusterCount = 0, m_indexCount = 0, m_positionCount = 0;
   u32 m_width = 0, m_height = 0;

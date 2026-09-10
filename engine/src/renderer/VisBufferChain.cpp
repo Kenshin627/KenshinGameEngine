@@ -113,8 +113,12 @@ bool VisBufferChain::init(
   // M5.2: hierarchy shaders (compiled unconditionally so every test run
   // also regression-gates them) + the per-level convert sites.
   if (!makePipe("cull_hier_seed.slang", m_pipeHierSeed)) return false;
-  if (!makePipe("cull_hier_level.slang", m_pipeHierLevel[0])) return false;
-  if (!makePipe("cull_hier_level.slang", m_pipeHierLevel[1])) return false;
+  // ONE PIPELINE PER LEVEL: the backend updates a pipeline's descriptor
+  // set on EVERY dispatch, so a parity pair gets its set updated twice
+  // in one frame-recording once the tree is deeper than two levels,
+  // invalidating the earlier recording (the M3.3 discipline).
+  for (u32 k = 0; k < kMaxHierLevels; ++k)
+    if (!makePipe("cull_hier_level.slang", m_pipeHierLevel[k])) return false;
   for (u32 k = 0; k < kMaxHierLevels; ++k)
     if (!makePipe("count_to_indirect.slang", m_pipeConvertHier[k]))
       return false;
@@ -139,6 +143,9 @@ bool VisBufferChain::init(
   m_groupBuffer = makeDeviceBuffer(backend, groupData.size(), groupData.data(),
                                    "chain-groups");
   m_groupCount = static_cast<u32>(groupData.size() / 32);
+  const u32 cfgPostCull[4] = {64, 0, 4, 0};  // pending-sized envelope
+  m_cfgPostCull =
+      makeHostBuffer(backend, sizeof(cfgPostCull), cfgPostCull, "cfgPC");
   // M5.2: hierarchy static pools. The 64B DagHierarchyNodes are repacked
   // into the GPU layout GpuHierNode (float4 min/max + error + count +
   // children[8], std430 stride 80B) - flat f32 triplets would straddle
@@ -221,13 +228,10 @@ bool VisBufferChain::init(
   // envelope switch (both modes): pending-count sized via cull [4].
   const u32 cfgHierL1[4] = {64, 0, 1, 0};
   const u32 cfgHierLn[4] = {64, 0, 0, 0};
-  const u32 cfgPostCull[4] = {64, 0, 4, 0};
   m_cfgHier[0] = makeHostBuffer(backend, sizeof(cfgHierL1), cfgHierL1, "cfgH1");
   for (u32 l = 1; l < kMaxHierLevels; ++l)
     m_cfgHier[l] =
         makeHostBuffer(backend, sizeof(cfgHierLn), cfgHierLn, "cfgHL");
-  m_cfgPostCull =
-      makeHostBuffer(backend, sizeof(cfgPostCull), cfgPostCull, "cfgPC");
   // Post-section gate: full dispatch size when pending > 0 (the L0
   // reduce pass is the largest level dispatch; coarser levels guard
   // on their dst texel counts).
@@ -296,8 +300,8 @@ bool VisBufferChain::init(
     m_argsCull[s] = makeArgs("argsC");
     m_argsRaster[s] = makeArgs("argsR");
     m_argsPostRaster[s] = makeArgs("argsPR");
-    m_hwDrawArgs[s] = makeArgs("argsHW");
     m_argsPostCull[s] = makeArgs("argsPC");
+    m_hwDrawArgs[s] = makeArgs("argsHW");
     for (u32 l = 1; l < kMaxHierLevels; ++l)
       m_argsHier[l][s] = makeArgs("argsH");
     // The pending-gated HZB#1 flag args. Missing since 087c551: the zero
@@ -385,6 +389,9 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   const u32 cntA[2] = {0, m_instanceCount};
   std::memcpy(backend.mappedPtr(m_cntA[slot]), cntA, sizeof(cntA));
   std::memset(backend.mappedPtr(m_expCnt[slot]), 0, 8);
+  // Ping-pong cursors reset EVERY frame (all modes - the hierarchy path
+  // appends into them; leaving them stale accumulates across frames and
+  // the level guards read garbage entries).
   std::memset(backend.mappedPtr(m_hierCnt[slot][0]), 0, 4);
   std::memset(backend.mappedPtr(m_hierCnt[slot][1]), 0, 4);
   glm::vec4 cullParams[8];
@@ -399,7 +406,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   cullParams[7] = glm::vec4(f32(in.hwMode), in.hwThresholdPx, 0.0f, 0.0f);
   std::memcpy(backend.mappedPtr(m_cullParams[slot]), cullParams,
               sizeof(cullParams));
-  {
+  if (in.cullMode != 0 && m_hierReady) {
     // M5.2: the level shader's params = cullParams + the counts its
     // index clamps need (Slang buffers carry no length).
     auto* hp =
@@ -411,7 +418,9 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     hp[7].z = static_cast<f32>(m_clusterCount);
     hp[7].w = static_cast<f32>(m_groupCount);
   }
-  std::memset(backend.mappedPtr(m_cullCnt[slot]), 0, 28);
+
+  std::memset(backend.mappedPtr(m_cullCnt[slot]), 0,
+              32);  // [7] too: the HW cursor
   std::memset(backend.mappedPtr(m_rasterCnt[slot]), 0, 16);
   std::memset(backend.mappedPtr(m_postRasterCnt[slot]), 0, 16);
   // post_cull's params: the CURRENT viewProj - the preliminary HZB
@@ -550,8 +559,8 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
                                     m_activeNodes[slot][parity ^ 1],
                                     m_hierCnt[slot][parity],
                                     m_hierCnt[slot][parity ^ 1]};
-      backend.dispatchComputeIndirect(m_pipeHierLevel[parity], levelHandles, 17,
-                                      m_argsHier[level][slot], 0);
+      backend.dispatchComputeIndirect(m_pipeHierLevel[level - 1], levelHandles,
+                                      17, m_argsHier[level][slot], 0);
       b(m_pairs[slot]);
       b(m_pendingPairs[slot]);
       b(m_hwPairs[slot]);
@@ -584,31 +593,28 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // (it needs the graphics queue's rasterizer - running it there is
   // the whole point of the async split).
   if (occActive) {
-    // ---- M3.3 post half (Karis Slide 75), PENDING-GATED: nothing
-    // occluded (the common case) -> the whole section dispatches ZERO
-    // groups (a flag conversion turns counters[4] into {G|0}). The
-    // pyramid builds LEVEL BY LEVEL (plain min-of-4, one writer per
-    // texel - no atomics; the old single-dispatch atomic climb had
-    // every L0 thread InterlockedMin the 1x1 apex: ~295k serialized
-    // same-address atomics at 640x461 = multiple milliseconds).
+    // ---- M3.3 post half (Karis Slide 75). The pyramid builds LEVEL
+    // BY LEVEL (plain min-of-4). NOTE: the 087c551 pending-gating
+    // (flag conversion + one shared indirect args buffer) never
+    // actually ran - the args buffer was never created until the M5.2
+    // pre-fix, and reviving it crashed occlusion-active views: the
+    // never-tested path was broken. Direct per-level dispatches like
+    // HZB #2; the gating optimization can return when done correctly.
     b(m_vis[slot]);
-    const u32 cvFlag[3] = {m_cullCnt[slot], m_cfgFlag, m_argsHzb1[slot]};
-    backend.dispatchCompute(m_pipeCountToFlag, cvFlag, 3, 1, 1, 1);
-    backend.barrierIndirectArgs(m_argsHzb1[slot]);
-
     for (u32 l = 0; l < m_hzbLevelCount; ++l) {
       const u32 reduceHandles[3] = {m_hzbLevelParams[l], m_vis[slot],
                                     m_hzb[slot]};
-      backend.dispatchComputeIndirect(m_pipeReduce1[l], reduceHandles, 3,
-                                      m_argsHzb1[slot], 0);
+      const u32 groups =
+          l == 0 ? m_hzbL0Groups : (m_hzbLevelTexels[l] + 63) / 64;
+      backend.dispatchCompute(m_pipeReduce1[l], reduceHandles, 3, groups, 1, 1);
       b(m_hzb[slot]);
     }
 
-    // M5.2: the post cull's envelope is PENDING-sized (counters[4]).
-    // (History: "routing through the FLAG args broke revives" - that was
-    // actually the never-created argsHzb1 silently no-opping the whole
-    // dispatch, fixed in the M5.2 pre-fix; this is a fresh conversion,
-    // and the M3.3 exactness tests pin the revive behavior.)
+    // M5.2: the post cull's envelope is PENDING-sized (counters[4]) -
+    // REQUIRED in hierarchy mode: argsCull is only written by the
+    // linear branch's convert, so reusing it there reads a stale
+    // envelope and revives die. (The historical "flag args broke
+    // revives" note was the never-created argsHzb1 masking, not this.)
     const u32 cvPostCull[4] = {m_cullCnt[slot], m_cfgPostCull,
                                m_argsPostCull[slot], m_expCnt[slot]};
     backend.dispatchCompute(m_pipeConvert[4], cvPostCull, 4, 1, 1, 1);
@@ -834,14 +840,18 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
     if (p != ~0u) backend.destroyComputePipeline(p);
   if (m_pipeHwRaster != ~0u) backend.destroyNullPipeline(m_pipeHwRaster);
   {
-    const u32 hierPipes[3 + kMaxHierLevels] = {
+    const u32 hierPipes[1 + 2 * kMaxHierLevels] = {
         m_pipeHierSeed,        m_pipeHierLevel[0],    m_pipeHierLevel[1],
-        m_pipeConvertHier[0],  m_pipeConvertHier[1],  m_pipeConvertHier[2],
-        m_pipeConvertHier[3],  m_pipeConvertHier[4],  m_pipeConvertHier[5],
-        m_pipeConvertHier[6],  m_pipeConvertHier[7],  m_pipeConvertHier[8],
-        m_pipeConvertHier[9],  m_pipeConvertHier[10], m_pipeConvertHier[11],
-        m_pipeConvertHier[12], m_pipeConvertHier[13], m_pipeConvertHier[14],
-        m_pipeConvertHier[15]};
+        m_pipeHierLevel[2],    m_pipeHierLevel[3],    m_pipeHierLevel[4],
+        m_pipeHierLevel[5],    m_pipeHierLevel[6],    m_pipeHierLevel[7],
+        m_pipeHierLevel[8],    m_pipeHierLevel[9],    m_pipeHierLevel[10],
+        m_pipeHierLevel[11],   m_pipeHierLevel[12],   m_pipeHierLevel[13],
+        m_pipeHierLevel[14],   m_pipeHierLevel[15],   m_pipeConvertHier[0],
+        m_pipeConvertHier[1],  m_pipeConvertHier[2],  m_pipeConvertHier[3],
+        m_pipeConvertHier[4],  m_pipeConvertHier[5],  m_pipeConvertHier[6],
+        m_pipeConvertHier[7],  m_pipeConvertHier[8],  m_pipeConvertHier[9],
+        m_pipeConvertHier[10], m_pipeConvertHier[11], m_pipeConvertHier[12],
+        m_pipeConvertHier[13], m_pipeConvertHier[14], m_pipeConvertHier[15]};
     for (const u32 p : hierPipes)
       if (p != ~0u && p != 0) backend.destroyComputePipeline(p);
   }
@@ -849,9 +859,8 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
     for (u32 l = 1; l < kMaxHierLevels; ++l)
       if (m_argsHier[l][s] != kInvalid && m_argsHier[l][s] != 0)
         backend.destroyBuffer(m_argsHier[l][s]);
-    for (const u32 h :
-         {m_activeNodes[s][0], m_activeNodes[s][1], m_hierCnt[s][0],
-          m_hierCnt[s][1], m_hierParams[s], m_argsPostCull[s]})
+    for (const u32 h : {m_activeNodes[s][0], m_activeNodes[s][1],
+                        m_hierCnt[s][0], m_hierCnt[s][1], m_hierParams[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
     for (const u32 h :
          {m_planes[s],     m_cntA[s],          m_visibleList[s],
@@ -862,14 +871,14 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
           m_postParams[s], m_postRasterCnt[s], m_argsExpand[s],
           m_argsCull[s],   m_argsRaster[s],    m_argsPostRaster[s],
           m_hwPairs[s],    m_hwParams[s],      m_hwDrawArgs[s],
-          m_argsHzb1[s]})
+          m_argsHzb1[s],   m_argsPostCull[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
   }
   for (const u32 h :
        {m_instanceBuffer, m_meshRangeBuffer, m_clusterBuffer, m_groupBuffer,
         m_positionBuffer, m_indexBuffer, m_cfgExpand, m_cfgCull, m_cfgRaster,
-        m_cfgPost, m_cfgHwDraw, m_aabbBuffer, m_hierBuffer, m_groupRangeBuffer,
-        m_meshHierRootBuffer, m_cfgPostCull})
+        m_cfgPost, m_cfgHwDraw, m_cfgPostCull, m_aabbBuffer, m_hierBuffer,
+        m_groupRangeBuffer, m_meshHierRootBuffer})
     if (h != kInvalid && h != 0) backend.destroyBuffer(h);
   for (u32 l = 0; l < kMaxHierLevels; ++l)
     if (m_cfgHier[l] != kInvalid && m_cfgHier[l] != 0)
