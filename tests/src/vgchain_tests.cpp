@@ -197,6 +197,7 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
   };
   runChainMode(0);  // linear: the expand+per-cluster reference shape
   runChainMode(1);  // M5.2: the level-wise BVH8 traversal
+  runChainMode(2);  // M5.3: the persistent-threads MPMC traversal
 
   chain.onShutdown(*backend);
   backend->shutdown();

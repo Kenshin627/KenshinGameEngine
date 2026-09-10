@@ -114,20 +114,21 @@ struct Args {
   std::string mesh = "all";   // all (full scene) | cube | sphere |
                               // torus | cylinder | cone | knot | <path.obj>
   std::string screenshot;
-  std::string screenshotUi;  // full window incl. ImGui
-  bool virtualPath = false;  // accepted no-op since M3.4: kgeo defaults
-                             // to the virtual chain
-  bool baseline = false;     // accepted no-op since M4.4: the CPU-cut
-                             // render path retired (--virtual twin)
-  bool checker = false;      // UV checkerboard debug view (decode path)
-  bool noOcclusion = false;  // A/B: disable the occlusion cull chain
-  bool noAsync = false;      // M4.4 A/B: chain onto the graphics queue
-  bool cullLinear = false;   // M5.2 A/B: force the linear expand path
-  bool multi = false;        // S4.6 acceptance: near/mid/far instances
-  bool dense = false;        // M3.4 acceptance: front-back occluders
-  int grid = 0;              // --grid N: N-instance occlusion carpet
-                             // (1..32; the VisBuffer payload's 5b)
-  bool wall = false;         // --wall: big occluder + hidden fleet
+  std::string screenshotUi;    // full window incl. ImGui
+  bool virtualPath = false;    // accepted no-op since M3.4: kgeo defaults
+                               // to the virtual chain
+  bool baseline = false;       // accepted no-op since M4.4: the CPU-cut
+                               // render path retired (--virtual twin)
+  bool checker = false;        // UV checkerboard debug view (decode path)
+  bool noOcclusion = false;    // A/B: disable the occlusion cull chain
+  bool noAsync = false;        // M4.4 A/B: chain onto the graphics queue
+  bool cullLinear = false;     // M5.2 A/B: force the linear expand path
+  bool cullLevelwise = false;  // M5.3 A/B: the level-wise reference
+  bool multi = false;          // S4.6 acceptance: near/mid/far instances
+  bool dense = false;          // M3.4 acceptance: front-back occluders
+  int grid = 0;                // --grid N: N-instance occlusion carpet
+                               // (1..32; the VisBuffer payload's 5b)
+  bool wall = false;           // --wall: big occluder + hidden fleet
   // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
   // controller's interactive defaults.
   bool hasCam = false;
@@ -167,6 +168,8 @@ Args parseArgs(int argc, char** argv) {
       args.noAsync = true;
     else if (std::strcmp(argv[i], "--cull-linear") == 0)
       args.cullLinear = true;
+    else if (std::strcmp(argv[i], "--cull-levelwise") == 0)
+      args.cullLevelwise = true;
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
@@ -627,7 +630,9 @@ int main(int argc, char** argv) {
         kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
                                                 ci.planes);
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
-        ci.cullMode = (vgDebug.hierCull && !args.cullLinear) ? 1u : 0u;
+        ci.cullMode = !vgDebug.hierCull || args.cullLinear
+                          ? 0u
+                          : (args.cullLevelwise ? 1u : 2u);
         // Panel stats: NON-BLOCKING mapped snapshot, taken BEFORE this
         // frame's execute. At this point the CURRENT slot's counters
         // still hold the frame-before-last's final values, and

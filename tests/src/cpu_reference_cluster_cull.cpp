@@ -330,6 +330,31 @@ TEST_CASE("hierarchy chain identity cut == selectLodCut",
     lastCount = got.size();
   }
 
+  // M5.3: the same sweep on the PERSISTENT driver (single instance =
+  // queue depth 1, the deepest-starvation stress for the worker loop).
+  inputs.cullMode = 2;
+  lastCount = ~kenshin::usize(0);
+  for (const f32 threshold : {0.25f, 1.0f, 4.0f}) {
+    inputs.pixelThreshold = threshold;
+    REQUIRE(backend->beginFrame(frameInfo));
+    chain.execute(*backend, inputs);
+    backend->endFrame();
+
+    std::vector<glm::uvec2> pairs;
+    REQUIRE(chain.readVisiblePairs(*backend, pairs));
+    std::multiset<u32> got;
+    for (const auto& p : pairs) got.insert(p.y);
+    std::vector<u32> cpuCut;
+    geometry::selectLodCut(dag, threshold, H, 60.0f, camArr, cpuCut);
+    REQUIRE(got.size() == cpuCut.size());
+    std::set<u32> expected(cpuCut.begin(), cpuCut.end());
+    for (const u32 c : got) REQUIRE(expected.count(c) == 1);
+    INFO("persistent threshold " << threshold << ": cut " << got.size()
+                                 << " == selectLodCut " << cpuCut.size());
+    REQUIRE(got.size() <= lastCount);
+    lastCount = got.size();
+  }
+
   chain.onShutdown(*backend);
   backend->shutdown();
 }

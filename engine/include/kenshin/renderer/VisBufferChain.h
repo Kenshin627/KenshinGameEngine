@@ -49,10 +49,12 @@ struct ChainInputs {
   u32 hwMode = 1;                // M4.2: 0 = all SW, 1 = route by
                                  // threshold, 2 = force all HW
   f32 hwThresholdPx = 18.0f;     // UE's GNaniteMinPixelsPerEdgeHW
-  /// M5.2: 0 = linear expand+per-cluster cull (differential reference),
-  /// 1 = BVH8 hierarchy traversal (level-wise dispatch). Forced to 0 at
-  /// init when no hierarchy data was provided.
-  u32 cullMode = 1;
+  /// M5.2/M5.3: 0 = linear expand+per-cluster cull (differential
+  /// reference), 1 = BVH8 level-wise dispatch (M5.2 reference), 2 = the
+  /// M5.3 persistent-threads traversal (single dispatch + MPMC ticket
+  /// queue, the default). Forced to 0 at init when no hierarchy data
+  /// was provided.
+  u32 cullMode = 2;
 };
 
 class VisBufferChain {
@@ -212,6 +214,19 @@ class VisBufferChain {
   u32 m_hierDepth = 0;  // levels actually dispatched (1 = root only)
   bool m_hierReady = false;
   u32 m_hierNodeCount = 0;  // for the shader-side index clamps
+
+  // ---- M5.3: the persistent-threads path --------------------------------
+  // The ticket ring: capacity = pow2(instances x (nodes+1)) - every node
+  // enters at most once per instance per frame, so indices never wrap
+  // within a frame. EMPTY-initialized once at init (consumers re-empty
+  // their slots, keeping the invariant without per-frame clears).
+  static constexpr u32 kPersistGroups = 512;  // fixed direct dispatch
+  u32 m_persistQueue[kSlots]{};
+  u32 m_persistState
+      [kSlots]{};  // {head,tail,outstanding,done,visited,pruned,pad,pad}
+  u32 m_pipeSeedQ = ~0u;
+  u32 m_pipePersist = ~0u;
+  u32 m_persistCapacity = 0;  // pow2 entry count (mask = capacity-1)
   u32 m_argsPostCull[kSlots]{};
   u32 m_cfgPostCull = ~0u;
   u32 m_groupCount = 0;

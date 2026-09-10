@@ -122,6 +122,10 @@ bool VisBufferChain::init(
   for (u32 k = 0; k < kMaxHierLevels; ++k)
     if (!makePipe("count_to_indirect.slang", m_pipeConvertHier[k]))
       return false;
+  // M5.3: the persistent-threads pair (compiled unconditionally, same
+  // regression-gating rationale).
+  if (!makePipe("cull_hier_seedq.slang", m_pipeSeedQ)) return false;
+  if (!makePipe("cull_hier_persist.slang", m_pipePersist)) return false;
 
   m_instanceCount = static_cast<u32>(instances.size());
   m_maxPairs = maxPairs;
@@ -198,6 +202,27 @@ bool VisBufferChain::init(
     }
     m_hierNodeCount = static_cast<u32>(nodeCount);
     m_hierDepth = m_hierReady ? std::min(depth, kMaxHierLevels) : 0;
+
+    // M5.3: the ticket ring. Capacity = pow2(instances x (nodes+1)) -
+    // every node enters the queue at most once per instance per frame,
+    // so monotonic ticket indices never wrap within a frame.
+    u32 entries = m_instanceCount * (m_hierNodeCount + 1u);
+    m_persistCapacity = 1;
+    while (m_persistCapacity < entries && m_persistCapacity < (1u << 30))
+      m_persistCapacity <<= 1;
+    // One-time EMPTY init via initialData (the HZB 0xFF house pattern -
+    // fillBuffer needs an active recording): consumers re-empty their
+    // slots every frame, so the invariant holds without per-frame clears.
+    const std::vector<u32> empties(usize(m_persistCapacity) * 2, 0xFFFFFFFFu);
+    for (u32 sl = 0; sl < kSlots; ++sl) {
+      m_persistQueue[sl] =
+          makeDeviceBuffer(backend, empties.size() * sizeof(u32),
+                           empties.data(), "chain-persistQ");
+      m_persistState[sl] =
+          makeHostBuffer(backend, 32, nullptr, "chain-persistState");
+    }
+    KENSHIN_INFO("[vgchain] persistent queue: {} entries (mask {:#x})",
+                 m_persistCapacity, m_persistCapacity - 1u);
   }
   if (!m_hierReady)
     KENSHIN_WARN("[vgchain] no hierarchy data - cullMode falls back to linear");
@@ -415,6 +440,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
         backend.mappedPtr(m_cullParams[slot]));
     for (int k = 0; k < 8; ++k) hp[k] = cp[k];
     hp[1].y = static_cast<f32>(m_hierNodeCount);
+    hp[1].w = static_cast<f32>(m_persistCapacity - 1u);  // queue mask
     hp[7].z = static_cast<f32>(m_clusterCount);
     hp[7].w = static_cast<f32>(m_groupCount);
   }
@@ -520,9 +546,38 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     b(m_pendingPairs[slot]);
     b(m_hwPairs[slot]);
     b(m_cullCnt[slot]);
+  } else if (in.cullMode == 2u) {
+    // ---- M5.3: the persistent-threads traversal. Seed the ticket
+    // queue (same argsExpand envelope - the seed count is the visible
+    // instance count), then ONE fixed direct dispatch: the workers
+    // drain the queue until the outstanding counter hits zero.
+    const u32 seedqHandles[6] = {m_visibleList[slot],  m_instanceBuffer,
+                                 m_meshHierRootBuffer, m_persistQueue[slot],
+                                 m_persistState[slot], m_expCnt[slot]};
+    const u32 seedGroups = (m_instanceCount + 63u) / 64u;
+    backend.dispatchCompute(m_pipeSeedQ, seedqHandles, 6, seedGroups, 1, 1);
+    b(m_persistQueue[slot]);
+    b(m_persistState[slot]);
+
+    const u32 persistHandles[15] = {
+        m_hierParams[slot], m_clusterBuffer,      m_groupBuffer,
+        m_instanceBuffer,   m_pairs[slot],        m_cullCnt[slot],
+        m_hzb[prevSlot],    m_aabbBuffer,         m_pendingPairs[slot],
+        m_hwPairs[slot],    m_planes[slot],       m_hierBuffer,
+        m_groupRangeBuffer, m_persistQueue[slot], m_persistState[slot]};
+    backend.dispatchCompute(m_pipePersist, persistHandles, 15, kPersistGroups,
+                            1, 1);
+
+    b(m_pairs[slot]);
+    b(m_pendingPairs[slot]);
+    b(m_hwPairs[slot]);
+    b(m_cullCnt[slot]);
+    b(m_persistQueue[slot]);
+    b(m_persistState[slot]);
   } else {
-    // Seed: visible instances -> (instance, mesh root) entries in the
-    // level-0 list (sequential writes; the count is expCnt[1]).
+    // ---- M5.2: level-wise. Seed: visible instances -> (instance,
+    // mesh root) entries in the level-0 list (sequential writes; the
+    // count is expCnt[1]).
     const u32 seedHandles[6] = {m_visibleList[slot],  m_instanceBuffer,
                                 m_meshHierRootBuffer, m_activeNodes[slot][0],
                                 m_expCnt[slot],       m_hierCnt[slot][0]};
@@ -676,6 +731,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   // Submit the chain (no-op on the graphics fallback path) BEFORE
   // recording the graphics-side HW draw.
+  backend.submitChain();
   backend.submitChain();
 
   // ---- M4.2 hardware raster (graphics queue): the routed clusters
@@ -840,18 +896,19 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
     if (p != ~0u) backend.destroyComputePipeline(p);
   if (m_pipeHwRaster != ~0u) backend.destroyNullPipeline(m_pipeHwRaster);
   {
-    const u32 hierPipes[1 + 2 * kMaxHierLevels] = {
-        m_pipeHierSeed,        m_pipeHierLevel[0],    m_pipeHierLevel[1],
-        m_pipeHierLevel[2],    m_pipeHierLevel[3],    m_pipeHierLevel[4],
-        m_pipeHierLevel[5],    m_pipeHierLevel[6],    m_pipeHierLevel[7],
-        m_pipeHierLevel[8],    m_pipeHierLevel[9],    m_pipeHierLevel[10],
-        m_pipeHierLevel[11],   m_pipeHierLevel[12],   m_pipeHierLevel[13],
-        m_pipeHierLevel[14],   m_pipeHierLevel[15],   m_pipeConvertHier[0],
-        m_pipeConvertHier[1],  m_pipeConvertHier[2],  m_pipeConvertHier[3],
-        m_pipeConvertHier[4],  m_pipeConvertHier[5],  m_pipeConvertHier[6],
-        m_pipeConvertHier[7],  m_pipeConvertHier[8],  m_pipeConvertHier[9],
-        m_pipeConvertHier[10], m_pipeConvertHier[11], m_pipeConvertHier[12],
-        m_pipeConvertHier[13], m_pipeConvertHier[14], m_pipeConvertHier[15]};
+    const u32 hierPipes[3 + 2 * kMaxHierLevels] = {
+        m_pipeHierSeed,        m_pipeSeedQ,           m_pipePersist,
+        m_pipeHierLevel[0],    m_pipeHierLevel[1],    m_pipeHierLevel[2],
+        m_pipeHierLevel[3],    m_pipeHierLevel[4],    m_pipeHierLevel[5],
+        m_pipeHierLevel[6],    m_pipeHierLevel[7],    m_pipeHierLevel[8],
+        m_pipeHierLevel[9],    m_pipeHierLevel[10],   m_pipeHierLevel[11],
+        m_pipeHierLevel[12],   m_pipeHierLevel[13],   m_pipeHierLevel[14],
+        m_pipeHierLevel[15],   m_pipeConvertHier[0],  m_pipeConvertHier[1],
+        m_pipeConvertHier[2],  m_pipeConvertHier[3],  m_pipeConvertHier[4],
+        m_pipeConvertHier[5],  m_pipeConvertHier[6],  m_pipeConvertHier[7],
+        m_pipeConvertHier[8],  m_pipeConvertHier[9],  m_pipeConvertHier[10],
+        m_pipeConvertHier[11], m_pipeConvertHier[12], m_pipeConvertHier[13],
+        m_pipeConvertHier[14], m_pipeConvertHier[15]};
     for (const u32 p : hierPipes)
       if (p != ~0u && p != 0) backend.destroyComputePipeline(p);
   }
@@ -860,7 +917,8 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
       if (m_argsHier[l][s] != kInvalid && m_argsHier[l][s] != 0)
         backend.destroyBuffer(m_argsHier[l][s]);
     for (const u32 h : {m_activeNodes[s][0], m_activeNodes[s][1],
-                        m_hierCnt[s][0], m_hierCnt[s][1], m_hierParams[s]})
+                        m_hierCnt[s][0], m_hierCnt[s][1], m_hierParams[s],
+                        m_persistQueue[s], m_persistState[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
     for (const u32 h :
          {m_planes[s],     m_cntA[s],          m_visibleList[s],
