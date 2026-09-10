@@ -22,9 +22,12 @@ int main(int argc, char** argv) {
 
   std::string input, output = "out/mesh.kgeo";
   std::string proc;  // "sphere" or "knot"
+  bool unpaged = false;  // --unpaged: emit v2 (pools) instead of v3 (pages)
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
       output = argv[++i];
+    else if (std::strcmp(argv[i], "--unpaged") == 0)
+      unpaged = true;
     else if (std::strcmp(argv[i], "--proc") == 0 && i + 1 < argc)
       proc = argv[++i];
     else
@@ -103,12 +106,28 @@ int main(int argc, char** argv) {
       dagStats.rootCount, dagStats.monotonicFixes, dag.hierarchyNodes.size(),
       dag.hierarchyRoot);
 
-  if (!kenshin::geometry::writeKGeo(output, dag, log)) {
+  if (unpaged) {
+    if (!kenshin::geometry::writeKGeo(output, dag, log)) {
+      KENSHIN_ERROR("write failed: {}", log);
+      kenshin::log::shutdown();
+      return 1;
+    }
+    KENSHIN_INFO("[builder] written (v2 unpaged): {}", output);
+    kenshin::log::shutdown();
+    return 0;
+  }
+  kenshin::geometry::PackedGeometry packed;
+  if (!kenshin::geometry::packPages(dag, packed, log)) {
+    KENSHIN_ERROR("page packing failed: {}", log);
+    kenshin::log::shutdown();
+    return 1;
+  }
+  if (!kenshin::geometry::writeKGeoPaged(output, dag, packed, log)) {
     KENSHIN_ERROR("write failed: {}", log);
     kenshin::log::shutdown();
     return 1;
   }
-  KENSHIN_INFO("[builder] written: {}", output);
+  KENSHIN_INFO("[builder] written (v3 paged): {}", output);
   kenshin::log::shutdown();
   return 0;
 }

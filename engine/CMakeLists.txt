@@ -29,6 +29,7 @@ add_library(kenshin_engine STATIC
     src/geometry/shapes/TorusGeometry.cpp
     src/geometry/shapes/TorusKnotGeometry.cpp
     src/geometry/KGeoFile.cpp
+    src/geometry/PagePacker.cpp
     src/geometry/ClusterLodBuilder.cpp
     # vendored ImGui backends, compiled here so vk calls resolve through volk
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp

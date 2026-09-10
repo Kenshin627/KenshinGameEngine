@@ -102,6 +102,28 @@ struct ClusterDag {
   u32 sourceVertexCount = 0;
   u32 sourceTriangleCount = 0;
 
+  // ---- M6.1: the paged variant (.kgeo v3) -----------------------------
+  // `paged` dags carry the full table/hierarchy set (culling data is
+  // complete) but EMPTY pools - the geometry lives in pages on disk,
+  // read on demand. cluster.vertexOffset/indexOffset are PAGE-LOCAL in
+  // this mode (pageMeta[clusterPage[c]] carries the section bases);
+  // they are pool-global in the unpaged v2 mode.
+  bool paged = false;
+  u32 pageCount = 0;
+  u32 pageSlotSize = 0;
+  bool pagesHaveNormals = false;
+  bool pagesHaveUvs = false;
+  std::vector<u32> clusterPage;      // per cluster -> page index
+  struct DagPageMeta {
+    u32 posBase = 0;   // float4 elements
+    u32 nrmBase = 0;   // float4 elements
+    u32 uvBase = 0;    // float2 elements
+    u32 idxBase = 0;   // u32 elements
+    u32 vertexCount = 0;
+    u32 indexCount = 0;
+  };
+  std::vector<DagPageMeta> pageMeta;
+
   // ---- queries -------------------------------------------------------
   u32 triangleCount(u32 cluster) const {
     return clusters[cluster].indexCount / 3;
