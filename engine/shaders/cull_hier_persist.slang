@@ -225,9 +225,67 @@ void emitCluster(uint2 item, float4x4 model) {
   InterlockedAdd(counters[6], cluster.indexCount / 3u);
 }
 
-/// One worker's node visit. Returns the number of children to push.
+/// Node-AABB occlusion test (M5.4a) against the PREV frame's HZB - the
+/// same conservative rect walk as occluded(), fed already-computed
+/// world-space corners. Dominance: a box tested occluded implies every
+/// contained box tests occluded (child zMin >= parent zMin -> nearBits
+/// only smaller; child rect subset -> tileMin only larger), so the bit
+/// can be INHERITED down the subtree without retesting.
+bool boxOccluded(float3 corner[8]) {
+  const uint W = uint(params[6].y), H = uint(params[6].z);
+  float4 clip[8];
+  for (uint k = 0; k < 8u; ++k) {
+    clip[k] = params[2] * corner[k].x + params[3] * corner[k].y +
+              params[4] * corner[k].z + params[5];
+    if (clip[k].w <= 0.0) return false;
+  }
+  float zMin = clip[0].z / clip[0].w;
+  float rx0 = 1e30f, rx1 = -1e30f, ry0 = 1e30f, ry1 = -1e30f;
+  for (uint k = 0; k < 8u; ++k) {
+    const float2 ndc = clip[k].xy / clip[k].w;
+    rx0 = min(rx0, (ndc.x * 0.5 + 0.5) * float(W));
+    rx1 = max(rx1, (ndc.x * 0.5 + 0.5) * float(W));
+    ry0 = min(ry0, (ndc.y * 0.5 + 0.5) * float(H));
+    ry1 = max(ry1, (ndc.y * 0.5 + 0.5) * float(H));
+    zMin = min(zMin, clip[k].z / clip[k].w);
+  }
+  zMin = clamp(zMin, 0.0, 1.0);
+  const uint nearBits = uint((1.0 - zMin) * 4294967295.0);
+  const int x0 = int(floor(rx0)), x1 = int(ceil(rx1));
+  const int y0 = int(floor(ry0)), y1 = int(ceil(ry1));
+  if (x0 < 0 || y0 < 0 || x1 >= int(W) || y1 >= int(H)) return false;
+  uint m = 0, lw = W, lh = H;
+  while (((uint(x1) >> m) - (uint(x0) >> m) >= 4u ||
+          (uint(y1) >> m) - (uint(y0) >> m) >= 4u) &&
+         lw > 1u && lh > 1u) {
+    ++m;
+    lw = (lw + 1u) / 2u;
+    lh = (lh + 1u) / 2u;
+  }
+  uint off = 0, ww = W, hh = H;
+  for (uint k = 0; k < m; ++k) {
+    off += ww * hh;
+    ww = (ww + 1u) / 2u;
+    hh = (hh + 1u) / 2u;
+  }
+  const uint tx0 = uint(x0) >> m, tx1 = uint(x1) >> m;
+  const uint ty0 = uint(y0) >> m, ty1 = uint(y1) >> m;
+  uint tileMin = 0xFFFFFFFFu;
+  for (uint ty = ty0; ty <= ty1; ++ty)
+    for (uint tx = tx0; tx <= tx1; ++tx)
+      tileMin =
+          min(tileMin, hzb[off + min(ty, lh - 1u) * lw + min(tx, lw - 1u)]);
+  return nearBits < tileMin;
+}
+
+/// One worker's node visit. Returns the number of children to push;
+/// childOcc tells the caller whether they INHERIT the occluded bit
+/// (either inherited from above, or set by this node's own AABB test -
+/// the ROOT node's test plays the instance-level pre-pass).
 uint visitNode(uint inst, uint nodeIdx, float4x4 model, uint nodeCount,
-               uint clusterCount, uint groupCount) {
+               uint clusterCount, uint groupCount, bool inherited,
+               out bool childOcc) {
+  childOcc = inherited;
   InterlockedAdd(state[4], 1);  // visited (M5.5 curves)
   const GpuHierNode node = hierNodes[min(nodeIdx, nodeCount - 1u)];
 
@@ -277,10 +335,31 @@ uint visitNode(uint inst, uint nodeIdx, float4x4 model, uint nodeCount,
     const uint2 range = groupRanges[g];
     const uint begin = min(range.x, clusterCount);
     const uint end = min(range.x + range.y, clusterCount);
+    if (inherited) {
+      // M5.4a: dominance proved every cluster here tests occluded - the
+      // per-cluster rect walk is skipped and the LOD-selected clusters
+      // go straight to pending (the exact set the per-cluster tests
+      // would have pended; counters[6]/HW routing intentionally NOT
+      // touched, matching the occluded branch of emitCluster).
+      for (uint c = begin; c < end; ++c) {
+        if (!fireable(clusters[c].group, model)) continue;
+        if (clusters[c].refinedGroup >= 0 &&
+            fireable(uint(clusters[c].refinedGroup), model))
+          continue;
+        uint p = 0;
+        InterlockedAdd(counters[4], 1, p);
+        pendingPairs[p] = uint2(inst, c);
+      }
+      return 0u;
+    }
     for (uint c = begin; c < end; ++c) emitCluster(uint2(inst, c), model);
     return 0u;
   }
 
+  // Internal survivor: the node's own AABB occlusion test sets the
+  // inherited bit for the whole subtree.
+  if (!inherited && params[6].x > 0.5 && boxOccluded(corner))
+    childOcc = true;
   return min(node.childCount, 8u);
 }
 
@@ -359,12 +438,18 @@ void pushEntry(uint inst, uint node, uint mask) {
     InterlockedAdd(queueWords[w + 0u], kEmpty - inst);
     InterlockedAdd(queueWords[w + 1u], kEmpty - nodeIdx);
 
+    // M5.4a: the node word packs the INHERITED-OCCLUDED bit in 31.
+    const bool inherited = (nodeIdx & 0x80000000u) != 0u;
+    const uint nodeOnly = min(nodeIdx & 0x7FFFFFFFu, nodeCount - 1u);
+
     const float4x4 model = instances[inst].model;
-    const GpuHierNode node = hierNodes[min(nodeIdx, nodeCount - 1u)];
-    const uint nChildren = visitNode(inst, nodeIdx, model, nodeCount,
-                                     clusterCount, groupCount);
+    const GpuHierNode node = hierNodes[nodeOnly];
+    bool childOcc = false;
+    const uint nChildren =
+        visitNode(inst, nodeOnly, model, nodeCount, clusterCount, groupCount,
+                  inherited, childOcc);
     for (uint i = 0; i < nChildren; ++i)
-      pushEntry(inst, node.children[i], mask);
+      pushEntry(inst, node.children[i] | (childOcc ? 0x80000000u : 0u), mask);
 
     // retire: the LAST retiree (outstanding was exactly 1) sets done.
     uint last = 0;
