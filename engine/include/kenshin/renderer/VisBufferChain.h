@@ -50,11 +50,12 @@ struct ChainInputs {
                                  // threshold, 2 = force all HW
   f32 hwThresholdPx = 18.0f;     // UE's GNaniteMinPixelsPerEdgeHW
   /// M5.2/M5.3: 0 = linear expand+per-cluster cull (differential
-  /// reference), 1 = BVH8 level-wise dispatch (M5.2 reference), 2 = the
+  /// reference), 1 = BVH8 level-wise dispatch (the default), 2 = the
   /// M5.3 persistent-threads traversal (single dispatch + MPMC ticket
-  /// queue, the default). Forced to 0 at init when no hierarchy data
-  /// was provided.
-  u32 cullMode = 2;
+  /// queue -- at parity on light scenes, -7..-27% on chain-heavy ones
+  /// in the v1 measurements; the M5.5 worker redesign decides the
+  /// final default). Forced to 0 at init without hierarchy data.
+  u32 cullMode = 1;
 };
 
 class VisBufferChain {
@@ -220,7 +221,9 @@ class VisBufferChain {
   // enters at most once per instance per frame, so indices never wrap
   // within a frame. EMPTY-initialized once at init (consumers re-empty
   // their slots, keeping the invariant without per-frame clears).
-  static constexpr u32 kPersistGroups = 512;  // fixed direct dispatch
+  static constexpr u32 kPersistGroups = 8;  // measured sweep 8>16>32>...>512
+      // (per-group async-engine overhead dominates
+      // at current scene scales; M5.5 re-tunes)
   u32 m_persistQueue[kSlots]{};
   u32 m_persistState
       [kSlots]{};  // {head,tail,outstanding,done,visited,pruned,pad,pad}
