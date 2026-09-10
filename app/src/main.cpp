@@ -247,6 +247,8 @@ struct VgDebugState {
     occHist.push_back(static_cast<float>(occCulled));
     reviveHist.push_back(static_cast<float>(revived));
     hwHist.push_back(static_cast<float>(hwClusters));
+    visitedHist.push_back(static_cast<float>(visitedNodes));
+    prunedHist.push_back(static_cast<float>(prunedNodes));
     if (clusterHist.size() > 240) {
       clusterHist.erase(clusterHist.begin());
       triHist.erase(triHist.begin());
@@ -254,8 +256,14 @@ struct VgDebugState {
       occHist.erase(occHist.begin());
       reviveHist.erase(reviveHist.begin());
       hwHist.erase(hwHist.begin());
+      visitedHist.erase(visitedHist.begin());
+      prunedHist.erase(prunedHist.begin());
     }
   }
+  unsigned visitedNodes = 0;
+  unsigned prunedNodes = 0;
+  std::vector<float> visitedHist;
+  std::vector<float> prunedHist;
 };
 
 }  // namespace
@@ -474,6 +482,16 @@ int main(int argc, char** argv) {
           ImGui::PlotLines("##hw", vgDebug.hwHist.data(),
                            int(vgDebug.hwHist.size()), 0, nullptr, 0.0f,
                            1500.0f, ImVec2(240, 40));
+          if (ImGui::CollapsingHeader("Traversal (M5)")) {
+            ImGui::Text("visited %u  pruned %u", vgDebug.visitedNodes,
+                        vgDebug.prunedNodes);
+            ImGui::PlotLines("##visited", vgDebug.visitedHist.data(),
+                             int(vgDebug.visitedHist.size()), 0, nullptr, 0.0f,
+                             20000.0f, ImVec2(240, 40));
+            ImGui::PlotLines("##pruned", vgDebug.prunedHist.data(),
+                             int(vgDebug.prunedHist.size()), 0, nullptr, 0.0f,
+                             20000.0f, ImVec2(240, 40));
+          }
           ImGui::End();
         }
       });
@@ -643,7 +661,7 @@ int main(int argc, char** argv) {
         // submissions may overlap), which showed up as torn counters
         // - intermittent zero clusters, wildly varying write counts.
         {
-          kenshin::u32 cs[13];
+          kenshin::u32 cs[15];
           if (chainReady && chain.readStatsMapped(*vgBackend, cs)) {
             vgDebug.visibleClusters = cs[2];
             vgDebug.cutTris = cs[11];
@@ -654,6 +672,8 @@ int main(int argc, char** argv) {
             vgDebug.workItems = cs[1];
             vgDebug.tooCoarse = cs[3];
             vgDebug.srcTooCoarse = cs[4];
+            vgDebug.visitedNodes = cs[13];
+            vgDebug.prunedNodes = cs[14];
             const kenshin::f32 cover =
                 100.0f * static_cast<kenshin::f32>(cs[5] + cs[10]) /
                 (ci.width * ci.height);
@@ -688,10 +708,12 @@ int main(int argc, char** argv) {
       if (chainReady)
         KENSHIN_INFO(
             "[vgstats] work {} clusters {} tris {} writes {} occ {} "
-            "revived {} hw {} tooCoarse {} srcTooCoarse {} gpuMs {}",
+            "revived {} hw {} tooCoarse {} srcTooCoarse {} visited {} "
+            "pruned {} gpuMs {}",
             vgDebug.workItems, vgDebug.visibleClusters, vgDebug.cutTris,
             vgDebug.pxWrites, vgDebug.occCulled, vgDebug.revived,
             vgDebug.hwClusters, vgDebug.tooCoarse, vgDebug.srcTooCoarse,
+            vgDebug.visitedNodes, vgDebug.prunedNodes,
             vgBackend->gpuTimings().frameMs);
     }
 

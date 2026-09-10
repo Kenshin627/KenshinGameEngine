@@ -104,6 +104,8 @@ struct GpuHierNode {
 [[vk::binding(14)]] RWStructuredBuffer<uint2> activeOut;
 [[vk::binding(15)]] StructuredBuffer<uint> cntIn;
 [[vk::binding(16)]] RWStructuredBuffer<uint> cntOut;
+[[vk::binding(
+    17)]] RWStructuredBuffer<uint> travStats;  // [4] visited, [5] pruned
 
 bool fireable(uint groupIdx, float4x4 model) {
   const GpuGroup g = groups[groupIdx];
@@ -290,6 +292,7 @@ bool boxOccluded(float3 corner[8]) {
 [shader("compute")][numthreads(64, 1, 1)] void main(
     uint tid : SV_DispatchThreadID) {
   if (tid >= cntIn[0]) return;
+  InterlockedAdd(travStats[4], 1);  // visited (M5.5 curves)
   const uint nodeCount = uint(params[1].y);
   const uint clusterCount = uint(params[7].z);
   const uint groupCount = uint(params[7].w);
@@ -322,7 +325,10 @@ bool boxOccluded(float3 corner[8]) {
         break;
       }
     }
-    if (allOutside) return;
+    if (allOutside) {
+      InterlockedAdd(travStats[5], 1);  // pruned (frustum)
+      return;
+    }
   }
 
   // 2) LOD prune: the subtree is uniformly "too fine" for this view.
@@ -334,7 +340,10 @@ bool boxOccluded(float3 corner[8]) {
   const float3 nearest = clamp(params[0].xyz, wmn, wmx);
   const float dist = max(distance(nearest, params[0].xyz), 0.1);
   const float tNode = params[0].w * params[1].x * dist;
-  if (node.maxSimplifyError <= tNode) return;
+  if (node.maxSimplifyError <= tNode) {
+    InterlockedAdd(travStats[5], 1);  // pruned (LOD)
+    return;
+  }
 
   if (node.childCount == 0u) {
     // 4) Leaf: one group; its clusters are a contiguous range.

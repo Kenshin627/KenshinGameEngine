@@ -180,7 +180,7 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
     REQUIRE(backend->readbackBuffer(chain.visBuffer(*backend), 0,
                                     usize(W) * H * sizeof(u64), visBytes));
     const u64* visInFrame = reinterpret_cast<const u64*>(visBytes.data());
-    u32 stats[13] = {};
+    u32 stats[15] = {};
     REQUIRE(chain.readStats(*backend, stats));
     INFO("cullMode " << cullMode << " chain stats: visibleInst " << stats[0]
                      << ", workItems " << stats[1] << ", pairs " << stats[2]

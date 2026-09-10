@@ -419,6 +419,11 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // the level guards read garbage entries).
   std::memset(backend.mappedPtr(m_hierCnt[slot][0]), 0, 4);
   std::memset(backend.mappedPtr(m_hierCnt[slot][1]), 0, 4);
+  // Traversal stats (visited/pruned) reset every frame - both drivers
+  // count into the state buffer's words [4]/[5] (the level shader binds
+  // it as its 18th handle; the persistent shader's state IS this buffer).
+  std::memset(backend.mappedPtr(m_persistState[slot]), 0, 32);
+
   glm::vec4 cullParams[8];
   cullParams[0] = glm::vec4(in.camPos, in.pixelThreshold);
   cullParams[1] = glm::vec4(in.worldPerPixel, 0.0f, in.nearZ, 0.0f);
@@ -597,7 +602,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     // per site per frame - the M3.3 discipline).
     for (u32 level = 1; level <= m_hierDepth; ++level) {
       const u32 parity = (level - 1) & 1;
-      const u32 levelHandles[17] = {m_hierParams[slot],
+      const u32 levelHandles[18] = {m_hierParams[slot],
                                     m_clusterBuffer,
                                     m_groupBuffer,
                                     m_instanceBuffer,
@@ -613,9 +618,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
                                     m_activeNodes[slot][parity],
                                     m_activeNodes[slot][parity ^ 1],
                                     m_hierCnt[slot][parity],
-                                    m_hierCnt[slot][parity ^ 1]};
+                                    m_hierCnt[slot][parity ^ 1],
+                                    m_persistState[slot]};
       backend.dispatchComputeIndirect(m_pipeHierLevel[level - 1], levelHandles,
-                                      17, m_argsHier[level][slot], 0);
+                                      18, m_argsHier[level][slot], 0);
       b(m_pairs[slot]);
       b(m_pendingPairs[slot]);
       b(m_hwPairs[slot]);
@@ -771,7 +777,7 @@ u32 VisBufferChain::visBuffer(backend::IRenderBackend& backend) const {
 }
 
 bool VisBufferChain::readStats(backend::IRenderBackend& backend,
-                               u32 out[13]) const {
+                               u32 out[15]) const {
   const u32 slot = backend.lastCompletedFrameSlot();
   if (slot == 0xFFFFFFFFu) return false;  // no completed frame yet
   std::vector<u8> a(8), c(32), r(16);
@@ -800,11 +806,21 @@ bool VisBufferChain::readStats(backend::IRenderBackend& backend,
   out[10] = prc[1];                             // post-raster px writes
   out[11] = cc[6];                              // cut tris (main + revived)
   out[12] = cc[7];                              // HW-routed clusters
+  {
+    std::vector<u8> ps(32);
+    if (backend.readbackBuffer(m_persistState[slot], 0, 32, ps)) {
+      const u32* psw = reinterpret_cast<const u32*>(ps.data());
+      out[13] = psw[4];  // visited nodes
+      out[14] = psw[5];  // pruned nodes
+    } else {
+      out[13] = out[14] = 0;
+    }
+  }
   return true;
 }
 
 bool VisBufferChain::readStatsMapped(backend::IRenderBackend& backend,
-                                     u32 out[13]) const {
+                                     u32 out[15]) const {
   // The counter buffers are HOST_VISIBLE + persistently mapped. Read
   // the CURRENT slot, called BEFORE this frame's execute: its last
   // use was the frame-before-last, which beginFrame's pacing wait
@@ -833,6 +849,10 @@ bool VisBufferChain::readStatsMapped(backend::IRenderBackend& backend,
   out[10] = prc ? prc[1] : 0;
   out[11] = cc ? cc[6] : 0;
   out[12] = cc ? cc[7] : 0;
+  const u32* ps =
+      static_cast<const u32*>(backend.mappedPtr(m_persistState[slot]));
+  out[13] = ps ? ps[4] : 0;  // visited nodes
+  out[14] = ps ? ps[5] : 0;  // pruned nodes
   return cc != nullptr;
 }
 
@@ -840,7 +860,7 @@ bool VisBufferChain::readVisiblePairs(backend::IRenderBackend& backend,
                                       std::vector<glm::uvec2>& out) const {
   const u32 slot = backend.lastCompletedFrameSlot();
   if (slot == 0xFFFFFFFFu) return false;  // no completed frame yet
-  u32 stats[13] = {};
+  u32 stats[15] = {};
   if (!readStats(backend, stats)) return false;
   const usize count = stats[2];
   out.clear();
