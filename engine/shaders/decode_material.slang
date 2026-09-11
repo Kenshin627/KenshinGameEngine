@@ -95,6 +95,14 @@ struct DecodePush
 [[vk::binding(9)]] StructuredBuffer<uint> pageTable;
 [[vk::binding(10)]] StructuredBuffer<GpuPageHeader> pageHeader;
 [[vk::binding(11)]] StructuredBuffer<float4> decodeParams;
+// M6.4 wide-instance payload indirection: the VisBuffer payload is
+// pairIndex 23b | listSel 2b | triangle 7b - these are the SAME
+// frame's pair lists the rasterizers consumed (12 = the SW
+// visiblePairs, 13 = the HW hwPairs, 14 = the post-revived pairs).
+// decodeParams[1].x carries the shared capacity for the clamp.
+[[vk::binding(12)]] StructuredBuffer<uint2> pairs;
+[[vk::binding(13)]] StructuredBuffer<uint2> hwPairs;
+[[vk::binding(14)]] StructuredBuffer<uint2> postPairs;
 
 // kPageSlotSize (128 KB) in elements - mirrors rasterize_sw / CPU.
 static const uint kSlotFloat4s  = 8192;
@@ -156,17 +164,19 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         discard;  // empty pixel: keep beginFrame's clear color (dual-path
                   // background parity with the baseline screenshot)
 
-    // Clamp EVERY payload-driven index into its buffer's proven range.
-    // The values are always valid by construction, but this driver
-    // device-losts on the payload-dependent addressing chain (zoom
-    // repro); the clamps change the codegen enough to dodge it (and
-    // make the bounds explicit for the compiler).
-    const uint clusterIdx =
-        min((visLo >> 12) & 0xFFFFFu, uint(push.viewport.z) - 1u);
-    const uint triIdx = min((visLo >> 5) & 0x7Fu, 0x7Fu);
-    // Instance 5b (payload 32b = cluster 20b | triangle 7b | instance
-    // 5b); clamp like the rest - see the clamping comment above.
-    const uint instanceIdx = min(visLo & 0x1Fu, uint(push.lightDir.w) - 1u);
+    // Wide-instance payload (see bindings 12..14): one indirection into
+    // this frame's pair tables - instance counts are no longer capped
+    // by payload bits. Every payload-driven index stays clamped (the
+    // driver's payload-dependent addressing chain discipline).
+    const uint triIdx = visLo & 0x7Fu;
+    const uint listSel = (visLo >> 7) & 3u;
+    const uint pairIdx = min((visLo >> 9) & 0x7FFFFFu,
+                             max(uint(decodeParams[1].x), 1u) - 1u);
+    const uint2 pair = listSel == 1u   ? hwPairs[pairIdx]
+                       : listSel == 2u ? postPairs[pairIdx]
+                                       : pairs[pairIdx];
+    const uint instanceIdx = min(pair.x, uint(push.lightDir.w) - 1u);
+    const uint clusterIdx = min(pair.y, uint(push.viewport.z) - 1u);
     const GpuCluster cluster = clusters[clusterIdx];
     const uint viewMode = uint(push.camFlags.w + 0.5);
 

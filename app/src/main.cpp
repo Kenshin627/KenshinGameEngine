@@ -453,9 +453,11 @@ int main(int argc, char** argv) {
         } else if (args.grid > 0) {
           // Occlusion stress carpet: a near-square XZ grid of the mesh
           // - from any low-angle camera, front rows hide back rows and
-          // the cull has real work to save. 32 max (VisBuffer payload
-          // packs 5 instance bits).
-          const int n = std::clamp(args.grid, 1, 32);
+          // the cull has real work to save. 256 max (the pair-list
+          // payload's 24b index and the frame's pair capacity bound;
+          // the VisBuffer payload itself is instance-count-free since
+          // the wide-instance pair indirection).
+          const int n = std::clamp(args.grid, 1, 256);
           // DEPTH-major: 8-deep lines along +x (the view axis of the
           // demo camera), the rest across z. From head-on each line is
           // a dense occluder stack - the configuration the cull pays
@@ -790,11 +792,19 @@ int main(int argc, char** argv) {
                               (kenshin::geometry::kPageSlotSize / 4);
           decodePass.drawPaged(*vgBackend, camera.viewProjMatrix(), *vgScene,
                                decodeParams, ci.width, ci.height,
-                               chain.visBufferCurrent(*vgBackend), pd);
+                               chain.visBufferCurrent(*vgBackend), pd,
+                               chain.pairsCurrent(*vgBackend),
+                               chain.hwPairsCurrent(*vgBackend),
+                               chain.postPairsCurrent(*vgBackend),
+                               chain.maxPairs());
         } else {
           decodePass.draw(*vgBackend, camera.viewProjMatrix(), *vgScene,
                           decodeParams, ci.width, ci.height,
-                          chain.visBufferCurrent(*vgBackend));
+                          chain.visBufferCurrent(*vgBackend),
+                          chain.pairsCurrent(*vgBackend),
+                          chain.hwPairsCurrent(*vgBackend),
+                          chain.postPairsCurrent(*vgBackend),
+                          chain.maxPairs());
         }
       }
     }

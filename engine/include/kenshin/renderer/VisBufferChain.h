@@ -112,6 +112,14 @@ class VisBufferChain {
   /// The most recently ENDED frame's VisBuffer (post-frame readbacks;
   /// before the first endFrame this is invalid).
   u32 visBuffer(backend::IRenderBackend& backend) const;
+  /// The CURRENT frame's pair lists - the wide-instance decode's
+  /// indirection tables (the VisBuffer payload indexes these).
+  u32 pairsCurrent(backend::IRenderBackend& backend) const;
+  u32 hwPairsCurrent(backend::IRenderBackend& backend) const;
+  u32 postPairsCurrent(backend::IRenderBackend& backend) const;
+  /// The pair-list capacity all three lists were sized to (the
+  /// decode's address clamp bound).
+  u32 maxPairs() const { return m_maxPairs; }
 
   /// Blocking stats readback (test/debug), per chain stage:
   /// [0] visible instances, [1] work items, [2] visible pairs (clusters
@@ -148,6 +156,13 @@ class VisBufferChain {
   /// equality assertions read this.
   bool readVisiblePairs(backend::IRenderBackend& backend,
                         std::vector<glm::uvec2>& out) const;
+  /// Test/debug: the same for the HW-routed list (count: stats[12])
+  /// and the post-revived list (count: stats[9]) - the wide-instance
+  /// payload resolves through all three.
+  bool readHwPairs(backend::IRenderBackend& backend,
+                   std::vector<glm::uvec2>& out) const;
+  bool readPostPairs(backend::IRenderBackend& backend,
+                     std::vector<glm::uvec2>& out) const;
 
   void onShutdown(backend::IRenderBackend& backend);
 
@@ -186,6 +201,10 @@ class VisBufferChain {
   u32 m_workItems[kSlots]{}, m_expCnt[kSlots]{};
   u32 m_cullParams[kSlots]{}, m_cullCnt[kSlots]{}, m_pairs[kSlots]{};
   u32 m_rasterParams[kSlots]{}, m_rasterCnt[kSlots]{}, m_vis[kSlots]{};
+  // The post raster's payload listSel (=2) needs its own params copy -
+  // one host buffer cannot hold two values for the same frame's two
+  // dispatches.
+  u32 m_postRasterParams[kSlots]{};
   // Static conversion configs + per-slot indirect args.
   u32 m_cfgExpand = ~0u, m_cfgCull = ~0u, m_cfgRaster = ~0u;
   u32 m_cfgPost = ~0u;    // post convert: {1 group/item, fwd 0, src 5}

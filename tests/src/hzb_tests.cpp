@@ -42,6 +42,7 @@ void hierInputs(const kenshin::geometry::ClusterDag& dag,
 #include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
+#include "vis_compare.h"
 
 namespace {
 
@@ -312,8 +313,14 @@ TEST_CASE("M3.2 occlusion cull is conservative", "[gpu][hzb][occ]") {
                                    dag.indices, clusterData, instances,
                                    pairsOcc, visOcc, rasterOcc));
   usize mismatches = 0;
-  for (usize i = 0; i < visFull.size(); ++i)
-    if (visFull[i] != visOcc[i]) ++mismatches;
+  {
+    // Resolved-attribute comparison (the payload's pair index shifts
+    // when occlusion removes entries - raw words differ by design).
+    const viscmp::Lists lFull{pairsFull, {}, {}};
+    const viscmp::Lists lOcc{pairsOcc, {}, {}};
+    mismatches = viscmp::mismatches(visFull.data(), lFull, visOcc.data(),
+                                    lOcc, visFull.size());
+  }
   INFO("vis mismatches " << mismatches);
   REQUIRE(mismatches == 0);
 
@@ -423,9 +430,19 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   // visibility - one frame stale, not two.
   std::vector<u64> vis1, vis2, vis3;
   u32 st1[16], st2[16], st3[16];
+  viscmp::Lists l1, l2, l3;
   runFrame(vis1, st1);  // slot 0, occ off (no HZB yet) - the reference
+  REQUIRE(chain.readVisiblePairs(*backend, l1.pairs));
+  REQUIRE(chain.readHwPairs(*backend, l1.hw));
+  REQUIRE(chain.readPostPairs(*backend, l1.post));
   runFrame(vis2, st2);  // slot 1, occ ON vs frame 1's final HZB
+  REQUIRE(chain.readVisiblePairs(*backend, l2.pairs));
+  REQUIRE(chain.readHwPairs(*backend, l2.hw));
+  REQUIRE(chain.readPostPairs(*backend, l2.post));
   runFrame(vis3, st3);  // slot 0, occ ON vs frame 2's final HZB
+  REQUIRE(chain.readVisiblePairs(*backend, l3.pairs));
+  REQUIRE(chain.readHwPairs(*backend, l3.hw));
+  REQUIRE(chain.readPostPairs(*backend, l3.post));
 
   INFO("stats: occCulled " << st1[8] << "/" << st2[8] << "/" << st3[8]
                            << " revived " << st1[9] << "/" << st2[9] << "/"
@@ -438,11 +455,13 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   REQUIRE(st2[2] + st2[8] == st1[2]);  // only occlusion removed pairs
   REQUIRE(st3[2] + st3[8] == st1[2]);
 
-  usize mismatch2 = 0, mismatch3 = 0;
-  for (usize i = 0; i < vis1.size(); ++i) {
-    if (vis1[i] != vis2[i]) ++mismatch2;
-    if (vis1[i] != vis3[i]) ++mismatch3;
-  }
+  // Resolved-attribute comparison: the occ-on frames enumerate
+  // pairs in a different order (occluded entries removed) - raw words
+  // differ by construction; depth + resolved attributes must not.
+  const usize mismatch2 = viscmp::mismatches(vis1.data(), l1, vis2.data(),
+                                             l2, vis1.size());
+  const usize mismatch3 = viscmp::mismatches(vis1.data(), l1, vis3.data(),
+                                             l3, vis1.size());
   INFO("vis mismatches: frame2 " << mismatch2 << ", frame3 " << mismatch3);
   REQUIRE(mismatch2 == 0);  // conservative: identical VisBuffer
   REQUIRE(mismatch3 == 0);
@@ -568,9 +587,16 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
                                     usize(W) * H * sizeof(u64), vbOff));
     REQUIRE(backend->readbackBuffer(chainOn.visBuffer(*backend), 0,
                                     usize(W) * H * sizeof(u64), vbOn));
-    usize mismatches = 0;
-    for (usize i = 0; i < usize(W) * H; ++i)
-      if (vbOff[i] != vbOn[i]) ++mismatches;
+    viscmp::Lists lOff, lOn;
+    REQUIRE(chainOff.readVisiblePairs(*backend, lOff.pairs));
+    REQUIRE(chainOff.readHwPairs(*backend, lOff.hw));
+    REQUIRE(chainOff.readPostPairs(*backend, lOff.post));
+    REQUIRE(chainOn.readVisiblePairs(*backend, lOn.pairs));
+    REQUIRE(chainOn.readHwPairs(*backend, lOn.hw));
+    REQUIRE(chainOn.readPostPairs(*backend, lOn.post));
+    const usize mismatches = viscmp::mismatches(
+        reinterpret_cast<const u64*>(vbOff.data()), lOff,
+        reinterpret_cast<const u64*>(vbOn.data()), lOn, usize(W) * H);
     u32 st[16];
     REQUIRE(chainOn.readStats(*backend, st));
     totalRevived += st[9];
@@ -695,9 +721,16 @@ TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
     REQUIRE(chainOn.readStats(*backend, stOn));
   }
 
-  usize mismatches = 0;
-  for (usize i = 0; i < vbOff.size(); ++i)
-    if (vbOff[i] != vbOn[i]) ++mismatches;
+  viscmp::Lists lOff, lOn;
+  REQUIRE(chainOff.readVisiblePairs(*backend, lOff.pairs));
+  REQUIRE(chainOff.readHwPairs(*backend, lOff.hw));
+  REQUIRE(chainOff.readPostPairs(*backend, lOff.post));
+  REQUIRE(chainOn.readVisiblePairs(*backend, lOn.pairs));
+  REQUIRE(chainOn.readHwPairs(*backend, lOn.hw));
+  REQUIRE(chainOn.readPostPairs(*backend, lOn.post));
+  const usize mismatches = viscmp::mismatches(
+      reinterpret_cast<const u64*>(vbOff.data()), lOff,
+      reinterpret_cast<const u64*>(vbOn.data()), lOn, vbOff.size() / 8);
   INFO("dense stack: off pairs "
        << stOff[2] << " tris " << stOff[11] << " px " << stOff[5]
        << " | on pairs " << stOn[2] << " tris " << stOn[11] << " px "

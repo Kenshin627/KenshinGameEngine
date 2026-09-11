@@ -132,14 +132,15 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
   o.q2 = float2(0.0, 0.0);
 
   // Clamp EVERY payload-driven index into its pool's proven range
-  // (params[4].zw / [5].x): this driver device-losts on the
+  // (params[4].zw / [5].xz): this driver device-losts on the
   // multi-level addressing chain, the decode pass's workaround.
   const uint2 item = hwPairs[instanceId];
   const uint clusterCount = max(uint(params[4].z), 1u);
   const uint indexCount = max(uint(params[4].w), 1u);
   const uint positionCount = max(uint(params[5].x), 1u);
+  const uint instanceCount = max(uint(params[5].z), 1u);
   const uint2 itemC =
-      uint2(min(item.x, 31u), min(item.y, clusterCount - 1u));
+      uint2(min(item.x, instanceCount - 1u), min(item.y, clusterCount - 1u));
   const GpuCluster cluster = clusters[itemC.y];
   const uint tri = vertexId / 3u;
   const uint corner = vertexId - tri * 3u;
@@ -187,12 +188,10 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
       q[k] = floor(px * 256.0) * (1.0 / 256.0);
       if (k == corner) o.pos = clip;
     }
-    // The SAME packPixel payload the SW rasterizer writes: cluster
-    // 20b | triangle 7b | instance 5b (the CLAMPED indices - a stale
-    // pair past the count renders wrong geometry for one frame
-    // instead of dying).
-    o.payload = ((itemC.y & 0xFFFFFu) << 12) | ((tri & 0x7Fu) << 5) |
-                (itemC.x & 0x1Fu);
+    // The wide-instance payload (rasterize_sw's packing): this draw's
+    // instanceId IS the hwPairs index; listSel 1 marks the HW table
+    // for the decode indirection.
+    o.payload = ((instanceId & 0x7FFFFFu) << 9) | (1u << 7) | (tri & 0x7Fu);
     // Every vertex emits the full quantized triangle -> each varying
     // is constant across the triangle (flat interpolation of equal
     // values), so the PS sees the exact geometry it needs.

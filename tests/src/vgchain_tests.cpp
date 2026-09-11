@@ -23,6 +23,7 @@
 #include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
+#include "vis_compare.h"
 
 namespace {
 
@@ -62,7 +63,8 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
   backend::BackendInitParams params;  // windowless (headless frames)
   REQUIRE(backend->initialize(params));
 
-  // Shared inputs: pools, two instances, one camera.
+  // Shared inputs: pools, FORTY instances (the wide-instance payload
+  // proof - the old 5b instance field capped scenes at 32), one camera.
   std::vector<u8> clusterData, groupData;
   for (const auto& c : dag.clusters)
     renderer::packGpuCluster(clusterData, c.group, c.boundsSphere.x,
@@ -79,13 +81,15 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
     positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
                               dag.positions[v * 3 + 2], 0.0f);
 
+  constexpr u32 kInst = 40;
   std::vector<renderer::CullGpuInstance> instances;
-  {
-    renderer::CullGpuInstance identity;
-    instances.push_back(identity);
-    renderer::CullGpuInstance moved;
-    moved.model = glm::translate(glm::mat4(1.0f), {1.2f, 0.0f, 0.4f});
-    instances.push_back(moved);
+  for (u32 i = 0; i < kInst; ++i) {
+    renderer::CullGpuInstance inst;
+    // Spread along x; pairs overlap from this angle - every instance
+    // wins some pixels (payload indirection exercised per instance).
+    inst.model = glm::translate(glm::mat4(1.0f),
+                                {1.1f * f32(i), 0.0f, 0.3f * f32(i % 4)});
+    instances.push_back(inst);
   }
   const std::vector<renderer::GpuMeshRangePair> meshRanges = {
       {0u, static_cast<u32>(dag.clusters.size())}};
@@ -104,16 +108,17 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
 
   // ---- Reference: the one-shot chain (S4.2-S4.4 path).
   std::vector<u64> visOneShot;
+  std::vector<glm::uvec2> pairsOneShot;  // the payload's resolve table
   {
     std::vector<u32> visible;
     REQUIRE(renderer::cullInstancesOnGpu(*backend, shaders, instances, planes,
                                          visible));
-    REQUIRE(visible.size() == 2);
+    REQUIRE(visible.size() == kInst);
     std::vector<glm::uvec2> workItems;
     REQUIRE(renderer::expandWorkItemsOnGpu(*backend, shaders, visible,
                                            instances, meshRanges, workItems));
-    REQUIRE(workItems.size() == 2 * dag.clusters.size());
-    std::vector<glm::uvec2> pairs;
+    REQUIRE(workItems.size() == usize(kInst) * dag.clusters.size());
+    std::vector<glm::uvec2>& pairs = pairsOneShot;
     u32 cullStats[4] = {};
     REQUIRE(renderer::cullClustersOnGpu(
         *backend, shaders, cam, threshold, worldPerPixel, clusterData,
@@ -147,8 +152,8 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
   REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
                      groupData, hierarchyData, groupRanges, meshHierRoots,
                      instances, meshRanges,
-                     static_cast<u32>(2 * dag.clusters.size()), {}, nullptr,
-                     W, H));
+                     static_cast<u32>(kInst * dag.clusters.size()), {},
+                     nullptr, W, H));
   renderer::ChainInputs inputs;  // (planes cannot be aggregate-named)
   inputs.view = view;
   inputs.proj = proj;
@@ -182,7 +187,6 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
     std::vector<u8> visBytes;
     REQUIRE(backend->readbackBuffer(chain.visBuffer(*backend), 0,
                                     usize(W) * H * sizeof(u64), visBytes));
-    const u64* visInFrame = reinterpret_cast<const u64*>(visBytes.data());
     u32 stats[16] = {};
     REQUIRE(chain.readStats(*backend, stats));
     INFO("cullMode " << cullMode << " chain stats: visibleInst " << stats[0]
@@ -191,9 +195,19 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
     REQUIRE(stats[0] > 0);  // instances survived the cull
     REQUIRE(stats[2] > 0);  // clusters cut
     REQUIRE(stats[5] > 0);  // px writes
-    usize mismatches = 0;
-    for (usize i = 0; i < visOneShot.size(); ++i)
-      if (visOneShot[i] != visInFrame[i]) ++mismatches;
+    // Resolved-attribute comparison (the payload's pair index is
+    // enumeration-sensitive; the one-shot and chain paths order pairs
+    // differently - depth + resolved instance/cluster/triangle equal
+    // IS the decode-visible equality).
+    viscmp::Lists chainLists;
+    REQUIRE(chain.readVisiblePairs(*backend, chainLists.pairs));
+    REQUIRE(chain.readHwPairs(*backend, chainLists.hw));
+    REQUIRE(chain.readPostPairs(*backend, chainLists.post));
+    const viscmp::Lists oneShotLists{pairsOneShot, {}, {}};
+    const usize mismatches = viscmp::mismatches(
+        visOneShot.data(), oneShotLists,
+        reinterpret_cast<const u64*>(visBytes.data()), chainLists,
+        visOneShot.size());
     INFO("cullMode " << cullMode << ": vis pixels " << visOneShot.size()
                      << ", mismatches " << mismatches);
     REQUIRE(mismatches == 0);
@@ -314,6 +328,7 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   std::vector<u8> visV2Bytes;
   u32 statsV2[16] = {};
   std::vector<glm::uvec2> pairsV2;
+  viscmp::Lists listsV2;  // the v2 reference's resolve tables
   {
     renderer::VisBufferChain chain;
     REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
@@ -329,6 +344,9 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
     REQUIRE(statsV2[5] > 0);
     REQUIRE(statsV2[15] == 0);
     REQUIRE(chain.readVisiblePairs(*backend, pairsV2));
+    listsV2.pairs = pairsV2;
+    REQUIRE(chain.readHwPairs(*backend, listsV2.hw));
+    REQUIRE(chain.readPostPairs(*backend, listsV2.post));
     chain.onShutdown(*backend);
   }
 
@@ -415,11 +433,14 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
     REQUIRE(stats[2] == statsV2[2]);  // same cut
     REQUIRE(stats[5] == statsV2[5]);  // same px writes
     REQUIRE(stats[15] == 0);          // nothing skipped
-    usize mismatches = 0;
-    const u64* a = reinterpret_cast<const u64*>(visV2Bytes.data());
-    const u64* b = reinterpret_cast<const u64*>(visBytes.data());
-    for (usize i = 0; i < visV2Bytes.size() / 8; ++i)
-      if (a[i] != b[i]) ++mismatches;
+    viscmp::Lists lists;
+    REQUIRE(chain.readVisiblePairs(*backend, lists.pairs));
+    REQUIRE(chain.readHwPairs(*backend, lists.hw));
+    REQUIRE(chain.readPostPairs(*backend, lists.post));
+    const usize mismatches = viscmp::mismatches(
+        reinterpret_cast<const u64*>(visV2Bytes.data()), listsV2,
+        reinterpret_cast<const u64*>(visBytes.data()), lists,
+        visV2Bytes.size() / 8);
     INFO("paged all-resident config " << config << ": " << mismatches
                                       << " vis mismatches");
     REQUIRE(mismatches == 0);
@@ -493,11 +514,14 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
     u32 stats[16] = {};
     REQUIRE(chain.readStats(*backend, stats));
     REQUIRE(stats[15] == 0);
-    usize mismatches = 0;
-    const u64* a = reinterpret_cast<const u64*>(visV2Bytes.data());
-    const u64* b = reinterpret_cast<const u64*>(visBytes.data());
-    for (usize i = 0; i < visV2Bytes.size() / 8; ++i)
-      if (a[i] != b[i]) ++mismatches;
+    viscmp::Lists lists;
+    REQUIRE(chain.readVisiblePairs(*backend, lists.pairs));
+    REQUIRE(chain.readHwPairs(*backend, lists.hw));
+    REQUIRE(chain.readPostPairs(*backend, lists.post));
+    const usize mismatches = viscmp::mismatches(
+        reinterpret_cast<const u64*>(visV2Bytes.data()), listsV2,
+        reinterpret_cast<const u64*>(visBytes.data()), lists,
+        visV2Bytes.size() / 8);
     INFO("paged post-restore: " << mismatches << " vis mismatches");
     REQUIRE(mismatches == 0);
   }
@@ -614,6 +638,7 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
 
   std::vector<u8> visV2Bytes;
   u32 statsV2[16] = {};
+  viscmp::Lists listsV2;
   {
     renderer::VisBufferChain chain;
     REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
@@ -627,6 +652,9 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
     REQUIRE(chain.readStats(*backend, statsV2));
     REQUIRE(statsV2[2] > 0);
     REQUIRE(statsV2[5] > 0);
+    REQUIRE(chain.readVisiblePairs(*backend, listsV2.pairs));
+    REQUIRE(chain.readHwPairs(*backend, listsV2.hw));
+    REQUIRE(chain.readPostPairs(*backend, listsV2.post));
     chain.onShutdown(*backend);
   }
 
@@ -696,11 +724,14 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
     REQUIRE(stats[2] == statsV2[2]);
     REQUIRE(stats[5] == statsV2[5]);
     REQUIRE(stats[15] == 0);  // every page resident: zero skips
-    usize mismatches = 0;
-    const u64* a = reinterpret_cast<const u64*>(visV2Bytes.data());
-    const u64* b = reinterpret_cast<const u64*>(visBytes.data());
-    for (usize i = 0; i < visV2Bytes.size() / 8; ++i)
-      if (a[i] != b[i]) ++mismatches;
+    viscmp::Lists lists;
+    REQUIRE(chain.readVisiblePairs(*backend, lists.pairs));
+    REQUIRE(chain.readHwPairs(*backend, lists.hw));
+    REQUIRE(chain.readPostPairs(*backend, lists.post));
+    const usize mismatches = viscmp::mismatches(
+        reinterpret_cast<const u64*>(visV2Bytes.data()), listsV2,
+        reinterpret_cast<const u64*>(visBytes.data()), lists,
+        visV2Bytes.size() / 8);
     INFO("paged big all-resident: " << mismatches << " vis mismatches over "
                                     << pg.pageCount << " pages");
     REQUIRE(mismatches == 0);

@@ -67,27 +67,30 @@ class MaterialDecodePass {
   /// one the chain rasterized with, so the VisBuffer rows arrive in
   /// framebuffer order. `visHandle` is the SAME frame's VisBuffer (the
   /// in-frame chain's output; its pixel count must equal w*h).
+  /// `pairs`/`hwPairs` are the SAME frame's pair lists (the payload
+  /// indirection tables) with their capacity.
   void draw(backend::IRenderBackend& backend, const glm::mat4& viewProj,
             const VirtualGeometryScene& scene, const DecodeParams& params,
-            u32 width, u32 height, u32 visHandle);
+            u32 width, u32 height, u32 visHandle, u32 pairs, u32 hwPairs,
+            u32 postPairs, u32 pairCapacity);
 
   /// M6.3 paged variant: explicit handles instead of the scene's v2
   /// pools (the slot pool fills bindings 3..6; cluster/instance/group
-  /// tables still come from the scene). Also takes the three dummy
-  /// 4-byte stand-ins the v2-mode bindings would need - pass the
-  /// SCENE's dummies (they exist for exactly this).
+  /// tables still come from the scene).
   void drawPaged(backend::IRenderBackend& backend, const glm::mat4& viewProj,
                  const VirtualGeometryScene& scene, const DecodeParams& params,
                  u32 width, u32 height, u32 visHandle,
-                 const DecodePagedInputs& paged);
+                 const DecodePagedInputs& paged, u32 pairs, u32 hwPairs,
+                 u32 postPairs, u32 pairCapacity);
 
   void onShutdown(backend::IRenderBackend& backend);
 
  private:
   u32 m_pipeline = ~0u;
-  u32 m_decodeParams = ~0u;  // 16B host-visible: [0].x = paged flag
+  u32 m_decodeParams = ~0u;  // 32B host-visible: [0] mode flags, [1].x pair cap
   u32 m_dummyU32[2] = {~0u, ~0u};  // v2 stand-ins (bindings 8/9)
   u32 m_dummyPageHeader = ~0u;     // v2 stand-in (binding 10)
+  u32 m_dummyPairs[2] = {~0u, ~0u};  // decode-only tests' stand-ins (12/13)
 };
 
 }  // namespace renderer

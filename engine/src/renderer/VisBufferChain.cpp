@@ -333,6 +333,8 @@ bool VisBufferChain::init(
     m_pairs[s] = makeDeviceBuffer(backend, pairBytes, nullptr, "chain-pairs");
     m_rasterParams[s] = makeHostBuffer(backend, 12 * sizeof(glm::vec4), nullptr,
                                        "chain-rasterParams");
+    m_postRasterParams[s] = makeHostBuffer(backend, 12 * sizeof(glm::vec4),
+                                           nullptr, "chain-postRasterParams");
     // 6 u32: [4] = the M6.3 pending-resident skip count (SW + HW).
     m_rasterCnt[s] = makeHostBuffer(backend, 24, nullptr, "chain-rasterCnt");
     // M3.3 post pass: pending (Main-occluded) / revived pair lists,
@@ -527,17 +529,21 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     const glm::mat4 vpHw = in.proj * in.view;
     for (int c = 0; c < 4; ++c) hp[c] = vpHw[c];
   }
-  // [4].zw / [5].x: the pool bounds every payload-driven index in the
+  // [4].zw / [5].xz: the pool bounds every payload-driven index in the
   // HW VS clamps into (the decode-pass device-lost workaround). Paged
   // mode: the SLOT POOL totals (coarser, still in-bounds). [5].y: the
-  // M6.3 paged addressing flag.
+  // M6.3 paged addressing flag; [5].z: the instance count (the
+  // wide-instance VS clamp).
   hp[4] = glm::vec4(f32(in.width), f32(in.height), f32(m_clusterCount),
                     f32(m_indexCount));
-  hp[5] = glm::vec4(f32(m_positionCount), m_paged ? 1.0f : 0.0f, 0.0f, 0.0f);
+  hp[5] = glm::vec4(f32(m_positionCount), m_paged ? 1.0f : 0.0f,
+                    f32(m_instanceCount), 0.0f);
   {
     // rasterize_sw's params (float4[12]): [0..3] view, [4..7] proj
     // (glm raw), [8] = (w, h, pairCount(unused by the guard), nearZ),
-    // [9].x = yFlip, [9].y = the M6.3 paged addressing flag.
+    // [9].x = yFlip, [9].y = the M6.3 paged addressing flag. The post
+    // raster's copy differs ONLY in [9].z = listSel 2 (its payload
+    // indexes the revived-pairs table).
     glm::vec4* p =
         static_cast<glm::vec4*>(backend.mappedPtr(m_rasterParams[slot]));
     for (int c = 0; c < 4; ++c) p[c] = in.view[c];
@@ -545,6 +551,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     p[8] = glm::vec4(f32(in.width), f32(in.height), 0.0f, in.nearZ);
     p[9] = glm::vec4(1.0f, m_paged ? 1.0f : 0.0f, 0.0f, 0.0f);
     for (int c = 10; c < 12; ++c) p[c] = glm::vec4(0.0f);
+    glm::vec4* pp =
+        static_cast<glm::vec4*>(backend.mappedPtr(m_postRasterParams[slot]));
+    for (int c = 0; c < 12; ++c) pp[c] = p[c];
+    pp[9].z = 2.0f;
   }
 
   // ---- Record: cull (direct size; N is CPU-known) -> convert ->
@@ -761,10 +771,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     b(m_postRasterCnt[slot]);
 
     const u32 postRasterHandles[11] = {
-        m_rasterParams[slot], m_positionBuffer,     m_indexBuffer,
-        m_clusterBuffer,      m_instanceBuffer,     m_postPairs[slot],
-        m_vis[slot],          m_postRasterCnt[slot], pagedClusterPage,
-        pagedPageTable,       pagedPageHeader};
+        m_postRasterParams[slot], m_positionBuffer,   m_indexBuffer,
+        m_clusterBuffer,          m_instanceBuffer,   m_postPairs[slot],
+        m_vis[slot],              m_postRasterCnt[slot], pagedClusterPage,
+        pagedPageTable,           pagedPageHeader};
     backend.dispatchComputeIndirect(m_pipeRasterPost, postRasterHandles, 11,
                                     m_argsPostRaster[slot], 0);
     b(m_vis[slot]);
@@ -872,6 +882,52 @@ u32 VisBufferChain::visBufferCurrent(backend::IRenderBackend& backend) const {
 u32 VisBufferChain::visBuffer(backend::IRenderBackend& backend) const {
   const u32 slot = backend.lastCompletedFrameSlot();
   return slot == 0xFFFFFFFFu ? kInvalid : m_vis[slot];
+}
+
+u32 VisBufferChain::pairsCurrent(backend::IRenderBackend& backend) const {
+  return m_pairs[backend.currentFrameSlot()];
+}
+
+u32 VisBufferChain::hwPairsCurrent(backend::IRenderBackend& backend) const {
+  return m_hwPairs[backend.currentFrameSlot()];
+}
+
+u32 VisBufferChain::postPairsCurrent(backend::IRenderBackend& backend) const {
+  return m_postPairs[backend.currentFrameSlot()];
+}
+
+bool VisBufferChain::readHwPairs(backend::IRenderBackend& backend,
+                                 std::vector<glm::uvec2>& out) const {
+  const u32 slot = backend.lastCompletedFrameSlot();
+  if (slot == 0xFFFFFFFFu) return false;
+  u32 stats[16] = {};
+  if (!readStats(backend, stats)) return false;
+  out.clear();
+  if (stats[12] == 0) return true;
+  std::vector<u8> bytes;
+  if (!backend.readbackBuffer(m_hwPairs[slot], 0,
+                              stats[12] * sizeof(glm::uvec2), bytes))
+    return false;
+  out.resize(stats[12]);
+  std::memcpy(out.data(), bytes.data(), bytes.size());
+  return true;
+}
+
+bool VisBufferChain::readPostPairs(backend::IRenderBackend& backend,
+                                   std::vector<glm::uvec2>& out) const {
+  const u32 slot = backend.lastCompletedFrameSlot();
+  if (slot == 0xFFFFFFFFu) return false;
+  u32 stats[16] = {};
+  if (!readStats(backend, stats)) return false;
+  out.clear();
+  if (stats[9] == 0) return true;
+  std::vector<u8> bytes;
+  if (!backend.readbackBuffer(m_postPairs[slot], 0,
+                              stats[9] * sizeof(glm::uvec2), bytes))
+    return false;
+  out.resize(stats[9]);
+  std::memcpy(out.data(), bytes.data(), bytes.size());
+  return true;
 }
 
 bool VisBufferChain::readStats(backend::IRenderBackend& backend,
@@ -1065,7 +1121,7 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
           m_argsCull[s],   m_argsRaster[s],    m_argsPostRaster[s],
           m_hwPairs[s],    m_hwParams[s],      m_hwDrawArgs[s],
           m_argsHzb1[s],   m_argsPostCull[s],  m_touched[s],
-          m_argsTouch[s]})
+          m_argsTouch[s],  m_postRasterParams[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
   }
   // M6.3: in paged mode the pool/table handles are CALLER-owned - only

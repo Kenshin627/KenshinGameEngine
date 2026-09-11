@@ -100,8 +100,8 @@ struct CpuRaster {
           rasterTriangle(
               applyMat4(frame.proj, a, wh), applyMat4(frame.proj, b, wh),
               applyMat4(frame.proj, c, wh), applyMat4Z(frame.proj, a),
-              applyMat4Z(frame.proj, b), applyMat4Z(frame.proj, c), pairs[p].y,
-              t, pairs[p].x, stats);
+              applyMat4Z(frame.proj, b), applyMat4Z(frame.proj, c), u32(p),
+              t, stats);
         };
         if (poly.size() == 3)
           rasterTri(poly[0], poly[1], poly[2]);
@@ -115,8 +115,8 @@ struct CpuRaster {
   }
 
   void rasterTriangle(glm::vec2 s0f, glm::vec2 s1f, glm::vec2 s2f, float z0,
-                      float z1, float z2, u32 clusterIdx, u32 triIdx,
-                      u32 instanceIdx, u32* stats) {
+                      float z1, float z2, u32 pairIdx, u32 triIdx,
+                      u32* stats) {
     // M4.1 mirror: 16.8 subpixel fixed point + int64 edge functions +
     // the DX top-left tie rule (rasterize_sw.slang's new core).
     constexpr int SUBPIXEL = 256;
@@ -200,8 +200,7 @@ struct CpuRaster {
       float z = z00 + rb * ry;
       for (int x = x0; x <= x1; ++x) {
         if (w0 >= t0 && w1 >= t1 && w2 >= t2) {
-          const u64 packed =
-              renderer::packVisPixel(z, clusterIdx, triIdx, instanceIdx);
+          const u64 packed = renderer::packVisPixel(z, pairIdx, triIdx);
           const usize idx = usize(y) * frame.width + x;
           if (packed > vis[idx]) vis[idx] = packed;  // max, no atomics
           ++stats[1];

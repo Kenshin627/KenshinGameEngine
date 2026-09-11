@@ -9,8 +9,15 @@
 // incremental half-space inner loop over the bounding rect.
 // Pixel write = pack(reversed depth 32b + payload 32b) and
 // InterlockedMax on the u64 VisBuffer (Karis p.84: depth in the high
-// bits). Payload 32b = cluster 20b | triangle 7b | instance 5b
-// (S4.6: instance bits for the multi-instance demo scene).
+// bits). Payload 32b = pairIndex 23b | listSel 2b | triangle 7b (the
+// wide-instance layout: cluster/instance live in the frame's PAIR
+// TABLES, resolved by one indirection at decode - the old 20b cluster
+// | 7b tri | 5b instance packing capped the scene at 32 instances).
+// listSel: 0 = the SW visiblePairs (params[9].z selects - the post
+// raster runs the same shader over the REVIVED pair list with 2), the
+// HW path writes 1. The payload is PAIR-ENUMERATION-SENSITIVE:
+// different cull paths order pairs differently - differentials must
+// compare RESOLVED attributes, not raw words.
 //
 // Bindings (SSBO set 0; buffers[i] -> binding i):
 //   0: float4 params[12] - [0..3] VIEW matrix columns (glm raw),
@@ -102,17 +109,19 @@ static const uint kSlotU32s    = 32768;
 
 groupshared float3 sViewPos[256];
 
-uint64_t packPixel(float z, uint clusterIdx, uint triIdx, uint instanceIdx)
+uint64_t packPixel(float z, uint pairIdx, uint triIdx)
 {
     // Reversed depth in the high 32 bits: near (z=0) -> large, far
     // (z=1) -> small, so InterlockedMax keeps the NEAREST surface.
     // CPU reference performs the identical float ops in the same order.
-    // Payload: cluster 20b | triangle 7b | instance 5b.
+    // Payload: pairIndex 23b | listSel (params[9].z) | triangle 7b.
     z = clamp(z, 0.0, 1.0);
     const uint depthBits = uint((1.0 - z) * 4294967295.0);
+    const uint sel = uint(params[9].z) & 3u;
     return (uint64_t(depthBits) << 32) |
-           (uint64_t(clusterIdx & 0xFFFFFu) << 12) |
-           (uint64_t(triIdx & 0x7Fu) << 5) | uint64_t(instanceIdx & 0x1Fu);
+           (uint64_t(pairIdx & 0x7FFFFFu) << 9) |
+           (uint64_t(sel) << 7) |
+           (uint64_t(triIdx & 0x7Fu));
 }
 
 // M4.1: coverage runs in 16.8 SUBPIXEL FIXED POINT (256 units per
@@ -135,8 +144,7 @@ int64_t edgeW(int64_t ex, int64_t ey, int64_t px, int64_t py, int64_t vx, int64_
 
 void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
                        float z0, float z1, float z2,
-                       uint2 widthHeight, uint clusterIdx, uint triIdx,
-                       uint instanceIdx)
+                       uint2 widthHeight, uint pairIdx, uint triIdx)
 {
     // Quantize to subpixel fixed point (floor - the DX spec's x.8 snap).
     const int64_t X0 = int64_t(int(floor(s0f.x * float(SUBPIXEL))));
@@ -233,8 +241,7 @@ void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
             // top/left edge (w >= t with t = 0/1 encodes both).
             if (w0 >= t0 && w1 >= t1 && w2 >= t2)
             {
-                const uint64_t packed =
-                    packPixel(z, clusterIdx, triIdx, instanceIdx);
+                const uint64_t packed = packPixel(z, pairIdx, triIdx);
                 InterlockedMax(visBuffer[uint(y) * widthHeight.x + uint(x)],
                                packed);
                 InterlockedAdd(counters[1], 1);
@@ -394,7 +401,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         rasterizeTriangle(sa, sb, sc, ndcZOf(pa, vpC0, vpC1, vpC2, vpC3),
                           ndcZOf(pb, vpC0, vpC1, vpC2, vpC3),
                           ndcZOf(pc, vpC0, vpC1, vpC2, vpC3),
-                          whU, pair.y, gtid.x, pair.x);
+                          whU, pairIdx, gtid.x);
     }
     else  // quad (near-plane crossing): fan (0,1,2) + (0,2,3)
     {
@@ -407,9 +414,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         const float zb = ndcZOf(pb, vpC0, vpC1, vpC2, vpC3);
         const float zc = ndcZOf(pc, vpC0, vpC1, vpC2, vpC3);
         const float zd = ndcZOf(pd, vpC0, vpC1, vpC2, vpC3);
-        rasterizeTriangle(sa, sb, sc, za, zb, zc, whU, pair.y, gtid.x,
-                          pair.x);
-        rasterizeTriangle(sa, sc, sd, za, zc, zd, whU, pair.y, gtid.x,
-                          pair.x);
+        rasterizeTriangle(sa, sb, sc, za, zb, zc, whU, pairIdx, gtid.x);
+        rasterizeTriangle(sa, sc, sd, za, zc, zd, whU, pairIdx, gtid.x);
     }
 }
