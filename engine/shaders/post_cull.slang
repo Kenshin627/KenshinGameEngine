@@ -147,13 +147,13 @@ bool occluded(uint2 item, float4x4 model)
 [numthreads(64, 1, 1)]
 void main(uint tid : SV_DispatchThreadID)
 {
-    if (tid >= counters[4]) return;
+    if (tid >= counters[4] || tid >= uint(params[1].w)) return;
     const uint2 item = pendingPairs[tid];
     if (occluded(item, instances[item.x].model)) return;  // still hidden
 
     uint slot = 0;
     InterlockedAdd(counters[5], 1, slot);
-    postPairs[slot] = item;
+    if (slot < uint(params[1].w)) postPairs[slot] = item;
     // The revived cluster's triangles join this frame's cut (M3.4:
     // the panel/test readout counts everything actually rasterized).
     InterlockedAdd(counters[6], clusters[item.y].indexCount / 3u);

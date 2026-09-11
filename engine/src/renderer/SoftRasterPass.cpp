@@ -22,7 +22,10 @@ std::vector<u8> packRasterParams(const SoftRasterFrame& frame, u32 pairCount) {
                        static_cast<f32>(frame.height),
                        static_cast<f32>(pairCount), frame.nearZ);
   std::memcpy(data.data() + 8 * sizeof(glm::vec4), &tail, sizeof(glm::vec4));
-  const glm::vec4 flags(frame.yFlip ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+  // [9].x yFlip; [9].w the pair-list capacity for the in-guard (the
+  // one-shot uploads exactly `pairCount` - nothing may drop).
+  const glm::vec4 flags(frame.yFlip ? 1.0f : 0.0f, 0.0f, 0.0f,
+                        static_cast<f32>(pairCount));
   std::memcpy(data.data() + 9 * sizeof(glm::vec4), &flags, sizeof(glm::vec4));
   return data;
 }

@@ -313,7 +313,9 @@ float ndcZOf(float3 p, float4 c0, float4 c1, float4 c2, float4 c3)
 void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
     const uint pairIdx = gid.x;
-    if (pairIdx >= counters[0]) return;
+    // Ceil slack of the clamped envelope: guard at the capacity too
+    // ([9].w, carried by the chain; the one-shot fills exact counts).
+    if (pairIdx >= counters[0] || pairIdx >= uint(params[9].w)) return;
     const uint2 pair = visiblePairs[pairIdx];
     const GpuCluster cluster = clusters[pair.y];
     const GpuInstance inst = instances[pair.x];

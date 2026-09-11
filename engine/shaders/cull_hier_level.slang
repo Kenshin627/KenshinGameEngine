@@ -104,8 +104,10 @@ struct GpuHierNode {
 [[vk::binding(14)]] RWStructuredBuffer<uint2> activeOut;
 [[vk::binding(15)]] StructuredBuffer<uint> cntIn;
 [[vk::binding(16)]] RWStructuredBuffer<uint> cntOut;
-[[vk::binding(
-    17)]] RWStructuredBuffer<uint> travStats;  // [4] visited, [5] pruned
+// M6.4 saturation: the pair/active-list capacity (params[1].w is the
+// persistent queue's ring mask - the shared params buffer is full).
+[[vk::binding(17)]] StructuredBuffer<uint> pairCaps;
+[[vk::binding(18)]] RWStructuredBuffer<uint> travStats;  // [4] visited, [5] pruned
 
 bool fireable(uint groupIdx, float4x4 model) {
   const GpuGroup g = groups[groupIdx];
@@ -200,7 +202,7 @@ void emitCluster(uint2 item, float4x4 model) {
   if (params[6].x > 0.5 && occluded(item, model)) {
     uint pend = 0;
     InterlockedAdd(counters[4], 1, pend);
-    pendingPairs[pend] = item;
+    if (pend < pairCaps[0]) pendingPairs[pend] = item;
     return;
   }
 
@@ -224,7 +226,7 @@ void emitCluster(uint2 item, float4x4 model) {
     if (hw) {
       uint hs = 0;
       InterlockedAdd(counters[7], 1, hs);
-      hwPairs[hs] = item;
+      if (hs < pairCaps[0]) hwPairs[hs] = item;
       InterlockedAdd(counters[6], cluster.indexCount / 3u);
       return;
     }
@@ -232,7 +234,7 @@ void emitCluster(uint2 item, float4x4 model) {
 
   uint slot = 0;
   InterlockedAdd(counters[0], 1, slot);
-  visiblePairs[slot] = item;
+  if (slot < pairCaps[0]) visiblePairs[slot] = item;
   InterlockedAdd(counters[6], cluster.indexCount / 3u);
 }
 
@@ -291,7 +293,9 @@ bool boxOccluded(float3 corner[8]) {
 
 [shader("compute")][numthreads(64, 1, 1)] void main(
     uint tid : SV_DispatchThreadID) {
-  if (tid >= cntIn[0]) return;
+  // The clamped dispatch envelope's ceil slack admits threads past
+  // the capacity - the in-guard needs BOTH bounds (raw count and cap).
+  if (tid >= cntIn[0] || tid >= pairCaps[0]) return;
   InterlockedAdd(travStats[4], 1);  // visited (M5.5 curves)
   const uint nodeCount = uint(params[1].y);
   const uint clusterCount = uint(params[7].z);
@@ -384,6 +388,7 @@ bool boxOccluded(float3 corner[8]) {
   for (uint i = 0; i < k; ++i) {
     uint s = 0;
     InterlockedAdd(cntOut[0], 1, s);
+    if (s < pairCaps[0])
     activeOut[s] =
         uint2(inst, node.children[i] | (childOcc ? 0x80000000u : 0u));
   }

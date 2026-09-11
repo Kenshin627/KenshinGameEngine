@@ -23,7 +23,10 @@
 [numthreads(1, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID)
 {
-    const uint count = src[cfg[2]];
+    uint count = src[cfg[2]];
+    // cfg[3] > 0: the destination list's capacity (saturating writers
+    // may have reserved past it - the dispatch envelope must clamp).
+    if (cfg[3] > 0u) count = min(count, cfg[3]);
     const uint groups = cfg[0] == 0u ? count : (count + cfg[0] - 1u) / cfg[0];
     dst[0] = groups;
     dst[1] = 1u;

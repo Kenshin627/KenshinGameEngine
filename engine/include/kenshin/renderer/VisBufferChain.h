@@ -265,6 +265,13 @@ class VisBufferChain {
   u32 m_hierDepth = 0;  // levels actually dispatched (1 = root only)
   bool m_hierReady = false;
   u32 m_hierNodeCount = 0;  // for the shader-side index clamps
+  /// M6.4 saturation: the static pair/list capacity word the saturating
+  /// writers read (expand binding 5, hier level binding 17).
+  u32 m_pairCapBuffer = ~0u;
+  /// Persistent mode requires queue capacity >= instances x (nodes+1)
+  /// (the no-wraparound proof); beyond the memory cap it falls back to
+  /// level-wise with a one-time warning.
+  bool m_persistUsable = true;
 
   // ---- M5.3: the persistent-threads path --------------------------------
   // The ticket ring: capacity = pow2(instances x (nodes+1)) - every node

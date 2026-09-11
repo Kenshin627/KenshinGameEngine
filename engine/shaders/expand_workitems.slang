@@ -25,6 +25,7 @@ struct GpuInstance
 [[vk::binding(2)]] StructuredBuffer<uint>    visibleList;
 [[vk::binding(3)]] StructuredBuffer<GpuInstance> instances;
 [[vk::binding(4)]] StructuredBuffer<uint2>   meshRanges;
+[[vk::binding(5)]] StructuredBuffer<uint>     caps;  // [0] = list capacity
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -39,6 +40,10 @@ void main(uint tid : SV_DispatchThreadID)
     // ORIGINAL value = this instance's base slot.
     uint base = 0;
     InterlockedAdd(counters[0], count, base);
+    // Saturating append: entries past the capacity drop (the cull
+    // dispatch's convert clamps - never an OOB write).
+    const uint cap = caps[0];
     for (uint j = 0; j < count; ++j)
-        workItems[base + j] = uint2(instanceIdx, range.x + j);
+        if (base + j < cap)
+            workItems[base + j] = uint2(instanceIdx, range.x + j);
 }

@@ -714,7 +714,13 @@ int main(int argc, char** argv) {
             vgScene->clusterData(), vgScene->groupData(),
             vgScene->hierarchyData(), vgScene->groupRanges(), meshHierRoots,
             chainInstances, chainMeshRanges,
-            kenshin::u32(chainInstances.size()) * vgScene->clusterCount(),
+            // Pair-list capacity: min(the theoretical worst case,
+            // 4M pairs) - the cull writers saturate and the consumers
+            // clamp at this cap (the wide-instance scaling form).
+            kenshin::u32(std::min<kenshin::u64>(
+                kenshin::u64(chainInstances.size()) *
+                    vgScene->clusterCount(),
+                kenshin::u64(4) << 20)),
             vgScene->clusterAabbs(), pagedPtr, 1, 1);
         if (chainReady) KENSHIN_INFO("[vgchain] in-frame chain ready{}",
                                      pagedPtr ? " (paged)" : "");

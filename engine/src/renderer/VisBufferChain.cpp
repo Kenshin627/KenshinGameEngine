@@ -148,9 +148,11 @@ bool VisBufferChain::init(
   m_groupBuffer = makeDeviceBuffer(backend, groupData.size(), groupData.data(),
                                    "chain-groups");
   m_groupCount = static_cast<u32>(groupData.size() / 32);
-  const u32 cfgPostCull[4] = {64, 0, 4, 0};  // pending-sized envelope
+  const u32 cfgPostCull[4] = {64, 0, 4, m_maxPairs};  // pending-sized envelope
   m_cfgPostCull =
       makeHostBuffer(backend, sizeof(cfgPostCull), cfgPostCull, "cfgPC");
+  // The saturating writers' capacity word (static - lists never resize).
+  m_pairCapBuffer = makeDeviceBuffer(backend, 4, &m_maxPairs, "chain-pairCap");
   // M5.2: hierarchy static pools. The 64B DagHierarchyNodes are repacked
   // into the GPU layout GpuHierNode (float4 min/max + error + count +
   // children[8], std430 stride 80B) - flat f32 triplets would straddle
@@ -208,9 +210,20 @@ bool VisBufferChain::init(
     // every node enters the queue at most once per instance per frame,
     // so monotonic ticket indices never wrap within a frame.
     u32 entries = m_instanceCount * (m_hierNodeCount + 1u);
+    // M6.4: the ring's no-wraparound proof needs capacity >= entries;
+    // beyond the memory cap (4M entries = 64 MB across slots) the
+    // persistent mode falls back to level-wise instead of corrupting.
+    constexpr u32 kPersistMaxEntries = 4u << 20;
+    m_persistUsable = entries <= kPersistMaxEntries;
+    if (!m_persistUsable) entries = kPersistMaxEntries;
     m_persistCapacity = 1;
     while (m_persistCapacity < entries && m_persistCapacity < (1u << 30))
       m_persistCapacity <<= 1;
+    if (!m_persistUsable)
+      KENSHIN_WARN(
+          "[vgchain] persistent cull needs {} queue entries (> {} cap) - "
+          "falling back to level-wise",
+          m_instanceCount * (m_hierNodeCount + 1u), kPersistMaxEntries);
     // One-time EMPTY init via initialData (the HZB 0xFF house pattern -
     // fillBuffer needs an active recording): consumers re-empty their
     // slots every frame, so the invariant holds without per-frame clears.
@@ -268,7 +281,7 @@ bool VisBufferChain::init(
   if (!makePipe("page_touch.slang", m_pipeTouchPairs)) return false;
   if (!makePipe("page_touch.slang", m_pipeTouchHw)) return false;
   if (!makePipe("count_to_indirect.slang", m_pipeConvertTouch)) return false;
-  const u32 cfgTouch[4] = {0, 0, 7, 0};  // groupsX = cull counters[7]
+  const u32 cfgTouch[4] = {0, 0, 7, m_maxPairs};  // groupsX = cull counters[7]
   m_cfgTouch = makeHostBuffer(backend, sizeof(cfgTouch), cfgTouch, "cfgT");
   for (u32 s = 0; s < kSlots; ++s) {
     m_touched[s] = makeHostBuffer(
@@ -285,11 +298,11 @@ bool VisBufferChain::init(
     m_argsTouch[s] = backend.createBuffer(at);
   }
   // Conversion configs (static): {groupSize, fwdSlot, srcSlot, pad}.
-  const u32 cfgExpand[4] = {64, 1, 0, 0};
-  const u32 cfgCull[4] = {64, 3, 0, 0};
-  const u32 cfgRaster[4] = {0, 0, 0, 0};
-  const u32 cfgPost[4] = {0, 0, 5, 0};      // post raster: src = cull [5]
-  const u32 cfgHwDraw[4] = {384, 0, 7, 0};  // 3*128 verts, src = cull [7]
+  const u32 cfgExpand[4] = {64, 1, 0, m_maxPairs};
+  const u32 cfgCull[4] = {64, 3, 0, m_maxPairs};
+  const u32 cfgRaster[4] = {0, 0, 0, m_maxPairs};
+  const u32 cfgPost[4] = {0, 0, 5, m_maxPairs};      // post raster: src = cull [5]
+  const u32 cfgHwDraw[4] = {384, 0, 7, m_maxPairs};  // 3*128 verts, src = cull [7]
   m_cfgExpand = makeHostBuffer(backend, sizeof(cfgExpand), cfgExpand, "cfgE");
   m_cfgCull = makeHostBuffer(backend, sizeof(cfgCull), cfgCull, "cfgC");
   m_cfgRaster = makeHostBuffer(backend, sizeof(cfgRaster), cfgRaster, "cfgR");
@@ -299,8 +312,8 @@ bool VisBufferChain::init(
   // (the visible-instance count convert #0 forwarded); deeper levels
   // read the ping-pong count buffers (slot 0 of each). The post-cull
   // envelope switch (both modes): pending-count sized via cull [4].
-  const u32 cfgHierL1[4] = {64, 0, 1, 0};
-  const u32 cfgHierLn[4] = {64, 0, 0, 0};
+  const u32 cfgHierL1[4] = {64, 0, 1, m_maxPairs};
+  const u32 cfgHierLn[4] = {64, 0, 0, m_maxPairs};
   m_cfgHier[0] = makeHostBuffer(backend, sizeof(cfgHierL1), cfgHierL1, "cfgH1");
   for (u32 l = 1; l < kMaxHierLevels; ++l)
     m_cfgHier[l] =
@@ -477,7 +490,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   glm::vec4 cullParams[8];
   cullParams[0] = glm::vec4(in.camPos, in.pixelThreshold);
-  cullParams[1] = glm::vec4(in.worldPerPixel, 0.0f, in.nearZ, 0.0f);
+  cullParams[1] = glm::vec4(in.worldPerPixel, 0.0f, in.nearZ, f32(m_maxPairs));
   for (int c = 0; c < 4; ++c)
     cullParams[2 + c] =
         occActive ? m_prevVP[prevSlot][c] : glm::vec4(c == 0 ? 1.0f : 0.0f);
@@ -514,6 +527,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   glm::vec4* pp =
       static_cast<glm::vec4*>(backend.mappedPtr(m_postParams[slot]));
   for (int c = 0; c < 8; ++c) pp[c] = glm::vec4(0.0f);
+  pp[1].w = f32(m_maxPairs);  // the saturating-append capacity
   pp[0] = glm::vec4(in.camPos, 0.0f);
   {
     const glm::mat4 vp = in.proj * in.view;
@@ -549,7 +563,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     for (int c = 0; c < 4; ++c) p[c] = in.view[c];
     for (int c = 0; c < 4; ++c) p[4 + c] = in.proj[c];
     p[8] = glm::vec4(f32(in.width), f32(in.height), 0.0f, in.nearZ);
-    p[9] = glm::vec4(1.0f, m_paged ? 1.0f : 0.0f, 0.0f, 0.0f);
+    p[9] = glm::vec4(1.0f, m_paged ? 1.0f : 0.0f, 0.0f, f32(m_maxPairs));
     for (int c = 10; c < 12; ++c) p[c] = glm::vec4(0.0f);
     glm::vec4* pp =
         static_cast<glm::vec4*>(backend.mappedPtr(m_postRasterParams[slot]));
@@ -590,11 +604,14 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // three pair lists in IDENTICAL semantics; the raster stage onward
   // is shared.
   const bool hier = in.cullMode != 0 && m_hierReady;
+  // The persistent driver's queue is capacity-capped at init; past the
+  // cap the no-wraparound proof breaks, so level-wise takes over.
+  const bool persist = hier && in.cullMode == 2u && m_persistUsable;
   if (!hier) {
-    const u32 expandHandles[5] = {m_workItems[slot], m_expCnt[slot],
+    const u32 expandHandles[6] = {m_workItems[slot], m_expCnt[slot],
                                   m_visibleList[slot], m_instanceBuffer,
-                                  m_meshRangeBuffer};
-    backend.dispatchComputeIndirect(m_pipeExpand, expandHandles, 5,
+                                  m_meshRangeBuffer, m_pairCapBuffer};
+    backend.dispatchComputeIndirect(m_pipeExpand, expandHandles, 6,
                                     m_argsExpand[slot], 0);
     b(m_workItems[slot]);
     b(m_expCnt[slot]);
@@ -616,7 +633,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     b(m_pendingPairs[slot]);
     b(m_hwPairs[slot]);
     b(m_cullCnt[slot]);
-  } else if (in.cullMode == 2u) {
+  } else if (persist) {
     // ---- M5.3: the persistent-threads traversal. Seed the ticket
     // queue (same argsExpand envelope - the seed count is the visible
     // instance count), then ONE fixed direct dispatch: the workers
@@ -667,7 +684,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     // per site per frame - the M3.3 discipline).
     for (u32 level = 1; level <= m_hierDepth; ++level) {
       const u32 parity = (level - 1) & 1;
-      const u32 levelHandles[18] = {m_hierParams[slot],
+      const u32 levelHandles[19] = {m_hierParams[slot],
                                     m_clusterBuffer,
                                     m_groupBuffer,
                                     m_instanceBuffer,
@@ -684,9 +701,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
                                     m_activeNodes[slot][parity ^ 1],
                                     m_hierCnt[slot][parity],
                                     m_hierCnt[slot][parity ^ 1],
+                                    m_pairCapBuffer,
                                     m_persistState[slot]};
       backend.dispatchComputeIndirect(m_pipeHierLevel[level - 1], levelHandles,
-                                      18, m_argsHier[level][slot], 0);
+                                      19, m_argsHier[level][slot], 0);
       b(m_pairs[slot]);
       b(m_pendingPairs[slot]);
       b(m_hwPairs[slot]);
@@ -1135,6 +1153,8 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
         m_cfgPost, m_cfgHwDraw, m_cfgPostCull, m_aabbBuffer, m_hierBuffer,
         m_groupRangeBuffer, m_meshHierRootBuffer, m_cfgTouch})
     if (h != kInvalid && h != 0) backend.destroyBuffer(h);
+  if (m_pairCapBuffer != kInvalid && m_pairCapBuffer != 0)
+    backend.destroyBuffer(m_pairCapBuffer);
   for (const u32 p : {m_pipeTouchPairs, m_pipeTouchHw, m_pipeConvertTouch})
     if (p != ~0u && p != 0) backend.destroyComputePipeline(p);
   for (u32 l = 0; l < kMaxHierLevels; ++l)

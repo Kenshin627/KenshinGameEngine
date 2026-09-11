@@ -744,3 +744,113 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
   backend->destroyBuffer(pageHeaderBuf);
   backend->shutdown();
 }
+
+// ── M6.4 saturation: pair lists capped at 600 against ~3000 visible
+// pairs (far above any per-level width so the traversal does not
+// starve, far below the leaf total so the appends overflow). The
+// writers must saturate (drop, never write out of bounds) and every
+// consumer dispatch clamps at the cap. The frame completes with the
+// rasterized 600, nothing faults.
+TEST_CASE("pair-list saturation at tiny capacity", "[gpu][vgchain]") {
+  using namespace kenshin;
+  Built built;
+  REQUIRE(
+      build(geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
+  const auto& dag = built.dag;
+
+  manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+  auto backend = backend::createVulkanBackend();
+  backend::BackendInitParams params;
+  REQUIRE(backend->initialize(params));
+
+  std::vector<u8> clusterData, groupData;
+  for (const auto& c : dag.clusters)
+    renderer::packGpuCluster(clusterData, c.group, c.boundsSphere.x,
+                             c.boundsSphere.y, c.boundsSphere.z,
+                             c.boundsSphere.w, c.error, c.parentError,
+                             c.vertexOffset, c.vertexCount, c.indexOffset,
+                             c.indexCount, c.refinedGroup);
+  for (const auto& g : dag.groups)
+    renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
+                           g.boundsSphere.z, g.boundsSphere.w, g.maxError,
+                           g.simplifyError, static_cast<u32>(g.lodLevel));
+  std::vector<glm::vec4> positions4(dag.positions.size() / 3);
+  for (usize v = 0; v < positions4.size(); ++v)
+    positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
+                              dag.positions[v * 3 + 2], 0.0f);
+  std::vector<renderer::CullGpuInstance> instances;
+  for (u32 i = 0; i < 24; ++i)
+    instances.push_back(renderer::CullGpuInstance{});
+  const std::vector<renderer::GpuMeshRangePair> meshRanges = {
+      {0u, static_cast<u32>(dag.clusters.size())}};
+
+  const glm::vec3 cam(2.5f, 3.0f, 2.0f);
+  const u32 W = 64, H = 48;
+  const f32 fov = 60.0f;
+  const f32 worldPerPixel =
+      2.0f * std::tan(glm::radians(fov) * 0.5f) / static_cast<f32>(H);
+  glm::mat4 view = glm::lookAtRH(cam, {0, 0, 0}, {0, 1, 0});
+  glm::mat4 proj =
+      glm::perspectiveRH_ZO(glm::radians(fov), 4.0f / 3.0f, 0.1f, 100.0f);
+  proj[1][1] *= -1.0f;
+  glm::vec4 planes[6];
+  renderer::extractFrustumPlanes(proj * view, planes);
+  const std::vector<u8> hierarchyData(
+      reinterpret_cast<const u8*>(dag.hierarchyNodes.data()),
+      reinterpret_cast<const u8*>(dag.hierarchyNodes.data()) +
+          dag.hierarchyNodes.size() *
+              sizeof(kenshin::geometry::DagHierarchyNode));
+  std::vector<glm::uvec2> groupRanges;
+  for (const auto& g : dag.groups)
+    groupRanges.emplace_back(g.clusters.empty() ? 0 : g.clusters.front(),
+                             static_cast<u32>(g.clusters.size()));
+
+  for (const u32 cullMode : {0u, 1u, 2u}) {
+    renderer::VisBufferChain chain;
+    const std::vector<kenshin::u32> hierRoots{dag.hierarchyRoot};
+    REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
+                       groupData, hierarchyData, groupRanges, hierRoots,
+                       instances, meshRanges,
+                       /*maxPairs=*/600,
+                       {}, nullptr, W, H));
+    renderer::ChainInputs inputs;
+    inputs.view = view;
+    inputs.proj = proj;
+    inputs.nearZ = 0.1f;
+    inputs.camPos = cam;
+    inputs.pixelThreshold = 1.0f;
+    inputs.worldPerPixel = worldPerPixel;
+    inputs.width = W;
+    inputs.height = H;
+    for (int p = 0; p < 6; ++p) inputs.planes[p] = planes[p];
+    inputs.hwMode = 0;
+    inputs.cullMode = cullMode;
+    backend::FrameBeginInfo frameInfo;
+    frameInfo.width = W;
+    frameInfo.height = H;
+    REQUIRE(backend->beginFrame(frameInfo));
+    chain.execute(*backend, inputs);
+    backend->endFrame();
+    REQUIRE(backend->beginFrame(frameInfo));
+    chain.execute(*backend, inputs);
+    backend->endFrame();
+    u32 stats[16] = {};
+    REQUIRE(chain.readStats(*backend, stats));
+    // Saturation PROOF: the raw count exceeded the 5-pair capacity
+    // (reservations past it were dropped by the writers).
+    INFO("cullMode " << cullMode << ": pairs " << stats[2] << " visible "
+                      << stats[0] << " visited " << stats[13] << " pruned "
+                      << stats[14] << " tooCoarse " << stats[3]);
+    // Saturation PROOF (hierarchy modes process everything and cap the
+    // WRITES: the raw count runs past the capacity; the linear mode
+    // saturates UPSTREAM in the expand - only 5 items ever exist).
+    if (cullMode != 0u) REQUIRE(stats[2] > 600);
+    // The raster dispatched the clamped envelope: pixel writes only
+    // provable for the hierarchy modes (the linear path's 5 surviving
+    // work items may all be back-facing - completion is its proof).
+    if (cullMode != 0u) REQUIRE(stats[5] > 0);
+    chain.onShutdown(*backend);
+  }
+  backend->shutdown();
+}

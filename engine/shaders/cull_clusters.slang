@@ -196,7 +196,8 @@ bool occluded(uint2 item, float4x4 model)
 
 [shader("compute")][numthreads(64, 1, 1)] void main(
     uint tid : SV_DispatchThreadID) {
-  if (tid >= counters[3]) return;
+  // Ceil slack of the clamped envelope: guard at the capacity too.
+  if (tid >= counters[3] || tid >= uint(params[1].w)) return;
 
   const uint2 item = workItems[tid];
   const GpuCluster cluster = clusters[item.y];
@@ -227,7 +228,9 @@ bool occluded(uint2 item, float4x4 model)
   if (params[6].x > 0.5 && occluded(item, model)) {
     uint pend = 0;
     InterlockedAdd(counters[4], 1, pend);
-    pendingPairs[pend] = item;
+    // Saturating append: reservations past the list capacity drop
+    // (the consumers' converts clamp the count - never an OOB write).
+    if (pend < uint(params[1].w)) pendingPairs[pend] = item;
     return;
   }
 
@@ -263,7 +266,7 @@ bool occluded(uint2 item, float4x4 model)
     if (hw) {
       uint hs = 0;
       InterlockedAdd(counters[7], 1, hs);
-      hwPairs[hs] = item;
+      if (hs < uint(params[1].w)) hwPairs[hs] = item;
       InterlockedAdd(counters[6], cluster.indexCount / 3u);
       return;
     }
@@ -271,6 +274,6 @@ bool occluded(uint2 item, float4x4 model)
 
   uint slot = 0;
   InterlockedAdd(counters[0], 1, slot);
-  visiblePairs[slot] = item;
+  if (slot < uint(params[1].w)) visiblePairs[slot] = item;
   InterlockedAdd(counters[6], cluster.indexCount / 3u);  // cut tris
 }

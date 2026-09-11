@@ -19,7 +19,9 @@
 void main(uint3 tid : SV_DispatchThreadID)
 {
     dst[0] = cfg[0];
-    dst[1] = src[cfg[2]];
+    uint count = src[cfg[2]];
+    if (cfg[3] > 0u) count = min(count, cfg[3]);
+    dst[1] = count;
     dst[2] = 0u;
     dst[3] = 0u;
 }

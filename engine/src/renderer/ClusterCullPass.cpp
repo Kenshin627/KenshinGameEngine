@@ -63,6 +63,9 @@ bool expandWorkItemsOnGpu(backend::IRenderBackend& backend,
                     instances.size() * sizeof(CullGpuInstance), false};
   job.buffers[4] = {meshRanges.data(),
                     meshRanges.size() * sizeof(GpuMeshRangePair), false};
+  // Binding 5: the saturating-append capacity - exactly total, so the
+  // one-shot expand may never drop.
+  job.buffers[5] = {&total, sizeof(total), false};
 
   std::vector<u8> outputs[backend::IRenderBackend::Job::kMaxBuffers];
   const u32 groups = (static_cast<u32>(visible.size()) + 63u) / 64u;
@@ -96,8 +99,10 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
   // M3.2: params grew to float4[8] - [2..5] prev viewProj, [6] the
   // occlusion flags, [7] prev camPos (zeroed when disabled).
   const glm::vec4 params0(camPos, pixelThreshold);
+  // [1].w: the saturating-append capacity (the one-shot lists are
+  // exactly workItems/pairs sized - nothing may drop).
   const glm::vec4 params1(worldPerPixel, static_cast<f32>(workItems.size()),
-                          0.0f, 0.0f);
+                          0.0f, static_cast<f32>(workItems.size()));
   glm::vec4 params[8] = {params0, params1};
   if (occlusion.enabled) {
     for (int c = 0; c < 4; ++c) params[2 + c] = occlusion.prevViewProj[c];
