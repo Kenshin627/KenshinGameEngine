@@ -42,6 +42,16 @@ struct DecodeParams {
   DecodeView view = DecodeView::Final;
 };
 
+/// M6.3 paged decode inputs: the slot pool (bindings 3..6) + the paged
+/// tables (bindings 8..10). The pass owns the tiny decodeParams buffer
+/// (binding 11: .x = the paged flag, written per draw).
+struct DecodePagedInputs {
+  u32 slotPool = 0xFFFFFFFFu;
+  u32 clusterPage = 0xFFFFFFFFu;
+  u32 pageTable = 0xFFFFFFFFu;
+  u32 pageHeader = 0xFFFFFFFFu;
+};
+
 class MaterialDecodePass {
  public:
   /// Compile decode_material.slang and create the fullscreen pipeline.
@@ -58,10 +68,23 @@ class MaterialDecodePass {
             const VirtualGeometryScene& scene, const DecodeParams& params,
             u32 width, u32 height, u32 visHandle);
 
+  /// M6.3 paged variant: explicit handles instead of the scene's v2
+  /// pools (the slot pool fills bindings 3..6; cluster/instance/group
+  /// tables still come from the scene). Also takes the three dummy
+  /// 4-byte stand-ins the v2-mode bindings would need - pass the
+  /// SCENE's dummies (they exist for exactly this).
+  void drawPaged(backend::IRenderBackend& backend, const glm::mat4& viewProj,
+                 const VirtualGeometryScene& scene, const DecodeParams& params,
+                 u32 width, u32 height, u32 visHandle,
+                 const DecodePagedInputs& paged);
+
   void onShutdown(backend::IRenderBackend& backend);
 
  private:
   u32 m_pipeline = ~0u;
+  u32 m_decodeParams = ~0u;  // 16B host-visible: [0].x = paged flag
+  u32 m_dummyU32[2] = {~0u, ~0u};  // v2 stand-ins (bindings 8/9)
+  u32 m_dummyPageHeader = ~0u;     // v2 stand-in (binding 10)
 };
 
 }  // namespace renderer

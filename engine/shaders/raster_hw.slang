@@ -36,12 +36,39 @@
 //                         workaround)
 //   1: uint2 hwPairs[]  - the routed (instanceIdx, clusterIdx) list
 //   2: GpuCluster clusters[] - 48B, mirrors packGpuCluster
-//   3: float4 positions[] - shared mesh-local vertex pool
-//   4: uint indices[]   - shared index pool
+//   3: float4 positions[] - shared mesh-local vertex pool (M6.3 paged:
+//                          the PAGE SLOT POOL)
+//   4: uint indices[]   - shared index pool (M6.3 paged: the slot pool)
 //   5: GpuInstance instances[] - 96B (model transforms)
 //   6: uint64 visBuffer[width*height] - RW, the PS's atomic max
+//   7: uint clusterPage[] - M6.3 paged: cluster -> page (v2: dummy)
+//   8: uint pageTable[]   - M6.3 paged: page -> slot, 0xFFFFFFFF =
+//                          not resident (v2: dummy)
+//   9: GpuPageHeader pageHeader[] - M6.3 paged section bases (v2: dummy)
+//  10: uint pending[1]  - M6.3 RW: non-resident skip count (v2: dummy)
+//
+// M6.3 paged mode (params[5].y != 0): bindings 3/4 are the slot pool,
+// cluster offsets are page-local, reads add the slot-strided section
+// base - identical VALUES to the v2 pools when all pages are resident.
+// A non-resident page keeps the VS's initialized degenerate output
+// (zero-area triangle, no pixels) and counts into pending[0]. The
+// existing clamps stay meaningful: params[4].zw / [5].x carry the SLOT
+// POOL totals in paged mode (coarser but still in-bounds).
 
 static const uint kMaxTrisPerCluster = 128;  // matches the builder cap
+
+// kPageSlotSize (128 KB) in elements - mirrors rasterize_sw / CPU.
+static const uint kSlotFloat4s = 8192;
+static const uint kSlotU32s    = 32768;
+
+struct GpuPageHeader {
+  uint posBase;
+  uint nrmBase;
+  uint uvBase;
+  uint idxBase;
+  uint vertexCount;
+  uint indexCount;
+};
 
 struct GpuCluster {
   float4 bounds;
@@ -71,6 +98,10 @@ struct GpuInstance {
 [[vk::binding(4)]] StructuredBuffer<uint> indices;
 [[vk::binding(5)]] StructuredBuffer<GpuInstance> instances;
 [[vk::binding(6)]] RWStructuredBuffer<uint64_t> visBuffer;
+[[vk::binding(7)]] StructuredBuffer<uint> clusterPage;
+[[vk::binding(8)]] StructuredBuffer<uint> pageTable;
+[[vk::binding(9)]] StructuredBuffer<GpuPageHeader> pageHeader;
+[[vk::binding(10)]] RWStructuredBuffer<uint> pending;
 
 struct HwVsOut {
   float4 pos : SV_Position;
@@ -113,6 +144,22 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
   const uint tri = vertexId / 3u;
   const uint corner = vertexId - tri * 3u;
 
+  // M6.3 paged addressing: slot-strided section bases, or the
+  // initialized degenerate output + a pending count when the page is
+  // not resident (zero-area triangle: no pixels, no PS side effects).
+  uint posBase = 0, idxBase = 0;
+  if (uint(params[5].y) != 0u) {
+    const uint page = clusterPage[itemC.y];
+    const uint slot = pageTable[page];
+    if (slot == 0xFFFFFFFFu) {
+      InterlockedAdd(pending[0], 1);
+      return o;
+    }
+    const GpuPageHeader ph = pageHeader[page];
+    posBase = ph.posBase + slot * kSlotFloat4s;
+    idxBase = ph.idxBase + slot * kSlotU32s;
+  }
+
   if (tri < min(cluster.indexCount, 3u * kMaxTrisPerCluster) / 3u) {
     // NOTE: glm stores column-major and Slang reads the buffer vec4s
     // as rows - every transform below is an explicit combination of
@@ -122,9 +169,11 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
                                      params[3]);
     float2 q[3];
     for (uint k = 0; k < 3u; ++k) {
-      const uint ii = min(cluster.indexOffset + tri * 3u + k, indexCount - 1u);
-      const uint vi = min(indices[ii] + cluster.vertexOffset,
-                          positionCount - 1u);
+      const uint ii =
+          min(idxBase + cluster.indexOffset + tri * 3u + k, indexCount - 1u);
+      const uint vi =
+          min(indices[ii] + posBase + cluster.vertexOffset,
+              positionCount - 1u);
       const float3 lp = positions[vi].xyz;
       const float3 wp = model[0].xyz * lp.x + model[1].xyz * lp.y +
                         model[2].xyz * lp.z + model[3].xyz;

@@ -51,6 +51,16 @@ struct GpuGroup
     float _pad4;
 };
 
+struct GpuPageHeader
+{
+    uint posBase;  // float4 elements within the page
+    uint nrmBase;  // float4 elements
+    uint uvBase;   // float2 elements
+    uint idxBase;  // u32 elements
+    uint vertexCount;
+    uint indexCount;
+};
+
 struct DecodePush
 {
     float4x4 viewProj;   // world -> NDC, the camera's own (Y-flipped) matrix
@@ -76,6 +86,20 @@ struct DecodePush
 [[vk::binding(5)]] StructuredBuffer<float2> uvs;
 [[vk::binding(6)]] StructuredBuffer<uint> indices;
 [[vk::binding(7)]] StructuredBuffer<GpuGroup> groups;  // S4.6 debug views
+// M6.3 paged addressing (decodeParams[0].x != 0): bindings 3..6 are the
+// PAGE SLOT POOL, cluster offsets are page-local, and every read adds
+// the slot-strided section base. No residency check is needed: pixels
+// of non-resident clusters cannot exist - the rasterizers skipped
+// those clusters and the always-resident root pages covered the area.
+[[vk::binding(8)]] StructuredBuffer<uint> clusterPage;
+[[vk::binding(9)]] StructuredBuffer<uint> pageTable;
+[[vk::binding(10)]] StructuredBuffer<GpuPageHeader> pageHeader;
+[[vk::binding(11)]] StructuredBuffer<float4> decodeParams;
+
+// kPageSlotSize (128 KB) in elements - mirrors rasterize_sw / CPU.
+static const uint kSlotFloat4s  = 8192;
+static const uint kSlotFloat2s  = 16384;
+static const uint kSlotU32s     = 32768;
 
 float2 worldToScreen(float3 w)
 {
@@ -146,6 +170,19 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const GpuCluster cluster = clusters[clusterIdx];
     const uint viewMode = uint(push.camFlags.w + 0.5);
 
+    // M6.3 paged section bases (see the binding comment).
+    uint posBase = 0, nrmBase = 0, uvBase = 0, idxBase = 0;
+    if (uint(decodeParams[0].x) != 0u)
+    {
+        const uint page = clusterPage[clusterIdx];
+        const GpuPageHeader ph = pageHeader[page];
+        const uint slot = pageTable[page];
+        posBase = ph.posBase + slot * kSlotFloat4s;
+        nrmBase = ph.nrmBase + slot * kSlotFloat4s;
+        uvBase  = ph.uvBase  + slot * kSlotFloat2s;
+        idxBase = ph.idxBase + slot * kSlotU32s;
+    }
+
     if (viewMode == 1u)
     {
         // LOD-level view: one hue PER LEVEL via a golden-ratio hash -
@@ -194,18 +231,21 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     }
 
     const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);
-    const uint i0 = min(indices[cluster.indexOffset + tri3 + 0u],
+    const uint i0 = min(indices[idxBase + cluster.indexOffset + tri3 + 0u],
                         cluster.vertexCount - 1u);
-    const uint i1 = min(indices[cluster.indexOffset + tri3 + 1u],
+    const uint i1 = min(indices[idxBase + cluster.indexOffset + tri3 + 1u],
                         cluster.vertexCount - 1u);
-    const uint i2 = min(indices[cluster.indexOffset + tri3 + 2u],
+    const uint i2 = min(indices[idxBase + cluster.indexOffset + tri3 + 2u],
                         cluster.vertexCount - 1u);
     const float3 w0 =
-        applyModel(positions[cluster.vertexOffset + i0].xyz, instanceIdx);
+        applyModel(positions[posBase + cluster.vertexOffset + i0].xyz,
+                   instanceIdx);
     const float3 w1 =
-        applyModel(positions[cluster.vertexOffset + i1].xyz, instanceIdx);
+        applyModel(positions[posBase + cluster.vertexOffset + i1].xyz,
+                   instanceIdx);
     const float3 w2 =
-        applyModel(positions[cluster.vertexOffset + i2].xyz, instanceIdx);
+        applyModel(positions[posBase + cluster.vertexOffset + i2].xyz,
+                   instanceIdx);
 
     // NOTE: near-plane-crossing triangles (a vertex behind the camera)
     // used to be discarded outright - with the camera close to the mesh
@@ -253,12 +293,12 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
 
     // Interpolated attributes.
     const float3 nrm = normalize(
-        normals[cluster.vertexOffset + i0].xyz * p0 +
-        normals[cluster.vertexOffset + i1].xyz * p1 +
-        normals[cluster.vertexOffset + i2].xyz * p2);  // scale cancels
-    const float2 uv0 = uvs[cluster.vertexOffset + i0];
-    const float2 uv1 = uvs[cluster.vertexOffset + i1];
-    const float2 uv2 = uvs[cluster.vertexOffset + i2];
+        normals[nrmBase + cluster.vertexOffset + i0].xyz * p0 +
+        normals[nrmBase + cluster.vertexOffset + i1].xyz * p1 +
+        normals[nrmBase + cluster.vertexOffset + i2].xyz * p2);  // scale cancels
+    const float2 uv0 = uvs[uvBase + cluster.vertexOffset + i0];
+    const float2 uv1 = uvs[uvBase + cluster.vertexOffset + i1];
+    const float2 uv2 = uvs[uvBase + cluster.vertexOffset + i2];
     const float2 uv = (uv0 * p0 + uv1 * p1 + uv2 * p2) * pSumInv;
 
     // Analytic UV derivatives of the rational interpolation (no

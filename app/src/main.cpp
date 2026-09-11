@@ -626,8 +626,8 @@ int main(int argc, char** argv) {
             vgScene->clusterData(), vgScene->groupData(),
             vgScene->hierarchyData(), vgScene->groupRanges(), meshHierRoots,
             chainInstances, chainMeshRanges,
-            kenshin::u32(chainInstances.size()) * vgScene->clusterCount(), 1,
-            1);
+            kenshin::u32(chainInstances.size()) * vgScene->clusterCount(), {},
+            nullptr, 1, 1);
         if (chainReady) KENSHIN_INFO("[vgchain] in-frame chain ready");
       }
       if (!decodeReady) decodeReady = decodePass.init(*vgBackend, shaders);
@@ -661,7 +661,7 @@ int main(int argc, char** argv) {
         // submissions may overlap), which showed up as torn counters
         // - intermittent zero clusters, wildly varying write counts.
         {
-          kenshin::u32 cs[15];
+          kenshin::u32 cs[16];
           if (chainReady && chain.readStatsMapped(*vgBackend, cs)) {
             vgDebug.visibleClusters = cs[2];
             vgDebug.cutTris = cs[11];

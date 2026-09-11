@@ -58,6 +58,22 @@ struct ChainInputs {
   u32 cullMode = 1;
 };
 
+/// M6.3 paged geometry: the buffer handles the raster/decode passes
+/// address through instead of the v2 pools. `slotPool` is a
+/// createPageSlotPool buffer; `clusterPage`/`pageHeader` are static
+/// tables; `pageTable` is HOST-VISIBLE (the streaming manager writes
+/// page -> slot mappings, 0xFFFFFFFF = not resident). The element
+/// totals feed the HW path's clamp bounds.
+struct ChainPagedInputs {
+  u32 slotPool = 0xFFFFFFFFu;
+  u32 clusterPage = 0xFFFFFFFFu;
+  u32 pageTable = 0xFFFFFFFFu;
+  u32 pageHeader = 0xFFFFFFFFu;
+  u32 pageCount = 0;
+  u32 slotVertexTotal = 0;  // float4s across the pool
+  u32 slotIndexTotal = 0;   // u32s across the pool
+};
+
 class VisBufferChain {
  public:
   static constexpr u32 kSlots = 2;  // = backend frames in flight
@@ -66,6 +82,10 @@ class VisBufferChain {
   /// buffers. `maxPairs` bounds work items AND pairs (worst case
   /// visible instances x total clusters). The M5.2 hierarchy arguments
   /// may be empty - the chain then forces cullMode 0 (linear).
+  /// M6.3: `paged` non-null switches the raster/decode addressing to
+  /// the page slot pool (the positions/indices spans are then unused;
+  /// `clusterAabbs` carries the precomputed occlusion bounds the v2
+  /// path derives from the pools).
   bool init(backend::IRenderBackend& backend, manager::ShaderManager& shaders,
             std::span<const glm::vec4> positions4, std::span<const u32> indices,
             const std::vector<u8>& clusterData,
@@ -75,7 +95,8 @@ class VisBufferChain {
             std::span<const u32> meshHierRoots,
             std::span<const CullGpuInstance> instances,
             std::span<const GpuMeshRangePair> meshRanges, u32 maxPairs,
-            u32 width, u32 height);
+            std::span<const glm::vec4> clusterAabbs,
+            const ChainPagedInputs* paged, u32 width, u32 height);
 
   /// (Re)create the per-slot VisBuffers on resolution change.
   void resize(backend::IRenderBackend& backend, u32 width, u32 height);
@@ -97,8 +118,11 @@ class VisBufferChain {
   /// cut), [3] too-coarse, [4] source-too-coarse, [5] px writes,
   /// [6] backface, [7] near-clipped, [8] occlusion-culled (pending),
   /// [9] post-pass revived, [10] post-raster px writes,
-  /// [11] cut tris (main + revived).
-  bool readStats(backend::IRenderBackend& backend, u32 out[15]) const;
+  /// [11] cut tris (main + revived), [12] HW-routed clusters,
+  /// [13] hierarchy visited, [14] hierarchy pruned,
+  /// [15] pending-resident skips (M6.3: SW workgroups + HW clusters
+  /// whose page was not resident that frame).
+  bool readStats(backend::IRenderBackend& backend, u32 out[16]) const;
   /// NON-BLOCKING stats snapshot for panels: memcpy straight off the
   /// per-slot HOST-VISIBLE counter maps (no submit, no idle - the
   /// values trail the GPU by however much the driver's writes lag,
@@ -106,7 +130,14 @@ class VisBufferChain {
   /// stays for tests; calling IT periodically from the frame loop
   /// degrades presentation progressively (measured: 6 queued idles
   /// every 8 frames -> 5x frame-time growth over ~2k frames).
-  bool readStatsMapped(backend::IRenderBackend& backend, u32 out[15]) const;
+  bool readStatsMapped(backend::IRenderBackend& backend, u32 out[16]) const;
+  /// NON-BLOCKING copy of the touched-page bitmap (one u32 per 32
+  /// pages; M6.3 page_touch output - the streaming manager's residency
+  /// feedback). The readStatsMapped contract: call between endFrame
+  /// and the NEXT execute (the current slot's bitmap is then fully
+  /// written and not yet cleared).
+  bool readTouchedPages(backend::IRenderBackend& backend,
+                        std::vector<u32>& out) const;
   /// Debug probe: the three indirect dispatch commands as written by
   /// the conversions (x = group count).
   bool readIndirectArgs(backend::IRenderBackend& backend, u32 expandX[3],
@@ -236,6 +267,29 @@ class VisBufferChain {
   u32 m_instanceCount = 0, m_maxPairs = 0;
   u32 m_clusterCount = 0, m_indexCount = 0, m_positionCount = 0;
   u32 m_width = 0, m_height = 0;
+
+  // ---- M6.3: paged geometry (slot-pool addressing) -------------------
+  // When m_paged, bindings 1/2 of the raster passes (and the decode
+  // pool bindings) are the PAGE SLOT POOL: cluster offsets are
+  // page-local, each read adds the slot-strided section base, and a
+  // pageTable miss skips the cluster (counted in rasterCnt[4]). The
+  // v2 path binds tiny dummies at the paged table slots so ONE shader
+  // serves both modes (params-gated reads only).
+  bool m_paged = false;
+  ChainPagedInputs m_pagedInputs;
+  u32 m_dummyU32[3] = {~0u, ~0u, ~0u};  // v2 stand-ins: clusterPage,
+                                        // pageTable, raster_hw pending
+  u32 m_dummyPageHeader = ~0u;          // v2 stand-in: pageHeader
+  // page_touch feedback (paged only; compiled in every run to keep the
+  // shader regression-gated): two pipeline instances (the SW pair list
+  // and the HW pair list each need their one set update per frame),
+  // the per-slot touched bitmap, and the HW-list dispatch args convert.
+  u32 m_pipeTouchPairs = ~0u, m_pipeTouchHw = ~0u;
+  u32 m_pipeConvertTouch = ~0u;  // cull counters[7] -> touch dispatch args
+  u32 m_touched[kSlots]{};  // host-visible bitmap, pageCount/32 words
+  u32 m_argsTouch[kSlots]{};
+  u32 m_cfgTouch = ~0u;  // {0, 0, 7, 0}: groupsX = cull counters[7]
+  u32 m_pageBitmapWords = 0;
 };
 
 }  // namespace renderer

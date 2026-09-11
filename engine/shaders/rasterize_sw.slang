@@ -26,10 +26,26 @@
 //   4: GpuInstance instances[] - 96B (model transform)
 //   5: uint2  visiblePairs[] - (instanceIdx, clusterIdx), one per group
 //   6: uint64 visBuffer[width*height] - ZERO-INITIALIZED; max wins
-//   7: uint   counters[4] - [0] pair count (in; GPU-written by the
+//   7: uint   counters[6] - [0] pair count (in; GPU-written by the
 //                            in-frame chain or pre-filled one-shot);
 //                            [1] pixel writes, [2] backface culls,
-//                            [3] near-clipped triangles (out)
+//                            [3] near-clipped triangles (out);
+//                            [4] pending-resident skips (M6.3, out)
+//   8: uint   clusterPage[]  - M6.3 paged: cluster -> page (v2: dummy)
+//   9: uint   pageTable[]    - M6.3 paged: page -> slot (0xFFFFFFFF
+//                              = not resident; v2: dummy)
+//  10: GpuPageHeader pageHeader[] - M6.3 paged: per-page section
+//                              element bases (v2: dummy)
+//
+// M6.3 paged addressing: params[9].y != 0 switches bindings 1/2 to the
+// PAGE SLOT POOL - cluster offsets are then PAGE-LOCAL and each read
+// adds the page's slot-strided section base (kSlotFloat4s/kSlotU32s =
+// kPageSlotSize/16 / kPageSlotSize/4, engine-wide constants mirrored
+// CPU-side). With every page resident the VALUES read are bit-identical
+// to the v2 pools (the M6.1 packer proves slice equality) - the
+// VisBuffer output is byte-identical between modes. A non-resident page
+// skips the whole workgroup and counts into counters[4]; the always-
+// resident root pages guarantee a coarse image instead.
 
 struct GpuCluster
 {
@@ -52,6 +68,22 @@ struct GpuInstance
     float4 bounds;
 };
 
+struct GpuPageHeader
+{
+    uint posBase;  // float4 elements within the page
+    uint nrmBase;  // float4 elements
+    uint uvBase;   // float2 elements
+    uint idxBase;  // u32 elements
+    uint vertexCount;
+    uint indexCount;
+};
+
+// kPageSlotSize (128 KB) in float4 / u32 elements - the CPU-side
+// createPageSlotPool asserts the pool was created with the same slot
+// size before the paged mode is ever armed.
+static const uint kSlotFloat4s = 8192;
+static const uint kSlotU32s    = 32768;
+
 // NOTE on matrices: glm stores column-major and Slang's mul(model, v)
 // reads buffer vec4s as ROWS (probe-verified in S4.3) - every transform
 // below is an explicit linear combination of the stored columns.
@@ -64,6 +96,9 @@ struct GpuInstance
 [[vk::binding(5)]] StructuredBuffer<uint2>  visiblePairs;
 [[vk::binding(6)]] RWStructuredBuffer<uint64_t> visBuffer;
 [[vk::binding(7)]] RWStructuredBuffer<uint>    counters;
+[[vk::binding(8)]] StructuredBuffer<uint>          clusterPage;
+[[vk::binding(9)]] StructuredBuffer<uint>          pageTable;
+[[vk::binding(10)]] StructuredBuffer<GpuPageHeader> pageHeader;
 
 groupshared float3 sViewPos[256];
 
@@ -276,6 +311,25 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     const GpuCluster cluster = clusters[pair.y];
     const GpuInstance inst = instances[pair.x];
 
+    // ---- M6.3 paged addressing (see the header comment) -------------
+    uint posBase = 0, idxBase = 0;
+    if (uint(params[9].y) != 0u)
+    {
+        const uint page = clusterPage[pair.y];
+        const uint slot = pageTable[page];
+        if (slot == 0xFFFFFFFFu)
+        {
+            // Not resident: skip the whole group (one count - every
+            // thread takes this path). The always-resident coarse
+            // pages cover the area instead.
+            if (gtid.x == 0u) InterlockedAdd(counters[4], 1);
+            return;
+        }
+        const GpuPageHeader ph = pageHeader[page];
+        posBase = ph.posBase + slot * kSlotFloat4s;
+        idxBase = ph.idxBase + slot * kSlotU32s;
+    }
+
     const float4 viewC0 = params[0];
     const float4 viewC1 = params[1];
     const float4 viewC2 = params[2];
@@ -293,7 +347,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     {
         // float4 elements: a vec3 ARRAY in std430 strides 16, so the
         // host packs xyz+pad (w unused).
-        const float3 lp = positions[cluster.vertexOffset + v].xyz;
+        const float3 lp = positions[posBase + cluster.vertexOffset + v].xyz;
         // world = inst.model * lp  (explicit glm-column combination)
         const float3 wp = inst.model[0].xyz * lp.x + inst.model[1].xyz * lp.y
                         + inst.model[2].xyz * lp.z + inst.model[3].xyz;
@@ -307,9 +361,9 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     // ---- Phase 2: one thread per triangle ------------------------------
     const uint triCount = cluster.indexCount / 3;
     if (gtid.x >= triCount) return;
-    const uint i0 = indices[cluster.indexOffset + gtid.x * 3 + 0];
-    const uint i1 = indices[cluster.indexOffset + gtid.x * 3 + 1];
-    const uint i2 = indices[cluster.indexOffset + gtid.x * 3 + 2];
+    const uint i0 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 0];
+    const uint i1 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 1];
+    const uint i2 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 2];
     const float3 v0 = sViewPos[i0];
     const float3 v1 = sViewPos[i1];
     const float3 v2 = sViewPos[i2];

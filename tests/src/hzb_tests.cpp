@@ -390,7 +390,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   hierInputs(dag, hierData, groupRanges, hierRoots);
   REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
                      groupData, hierData, groupRanges, hierRoots, instances,
-                     meshRanges, static_cast<u32>(2 * dag.clusters.size()), W,
+                     meshRanges, static_cast<u32>(2 * dag.clusters.size()), {}, nullptr, W,
                      H));
   renderer::ChainInputs inputs;
   inputs.view = view;
@@ -405,7 +405,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   for (int p = 0; p < 6; ++p) inputs.planes[p] = planes[p];
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
-  auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[15]) {
+  auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[16]) {
     REQUIRE(backend->beginFrame(frameInfo));
     chain.execute(*backend, inputs);
     backend->endFrame();
@@ -422,7 +422,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
   // from frame 2 on, testing against the PREVIOUS frame's complete
   // visibility - one frame stale, not two.
   std::vector<u64> vis1, vis2, vis3;
-  u32 st1[15], st2[15], st3[15];
+  u32 st1[16], st2[16], st3[16];
   runFrame(vis1, st1);  // slot 0, occ off (no HZB yet) - the reference
   runFrame(vis2, st2);  // slot 1, occ ON vs frame 1's final HZB
   runFrame(vis3, st3);  // slot 0, occ ON vs frame 2's final HZB
@@ -523,11 +523,11 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
   hierInputs(dag, hierData, groupRanges, hierRoots);
   REQUIRE(chainOff.init(*backend, shaders, positions4, dag.indices, clusterData,
                         groupData, hierData, groupRanges, hierRoots, instances,
-                        meshRanges, static_cast<u32>(2 * dag.clusters.size()),
+                        meshRanges, static_cast<u32>(2 * dag.clusters.size()), {}, nullptr,
                         W, H));
   REQUIRE(chainOn.init(*backend, shaders, positions4, dag.indices, clusterData,
                        groupData, hierData, groupRanges, hierRoots, instances,
-                       meshRanges, static_cast<u32>(2 * dag.clusters.size()), W,
+                       meshRanges, static_cast<u32>(2 * dag.clusters.size()), {}, nullptr, W,
                        H));
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
@@ -571,7 +571,7 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
     usize mismatches = 0;
     for (usize i = 0; i < usize(W) * H; ++i)
       if (vbOff[i] != vbOn[i]) ++mismatches;
-    u32 st[15];
+    u32 st[16];
     REQUIRE(chainOn.readStats(*backend, st));
     totalRevived += st[9];
     totalPending += st[8];
@@ -657,11 +657,11 @@ TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
   hierInputs(dag, hierData, groupRanges, hierRoots);
   REQUIRE(chainOff.init(*backend, shaders, positions4, dag.indices, clusterData,
                         groupData, hierData, groupRanges, hierRoots, instances,
-                        meshRanges, static_cast<u32>(3 * dag.clusters.size()),
+                        meshRanges, static_cast<u32>(3 * dag.clusters.size()), {}, nullptr,
                         W, H));
   REQUIRE(chainOn.init(*backend, shaders, positions4, dag.indices, clusterData,
                        groupData, hierData, groupRanges, hierRoots, instances,
-                       meshRanges, static_cast<u32>(3 * dag.clusters.size()), W,
+                       meshRanges, static_cast<u32>(3 * dag.clusters.size()), {}, nullptr, W,
                        H));
 
   renderer::ChainInputs ci;
@@ -681,7 +681,7 @@ TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
   std::vector<u8> vbOff, vbOn;
-  u32 stOff[15] = {}, stOn[15] = {};
+  u32 stOff[16] = {}, stOn[16] = {};
   for (int f = 0; f < 5; ++f) {  // steady state well past warmup
     REQUIRE(backend->beginFrame(frameInfo));
     chainOff.execute(*backend, ci);
@@ -793,11 +793,11 @@ TEST_CASE("M4.2 HW raster path - force-HW vs all-SW coverage",
   REQUIRE(chainSw.init(*backend, shaders, positions4, dag.indices, clusterData,
                        groupData, hierData2, groupRanges2, hierRoots2,
                        instances, meshRanges,
-                       static_cast<u32>(2 * dag.clusters.size()), W, H));
+                       static_cast<u32>(2 * dag.clusters.size()), {}, nullptr, W, H));
   REQUIRE(chainHw.init(*backend, shaders, positions4, dag.indices, clusterData,
                        groupData, hierData2, groupRanges2, hierRoots2,
                        instances, meshRanges,
-                       static_cast<u32>(2 * dag.clusters.size()), W, H));
+                       static_cast<u32>(2 * dag.clusters.size()), {}, nullptr, W, H));
 
   renderer::ChainInputs ci;
   ci.view = view;
@@ -835,7 +835,7 @@ TEST_CASE("M4.2 HW raster path - force-HW vs all-SW coverage",
       if (s && !h) ++holes;
       if (h && !s) ++extra;
     }
-    u32 stSw[15], stHw[15];
+    u32 stSw[16], stHw[16];
     REQUIRE(chainSw.readStats(*backend, stSw));
     REQUIRE(chainHw.readStats(*backend, stHw));
     INFO("frame " << f << " sw nz " << swNz << " hw nz " << hwNz << " holes "

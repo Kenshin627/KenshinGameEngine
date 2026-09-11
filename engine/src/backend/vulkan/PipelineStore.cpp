@@ -348,11 +348,28 @@ u32 PipelineStore::createNullRaster(
       },
   };
 
-  // The VS and FS share the file-scope bindings (one .slang, two entry
-  // points), so the FS reflection covers the VS's reads too.
+  // M6.3: the layout must cover the UNION of the two stages' bindings -
+  // Slang strips unused file-scope SSBOs from each entry point's SPIR-V,
+  // so a VS-only read (raster_hw's paged tables) never appears in the
+  // FS reflection. The layout shape is dense all-SSBO regardless of
+  // which module it reflects from: keep whichever stage reflects more.
   u32 bindingCount = 0;
-  const VkDescriptorSetLayout setLayout = DescriptorCache::createStorageLayout(
+  VkDescriptorSetLayout setLayout = DescriptorCache::createStorageLayout(
       device, info.fsSpirv, info.fsBytes / sizeof(u32), &bindingCount);
+  if (setLayout != VK_NULL_HANDLE) {
+    u32 vsBindingCount = 0;
+    const VkDescriptorSetLayout vsLayout = DescriptorCache::createStorageLayout(
+        device, info.vsSpirv, info.vsBytes / sizeof(u32), &vsBindingCount);
+    if (vsLayout != VK_NULL_HANDLE) {
+      if (vsBindingCount > bindingCount) {
+        vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
+        setLayout = vsLayout;
+        bindingCount = vsBindingCount;
+      } else {
+        vkDestroyDescriptorSetLayout(device, vsLayout, nullptr);
+      }
+    }
+  }
   if (setLayout == VK_NULL_HANDLE) {
     vkDestroyShaderModule(device, vs, nullptr);
     vkDestroyShaderModule(device, fs, nullptr);

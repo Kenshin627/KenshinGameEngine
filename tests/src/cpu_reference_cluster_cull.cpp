@@ -288,7 +288,8 @@ TEST_CASE("hierarchy chain identity cut == selectLodCut",
   REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
                      groupData, hierarchyData, groupRanges, meshHierRoots,
                      instances, meshRanges,
-                     static_cast<u32>(dag.clusters.size()), W, H));
+                     static_cast<u32>(dag.clusters.size()), {}, nullptr, W,
+                     H));
   renderer::ChainInputs inputs;
   inputs.view = view;
   inputs.proj = proj;

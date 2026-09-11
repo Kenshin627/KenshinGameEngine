@@ -112,6 +112,10 @@ bool VulkanDevice::init(const VulkanContext& context) {
   // fragment shaders need this feature.
   features2.features.fragmentStoresAndAtomics =
       coreFeatures.fragmentStoresAndAtomics ? VK_TRUE : VK_FALSE;
+  // M6.3: the HW raster path's VERTEX shader counts non-resident page
+  // skips into an SSBO - the vertex-stage twin of the feature above.
+  features2.features.vertexPipelineStoresAndAtomics =
+      coreFeatures.vertexPipelineStoresAndAtomics ? VK_TRUE : VK_FALSE;
 
   const float priority = 1.0f;
   std::vector<VkDeviceQueueCreateInfo> queueInfos;
