@@ -54,6 +54,13 @@ class VulkanBackend final : public IRenderBackend {
   void submitChain() override;
   bool chainOnComputeQueue() const override;
   void setAsyncChainEnabled(bool enabled) override;
+  u32 createPageSlotPool(u32 slotCount, u32 slotBytes) override;
+  bool beginPageUploads(u32 slotPool) override;
+  bool copyPageToSlot(const void* hostData, u32 slot, u32 bytes) override;
+  u64 submitPageUploads() override;
+  bool waitPageUploads(u64 value) override;
+  void setTransferQueueEnabled(bool enabled) override;
+  bool pageUploadsOnTransferQueue() const override;
   void drawFullscreen(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                       const void* push, usize pushBytes) override;
   u32 createComputePipeline(const ComputePipelineInfo& info) override;
@@ -76,6 +83,10 @@ class VulkanBackend final : public IRenderBackend {
   BackendCaps m_caps;
   bool m_shutdownDone = false;
   GpuTimings m_gpuTimings;
+
+  /// M6.2: transfer-queue page-upload resources (pools, timeline,
+  /// staging arena). Eagerly created - cheap and always testable.
+  bool initPageStreaming();
 
   /// (Re)create ImGui descriptor sets when offscreen targets change.
   void ensureViewportTextures();

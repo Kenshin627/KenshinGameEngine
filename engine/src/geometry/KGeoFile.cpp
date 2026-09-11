@@ -304,10 +304,18 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   // via fileSize - pageCount * sizeof(PageDirEntry).
   std::vector<PageDirEntry> dir(pg.pageCount);
   for (u32 p = 0; p < pg.pageCount && ok; ++p) {
-    const long pos = std::ftell(file);
-    for (u32 b = 0; b < (16 - (pos & 15)) & 15 && ok; ++b)
+    // _ftelli64: .kgeo assets cross the 2GB long boundary at scale.
+    const long long rawPos = _ftelli64(file);
+    ok = rawPos >= 0;
+    if (!ok) break;
+    const usize pos = static_cast<usize>(rawPos);
+    const usize pad = (16 - (pos % 16)) % 16;
+    for (usize b = 0; b < pad && ok; ++b)
       ok = std::fputc(0, file) != EOF;
-    dir[p] = PageDirEntry{static_cast<u32>(std::ftell(file)),
+    const long long dataPos = ok ? _ftelli64(file) : -1;
+    ok = ok && dataPos >= 0;
+    if (!ok) break;
+    dir[p] = PageDirEntry{static_cast<u32>(dataPos),
                           static_cast<u32>(pg.pages[p].size())};
     ok = pg.pages[p].empty() ||
          std::fwrite(pg.pages[p].data(), 1, pg.pages[p].size(), file) ==

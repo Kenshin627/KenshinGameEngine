@@ -36,6 +36,13 @@ class BufferStore {
   u32 create(const VulkanDevice& device, VkCommandPool pool,
              const IRenderBackend::BufferDesc& desc);
 
+  /// M6.2: device-local buffer CONCURRENT over an explicit family list
+  /// (the page slot pool spans graphics/compute/transfer). Single
+  /// family degrades to EXCLUSIVE. No initial upload.
+  u32 createShared(const VulkanDevice& device, usize size,
+                   VkBufferUsageFlags usage, const u32* families,
+                   u32 familyCount, const char* debugName);
+
   bool valid(u32 handle) const {
     return handle != IRenderBackend::kInvalidBufferHandle && handle != 0 &&
            handle <= m_slots.size() &&

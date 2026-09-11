@@ -22,6 +22,7 @@
 #include <imgui_impl_win32.h>
 #pragma warning(pop)
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -63,6 +64,40 @@ struct VulkanBackend::Impl {
   Swapchain swapchain;
   FrameSync frameSync;
   StagingRing staging;  // per-frame dynamic data slices (M2 consumer)
+
+  // M6.2 page streaming: upload batches on the transfer queue (or the
+  // graphics queue in fallback). The backend owns the command pools,
+  // the timeline and the staging arena - callers only record batches.
+  struct PageStreaming {
+    VkCommandPool transferPool = VK_NULL_HANDLE;  // family: transfer
+    VkCommandPool graphicsPool = VK_NULL_HANDLE;  // family: graphics
+    VkCommandBuffer transferCb = VK_NULL_HANDLE;
+    VkCommandBuffer graphicsCb = VK_NULL_HANDLE;
+    VkSemaphore timeline = VK_NULL_HANDLE;
+    u64 signaledValue = 0;   // value of the last submitted batch
+    u64 completedValue = 0;  // host-waited watermark
+    bool batchOpen = false;
+    bool batchEmpty = true;
+    bool transferEnabled = true;  // A/B fallback switch
+    // LATCHED AT beginPageUploads: the open batch's queue choice and
+    // target pool geometry. setTransferQueueEnabled takes effect only
+    // on the NEXT batch (the documented contract), and the offset math
+    // must use THIS pool's slotBytes even when several pools exist.
+    bool batchOnTransfer = false;
+    u32 dstPool = 0xFFFFFFFFu;
+    u32 dstSlotBytes = 0;
+    // createPageSlotPool records (handle -> slotBytes) here; only
+    // handles with an entry are valid beginPageUploads targets.
+    std::vector<std::pair<u32, u32>> poolSlotBytes;
+    // Staging arena: one persistently-mapped host-visible buffer,
+    // reused only after the previous batch's completion wait (armed in
+    // beginPageUploads) - its bytes are read by the copies in flight.
+    static constexpr usize kArenaBytes = 8u * 1024 * 1024;  // 64 x 128KB
+    VkBuffer arenaBuffer = VK_NULL_HANDLE;
+    VmaAllocation arenaAlloc = VK_NULL_HANDLE;
+    void* arenaMapped = nullptr;
+    usize arenaUsed = 0;
+  } page;
   // ImGui texture sets of retired offscreens, freed after a delay in
   // beginFrame (see FrameSync::retired for the driver hazard).
   std::vector<std::pair<void*, u64>> retiredImguiSets;
@@ -229,6 +264,11 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
     KENSHIN_ERROR("[vulkan] staging ring init failed");
     return false;
   }
+  // M6.2: page-upload resources (transfer queue + timeline + arena).
+  if (!initPageStreaming()) {
+    KENSHIN_ERROR("[vulkan] page streaming init failed");
+    return false;
+  }
 
   if (params.nativeWindowHandle && !m_impl->presentSupported) {
     KENSHIN_ERROR("[vulkan] graphics family does not support present");
@@ -267,6 +307,27 @@ void VulkanBackend::shutdown() {
   // the referencing command buffer is freed with its pool).
   m_impl->frameSync.shutdown(m_impl->device);
   m_impl->buffers.destroyAll(m_impl->device.allocator);
+  // M6.2 page streaming (device idled above; the slot POOL buffer rode
+  // buffers.destroyAll, these are the batch-side resources).
+  if (m_impl->page.arenaBuffer != VK_NULL_HANDLE) {
+    vmaDestroyBuffer(m_impl->device.allocator, m_impl->page.arenaBuffer,
+                     m_impl->page.arenaAlloc);
+    m_impl->page.arenaBuffer = VK_NULL_HANDLE;
+  }
+  if (m_impl->page.transferPool != VK_NULL_HANDLE) {
+    vkDestroyCommandPool(m_impl->device.device, m_impl->page.transferPool,
+                         nullptr);
+    m_impl->page.transferPool = VK_NULL_HANDLE;
+  }
+  if (m_impl->page.graphicsPool != VK_NULL_HANDLE) {
+    vkDestroyCommandPool(m_impl->device.device, m_impl->page.graphicsPool,
+                         nullptr);
+    m_impl->page.graphicsPool = VK_NULL_HANDLE;
+  }
+  if (m_impl->page.timeline != VK_NULL_HANDLE) {
+    vkDestroySemaphore(m_impl->device.device, m_impl->page.timeline, nullptr);
+    m_impl->page.timeline = VK_NULL_HANDLE;
+  }
   m_impl->meshes.destroyAll(m_impl->device.allocator);
   m_impl->pipelines.shutdown(m_impl->device.device);
   if (m_impl->depthImage != VK_NULL_HANDLE) {
@@ -925,6 +986,12 @@ void VulkanBackend::destroyBuffer(u32 buffer) {
   Impl& impl = *m_impl;
   const BufferStore::Entry raw = impl.buffers.detach(buffer);
   if (raw.buffer == VK_NULL_HANDLE) return;
+  // The frame-timeline pacing of the deletion queue does not cover
+  // page-upload batches on the transfer queue (they may still hold the
+  // LAST reference to this buffer) - drain them before the deferred
+  // destroy becomes eligible.
+  if (impl.page.signaledValue > impl.page.completedValue)
+    waitPageUploads(impl.page.signaledValue);
   VmaAllocator allocator = impl.device.allocator;
   impl.frameSync.slots[impl.frameSync.frameIndex].deletionQueue.push(
       [allocator, raw] { BufferStore::destroyRaw(allocator, raw); });
@@ -939,6 +1006,9 @@ bool VulkanBackend::readbackBuffer(u32 buffer, usize offset, usize bytes,
   if (m_impl->asyncActive)
     m_impl->frameSync.waitCompute(m_impl->device,
                                   m_impl->frameSync.computeValue);
+  // M6.2: same exposure for page-upload batches on the transfer queue.
+  if (m_impl->page.signaledValue > m_impl->page.completedValue)
+    waitPageUploads(m_impl->page.signaledValue);
   return BufferStore::readback(
       m_impl->device, m_impl->frameSync.slots[0].commandPool,
       {m_impl->buffers.buffer(buffer), {}, m_impl->buffers.size(buffer)},
@@ -1156,6 +1226,274 @@ void VulkanBackend::setAsyncChainEnabled(bool enabled) {
   // Takes effect from the NEXT beginChain; an in-flight chain's
   // waits stay armed on the frame submission regardless.
   m_impl->asyncActive = m_impl->frameSync.asyncComputeActive && enabled;
+}
+
+// ── page streaming (M6.2) ─────────────────────────────────────
+
+bool VulkanBackend::initPageStreaming() {
+  Impl& impl = *m_impl;
+  VulkanDevice& device = impl.device;
+  auto& page = impl.page;
+
+  // One command pool per submission family (the fallback switches
+  // families; pools are family-bound). RESET flag: one reused
+  // command buffer per pool.
+  const VkCommandPoolCreateInfo transferPoolInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+      .queueFamilyIndex = device.transferFamily,
+  };
+  const VkCommandPoolCreateInfo graphicsPoolInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+      .queueFamilyIndex = device.graphicsFamily,
+  };
+  if (!KE_VK(vkCreateCommandPool(device.device, &transferPoolInfo, nullptr,
+                                 &page.transferPool)) ||
+      !KE_VK(vkCreateCommandPool(device.device, &graphicsPoolInfo, nullptr,
+                                 &page.graphicsPool)))
+    return false;
+  const VkCommandBufferAllocateInfo allocTransfer{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = page.transferPool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+  };
+  const VkCommandBufferAllocateInfo allocGraphics{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = page.graphicsPool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+  };
+  if (!KE_VK(vkAllocateCommandBuffers(device.device, &allocTransfer,
+                                      &page.transferCb)) ||
+      !KE_VK(vkAllocateCommandBuffers(device.device, &allocGraphics,
+                                      &page.graphicsCb)))
+    return false;
+
+  // The page-upload timeline (independent of frame/chain pacing).
+  const VkSemaphoreTypeCreateInfo timelineType{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+      .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+      .initialValue = 0,
+  };
+  const VkSemaphoreCreateInfo timelineInfo{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      .pNext = &timelineType,
+  };
+  if (!KE_VK(
+          vkCreateSemaphore(device.device, &timelineInfo, nullptr,
+                            &page.timeline)))
+    return false;
+
+  // Staging arena: copies are submitted from the transfer OR graphics
+  // queue depending on the fallback - CONCURRENT over both families.
+  const bool sameFamily = device.transferFamily == device.graphicsFamily;
+  const u32 arenaFamilies[2] = {device.graphicsFamily, device.transferFamily};
+  const VkBufferCreateInfo arenaInfo{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = static_cast<VkDeviceSize>(page.kArenaBytes),
+      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      .sharingMode = sameFamily ? VK_SHARING_MODE_EXCLUSIVE
+                                : VK_SHARING_MODE_CONCURRENT,
+      .queueFamilyIndexCount = sameFamily ? 0u : 2u,
+      .pQueueFamilyIndices = arenaFamilies,
+  };
+  const VmaAllocationCreateInfo arenaAlloc{
+      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+               VMA_ALLOCATION_CREATE_MAPPED_BIT,
+      .usage = VMA_MEMORY_USAGE_AUTO,
+      .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+  };
+  VmaAllocationInfo out{};
+  if (vmaCreateBuffer(device.allocator, &arenaInfo, &arenaAlloc,
+                      &page.arenaBuffer, &page.arenaAlloc, &out) !=
+          VK_SUCCESS ||
+      out.pMappedData == nullptr)
+    return false;
+  page.arenaMapped = out.pMappedData;
+
+  KENSHIN_INFO(
+      "[vulkan] page uploads: {} ({}B staging arena)",
+      pageUploadsOnTransferQueue() ? "dedicated transfer queue" : "graphics queue",
+      page.kArenaBytes);
+  return true;
+}
+
+u32 VulkanBackend::createPageSlotPool(u32 slotCount, u32 slotBytes) {
+  Impl& impl = *m_impl;
+  if (slotCount == 0 || slotBytes == 0)
+    return kInvalidBufferHandle;
+  // CONCURRENT over every family that touches slots: graphics (frame
+  // reads), async compute (the chain) and transfer (the uploads).
+  // TRANSFER_SRC: readbackBuffer copies OUT of the pool (the M6.2
+  // verification path) - the copy-source usage bit is a VU requirement.
+  const u32 allFamilies[3] = {impl.device.graphicsFamily,
+                              impl.device.asyncComputeFamily,
+                              impl.device.transferFamily};
+  u32 families[3];
+  u32 familyCount = 0;
+  for (const u32 f : allFamilies) {
+    if (f == 0xFFFFFFFFu) continue;
+    bool dup = false;
+    for (u32 k = 0; k < familyCount; ++k) dup |= families[k] == f;
+    if (!dup) families[familyCount++] = f;
+  }
+  const u32 handle = impl.buffers.createShared(
+      impl.device, usize(slotCount) * slotBytes,
+      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+          VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      families, familyCount, "pageSlotPool");
+  if (handle != kInvalidBufferHandle)
+    impl.page.poolSlotBytes.emplace_back(handle, slotBytes);
+  return handle;
+}
+
+bool VulkanBackend::beginPageUploads(u32 slotPool) {
+  Impl& impl = *m_impl;
+  auto& page = impl.page;
+  if (page.batchOpen || page.timeline == VK_NULL_HANDLE ||
+      !impl.buffers.valid(slotPool))
+    return false;
+  // Only createPageSlotPool handles carry the slot geometry.
+  u32 slotBytes = 0;
+  for (const auto& [handle, bytes] : page.poolSlotBytes)
+    if (handle == slotPool) slotBytes = bytes;
+  if (slotBytes == 0) return false;
+  // Arena reuse proof: the previous batch's copies may still be reading
+  // the staging bytes - drain them before overwriting.
+  if (page.signaledValue > page.completedValue &&
+      !waitPageUploads(page.signaledValue))
+    return false;
+  // Latch the batch's queue choice (see PageStreaming): a mid-batch
+  // setTransferQueueEnabled must not reroute the recording.
+  page.batchOnTransfer = pageUploadsOnTransferQueue();
+  const VkCommandBuffer cb =
+      page.batchOnTransfer ? page.transferCb : page.graphicsCb;
+  vkResetCommandBuffer(cb, 0);
+  const VkCommandBufferBeginInfo beginInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+  if (!KE_VK(vkBeginCommandBuffer(cb, &beginInfo))) return false;
+  page.batchOpen = true;
+  page.batchEmpty = true;
+  page.arenaUsed = 0;
+  page.dstPool = slotPool;
+  page.dstSlotBytes = slotBytes;
+  return true;
+}
+
+bool VulkanBackend::copyPageToSlot(const void* hostData, u32 slot, u32 bytes) {
+  Impl& impl = *m_impl;
+  auto& page = impl.page;
+  if (!page.batchOpen || hostData == nullptr || bytes == 0 ||
+      page.dstSlotBytes == 0 || bytes > page.dstSlotBytes)
+    return false;
+  if (page.arenaUsed + bytes > page.kArenaBytes) return false;
+  const usize slotBytes = page.dstSlotBytes;
+  const usize dstOffset64 = usize(slot) * slotBytes;
+  if (dstOffset64 + bytes > impl.buffers.size(page.dstPool)) return false;
+  std::memcpy(static_cast<u8*>(page.arenaMapped) + page.arenaUsed, hostData,
+              bytes);
+  const VkCommandBuffer cb =
+      page.batchOnTransfer ? page.transferCb : page.graphicsCb;
+  const VkBufferCopy region{
+      .srcOffset = static_cast<VkDeviceSize>(page.arenaUsed),
+      .dstOffset = static_cast<VkDeviceSize>(dstOffset64),
+      .size = static_cast<VkDeviceSize>(bytes),
+  };
+  vkCmdCopyBuffer(cb, page.arenaBuffer, impl.buffers.buffer(page.dstPool), 1,
+                  &region);
+  page.arenaUsed = (page.arenaUsed + bytes + 15) & ~usize(15);
+  page.batchEmpty = false;
+  return true;
+}
+
+u64 VulkanBackend::submitPageUploads() {
+  Impl& impl = *m_impl;
+  auto& page = impl.page;
+  if (!page.batchOpen) return 0;
+  page.batchOpen = false;
+  if (page.batchEmpty) return 0;
+  const bool useTransfer = page.batchOnTransfer;
+  const VkCommandBuffer cb = useTransfer ? page.transferCb : page.graphicsCb;
+  if (!KE_VK(vkEndCommandBuffer(cb))) return 0;
+
+  // Drain frames submitted so far before the copies run: an evicted
+  // slot may still be read by an in-flight frame. The wait value is
+  // the last SUBMITTED frame's - a batch recorded mid-frame N drains
+  // everything through frame N-1 (frame N is not submitted yet, and
+  // the manager flips the old page's table entry before issuing the
+  // upload, so frame N sees neither page - it skips and counts
+  // pending). Recorded mid-frame (after beginFrame's pacing wait) the
+  // wait is already satisfied.
+  const u64 frameWait = impl.frameSync.timelineValue;
+  const u64 value = page.signaledValue + 1;
+  const VkSemaphoreSubmitInfo frameWaitInfo{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+      .semaphore = impl.frameSync.frameTimeline,
+      .value = frameWait,
+      .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+  };
+  const VkSemaphoreSubmitInfo signalInfo{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+      .semaphore = page.timeline,
+      .value = value,
+      .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+  };
+  const VkCommandBufferSubmitInfo cmdSubmit{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+      .commandBuffer = cb,
+  };
+  const VkSubmitInfo2 submit{
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .waitSemaphoreInfoCount = frameWait > 0 ? 1u : 0u,
+      .pWaitSemaphoreInfos = &frameWaitInfo,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos = &cmdSubmit,
+      .signalSemaphoreInfoCount = 1,
+      .pSignalSemaphoreInfos = &signalInfo,
+  };
+  const VkQueue queue =
+      useTransfer ? impl.device.transferQueue : impl.device.graphicsQueue;
+  if (KE_VK(vkQueueSubmit2(queue, 1, &submit, VK_NULL_HANDLE))) {
+    page.signaledValue = value;
+    return value;
+  }
+  return 0;
+}
+
+bool VulkanBackend::waitPageUploads(u64 value) {
+  Impl& impl = *m_impl;
+  auto& page = impl.page;
+  if (value == 0) return true;
+  if (page.timeline == VK_NULL_HANDLE || value > page.signaledValue)
+    return false;
+  const VkSemaphoreWaitInfo wait{
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+      .semaphoreCount = 1,
+      .pSemaphores = &page.timeline,
+      .pValues = &value,
+  };
+  if (!KE_VK(vkWaitSemaphores(impl.device.device, &wait, UINT64_MAX)))
+    return false;
+  if (value > page.completedValue) page.completedValue = value;
+  return true;
+}
+
+void VulkanBackend::setTransferQueueEnabled(bool enabled) {
+  // Takes effect from the NEXT beginPageUploads; an open batch keeps
+  // the queue it was opened with.
+  m_impl->page.transferEnabled = enabled;
+}
+
+bool VulkanBackend::pageUploadsOnTransferQueue() const {
+  const Impl& impl = *m_impl;
+  return impl.page.transferEnabled &&
+         impl.device.transferQueue != VK_NULL_HANDLE &&
+         impl.device.transferFamily != impl.device.graphicsFamily;
 }
 
 void VulkanBackend::barrierGraphicsToCompute(u32 buffer) {

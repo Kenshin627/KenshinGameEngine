@@ -19,6 +19,7 @@ add_executable(kenshin_tests
     src/engine_tests.cpp
     src/kgeo_tests.cpp
     src/lodcut_tests.cpp
+    src/pagestream_tests.cpp
     src/shader_reflection_tests.cpp
     src/shapes_tests.cpp
     src/smoke.cpp

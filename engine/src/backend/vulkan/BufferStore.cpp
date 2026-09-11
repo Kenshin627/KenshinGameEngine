@@ -102,8 +102,39 @@ u32 BufferStore::create(const VulkanDevice& device, VkCommandPool pool,
   return static_cast<u32>(m_slots.size());
 }
 
-BufferStore::Entry BufferStore::detach(u32 handle) {
-  if (!valid(handle)) return {};
+u32 BufferStore::createShared(const VulkanDevice& device, usize size,
+                              VkBufferUsageFlags usage, const u32* families,
+                              u32 familyCount, const char* debugName) {
+  if (size == 0 || families == nullptr || familyCount == 0)
+    return IRenderBackend::kInvalidBufferHandle;
+  const VkBufferCreateInfo bufferInfo{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = static_cast<VkDeviceSize>(size),
+      .usage = usage,
+      .sharingMode = familyCount > 1 ? VK_SHARING_MODE_CONCURRENT
+                                     : VK_SHARING_MODE_EXCLUSIVE,
+      .queueFamilyIndexCount = familyCount > 1 ? familyCount : 0u,
+      .pQueueFamilyIndices = families,
+  };
+  const VmaAllocationCreateInfo allocInfo{
+      .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+      .preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+  };
+  Entry entry;
+  if (vmaCreateBuffer(device.allocator, &bufferInfo, &allocInfo, &entry.buffer,
+                      &entry.alloc, nullptr) != VK_SUCCESS) {
+    KENSHIN_ERROR("[buffer] shared creation failed ({} bytes)", size);
+    return IRenderBackend::kInvalidBufferHandle;
+  }
+  entry.size = size;
+  if (debugName)
+    vkutil::setName(device.device, VK_OBJECT_TYPE_BUFFER,
+                    reinterpret_cast<u64>(entry.buffer), debugName);
+  m_slots.push_back(entry);
+  return static_cast<u32>(m_slots.size());
+}
+
+BufferStore::Entry BufferStore::detach(u32 handle) {  if (!valid(handle)) return {};
   Entry raw = m_slots[handle - 1];
   m_slots[handle - 1] = {};
   return raw;

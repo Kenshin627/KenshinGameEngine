@@ -276,6 +276,54 @@ class IRenderBackend {
   /// M4.4 A/B: force the chain back onto the graphics queue even
   /// when an async compute queue exists (frame-time comparisons).
   virtual void setAsyncChainEnabled(bool enabled) = 0;
+
+  // ---- page streaming uploads (M6.2, P2) ----------------------------
+  /// Fixed-size page slots in ONE device-local buffer, CONCURRENT
+  /// across the graphics/compute/transfer families so the transfer
+  /// queue fills slots while frames read them. Mirrors the chain
+  /// pattern: the backend owns the upload command pools, the queue
+  /// submission and its OWN timeline - callers only record batches.
+  ///
+  /// Residency protocol (the streaming manager's side of the
+  /// contract): a page becomes visible to frames only after the
+  /// caller flips its page-table entry, and that flip happens only
+  /// after waitPageUploads(value) of the batch that filled the slot.
+  /// Slot REUSE (evict page q, upload page p) additionally needs the
+  /// old readers drained - every batch submission waits the frame
+  /// timeline's last signaled value, so recording batches mid-frame
+  /// (after beginFrame's pacing wait) costs nothing extra.
+  ///
+  /// Create the slot pool: slotCount x slotBytes device-local bytes
+  /// (Storage | TransferDst). Returns a REGULAR buffer handle -
+  /// shaders bind it, readbackBuffer verifies it.
+  virtual u32 createPageSlotPool(u32 slotCount, u32 slotBytes) = 0;
+  /// Open a page-upload batch targeting `slotPool` (a createPageSlotPool
+  /// handle). Waits the previous batch's completion first (its staging
+  /// bytes may still be in flight), then resets the batch command
+  /// buffer + staging arena. Main thread only - recorded at frame
+  /// boundaries while no other recording is active. Returns false when
+  /// a batch is already open or the pool handle is invalid.
+  virtual bool beginPageUploads(u32 slotPool) = 0;
+  /// memcpy `bytes` (<= the pool's slotBytes) into the batch's staging
+  /// arena and record the copy into slot `slot`. Returns false when
+  /// the arena is full or arguments are invalid - close the batch with
+  /// submitPageUploads and continue in a fresh one.
+  virtual bool copyPageToSlot(const void* hostData, u32 slot, u32 bytes) = 0;
+  /// End + submit the batch on the transfer queue (dedicated DMA
+  /// family) - or the graphics queue when none exists /
+  /// setTransferQueueEnabled(false). Returns the signaled timeline
+  /// value (0 = empty batch or failure); waitPageUploads(value) proves
+  /// the slots' new contents.
+  virtual u64 submitPageUploads() = 0;
+  /// Host-block until the page-upload timeline reaches `value`.
+  virtual bool waitPageUploads(u64 value) = 0;
+  /// A/B + hardware fallback: force batches onto the graphics queue.
+  /// Takes effect from the NEXT beginPageUploads.
+  virtual void setTransferQueueEnabled(bool enabled) = 0;
+  /// True when batches go to the transfer queue (the transfer family
+  /// is distinct from graphics - a dedicated DMA queue here; the
+  /// graphics-queue fallback covers everything else).
+  virtual bool pageUploadsOnTransferQueue() const = 0;
   /// Draw the fullscreen triangle in the CURRENT frame scope.
   /// bufferHandles[i] binds to SSBO binding i (as declared by the FS);
   /// `push` is copied into the 128-byte push block.
