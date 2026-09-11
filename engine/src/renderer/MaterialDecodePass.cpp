@@ -62,7 +62,8 @@ static void recordDecode(
     const glm::mat4& viewProj, u32 visHandle, u32 clusterBuffer,
     u32 instanceBuffer, u32 groupBuffer, u32 poolPos, u32 poolNrm,
     u32 poolUv, u32 poolIdx, u32 clusterPage, u32 pageTable,
-    u32 pageHeader, bool paged, const DecodeParams& params, u32 clusterCount,
+    u32 pageHeader, bool paged, u32 slotVertexTotal, u32 slotIndexTotal,
+    const DecodeParams& params, u32 clusterCount,
     u32 groupCount, u32 instanceCount, u32 maxLodLevel, u32 width,
     u32 height) {
   // The push block (decode_material.slang's DecodePush, packed
@@ -85,9 +86,11 @@ static void recordDecode(
   push.viewport =
       glm::vec4(static_cast<f32>(width), static_cast<f32>(height),
                 static_cast<f32>(clusterCount), static_cast<f32>(groupCount));
-  // The paged flag rides binding 11 (the push block is full at 128B).
-  *static_cast<glm::vec4*>(backend.mappedPtr(decodeParams)) =
-      glm::vec4(paged ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+  // The paged flag + the address-clamp totals ride binding 11 (the
+  // push block is full at 128B).
+  *static_cast<glm::vec4*>(backend.mappedPtr(decodeParams)) = glm::vec4(
+      paged ? 1.0f : 0.0f, static_cast<f32>(slotVertexTotal),
+      static_cast<f32>(slotIndexTotal), 0.0f);
   const u32 handles[12] = {visHandle,  clusterBuffer, instanceBuffer,
                            poolPos,    poolNrm,       poolUv,
                            poolIdx,    groupBuffer,   clusterPage,
@@ -110,9 +113,9 @@ void MaterialDecodePass::draw(backend::IRenderBackend& backend,
                scene.clusterBuffer(), scene.instanceBuffer(),
                scene.groupBuffer(), scene.positionBuffer(),
                scene.normalBuffer(), scene.uvBuffer(), scene.indexBuffer(),
-               m_dummyU32[0], m_dummyU32[1], m_dummyPageHeader, false, params,
-               scene.clusterCount(), scene.groupCount(), scene.instanceCount(),
-               scene.maxLodLevel(), width, height);
+               m_dummyU32[0], m_dummyU32[1], m_dummyPageHeader, false, 0, 0,
+               params, scene.clusterCount(), scene.groupCount(),
+               scene.instanceCount(), scene.maxLodLevel(), width, height);
 }
 
 void MaterialDecodePass::drawPaged(backend::IRenderBackend& backend,
@@ -129,7 +132,8 @@ void MaterialDecodePass::drawPaged(backend::IRenderBackend& backend,
                scene.clusterBuffer(), scene.instanceBuffer(),
                scene.groupBuffer(), paged.slotPool, paged.slotPool,
                paged.slotPool, paged.slotPool, paged.clusterPage,
-               paged.pageTable, paged.pageHeader, true, params,
+               paged.pageTable, paged.pageHeader, true,
+               paged.slotVertexTotal, paged.slotIndexTotal, params,
                scene.clusterCount(), scene.groupCount(), scene.instanceCount(),
                scene.maxLodLevel(), width, height);
 }

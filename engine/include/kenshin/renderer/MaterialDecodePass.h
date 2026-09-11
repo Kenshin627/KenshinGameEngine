@@ -44,12 +44,15 @@ struct DecodeParams {
 
 /// M6.3 paged decode inputs: the slot pool (bindings 3..6) + the paged
 /// tables (bindings 8..10). The pass owns the tiny decodeParams buffer
-/// (binding 11: .x = the paged flag, written per draw).
+/// (binding 11: .x = the paged flag, .y/.z = the slot pool's float4/u32
+/// element totals - the address-clamp bounds, the driver-fault dodge).
 struct DecodePagedInputs {
   u32 slotPool = 0xFFFFFFFFu;
   u32 clusterPage = 0xFFFFFFFFu;
   u32 pageTable = 0xFFFFFFFFu;
   u32 pageHeader = 0xFFFFFFFFu;
+  u32 slotVertexTotal = 0;  // float4s across the pool
+  u32 slotIndexTotal = 0;   // u32s across the pool
 };
 
 class MaterialDecodePass {

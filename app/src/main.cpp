@@ -50,6 +50,8 @@
 #include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
+#include "kenshin/geometry/PagePacker.h"
+#include "kenshin/renderer/StreamingManager.h"
 #include "kenshin/scene/Camera.h"
 #include "kenshin/scene/CameraController.h"
 #include "kenshin/util/BmpWriter.h"
@@ -121,6 +123,8 @@ struct Args {
                                 // render path retired (--virtual twin)
   bool checker = false;         // UV checkerboard debug view (decode path)
   bool noOcclusion = false;     // A/B: disable the occlusion cull chain
+  bool noHw = false;            // M6.3 A/B: pure-SW raster (hwMode 0)
+  bool forceHw = false;         // M6.3 A/B: all clusters HW (hwMode 2)
   bool noAsync = false;         // M4.4 A/B: chain onto the graphics queue
   bool cullLinear = false;      // M5.2 A/B: force the linear expand path
   bool cullPersistent = false;  // M5.3 A/B: the persistent driver
@@ -135,6 +139,10 @@ struct Args {
   float camYaw = 0, camPitch = 0, camDist = 0;
   float camTarget[3] = {0, 0, 0};
   int viewMode = -1;  // --view; -1 = leave the panel state at Final
+  // M6.3: page-streaming budget in MB. 0 = unlimited (everything
+  // streams in and stays resident - the v2-equivalent fast path);
+  // N = the slot pool + residency cap for .kgeo v3 assets.
+  int streamBudgetMb = 0;
 };
 
 Args parseArgs(int argc, char** argv) {
@@ -142,6 +150,12 @@ Args parseArgs(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--no-validation") == 0)
       args.validation = false;
+    else if (std::strcmp(argv[i], "--stream-budget") == 0 && i + 1 < argc)
+      args.streamBudgetMb = std::atoi(argv[++i]);
+    else if (std::strcmp(argv[i], "--no-hw") == 0)
+      args.noHw = true;
+    else if (std::strcmp(argv[i], "--force-hw") == 0)
+      args.forceHw = true;
     else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
       args.frames = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc)
@@ -231,6 +245,8 @@ struct VgDebugState {
   kenshin::u32 revived = 0;
   kenshin::u32 hwClusters = 0;
   kenshin::u32 workItems = 0, tooCoarse = 0, srcTooCoarse = 0;
+  kenshin::u32 pendingSkips = 0;   // M6.3 non-resident skips
+  kenshin::u32 missPages = 0;      // M6.3 touched-absent pages
   bool occlusion = true;
   bool hierCull = true;  // M5.2: BVH8 traversal (off = linear A/B)
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
@@ -249,6 +265,8 @@ struct VgDebugState {
     hwHist.push_back(static_cast<float>(hwClusters));
     visitedHist.push_back(static_cast<float>(visitedNodes));
     prunedHist.push_back(static_cast<float>(prunedNodes));
+    pendingHist.push_back(static_cast<float>(pendingSkips));
+    missHist.push_back(static_cast<float>(missPages));
     if (clusterHist.size() > 240) {
       clusterHist.erase(clusterHist.begin());
       triHist.erase(triHist.begin());
@@ -258,12 +276,16 @@ struct VgDebugState {
       hwHist.erase(hwHist.begin());
       visitedHist.erase(visitedHist.begin());
       prunedHist.erase(prunedHist.begin());
+      pendingHist.erase(pendingHist.begin());
+      missHist.erase(missHist.begin());
     }
   }
   unsigned visitedNodes = 0;
   unsigned prunedNodes = 0;
   std::vector<float> visitedHist;
   std::vector<float> prunedHist;
+  std::vector<float> pendingHist;  // M6.3: non-resident skip curve
+  std::vector<float> missHist;     // M6.3: touched-absent page curve
 };
 
 }  // namespace
@@ -321,6 +343,8 @@ int main(int argc, char** argv) {
   std::vector<kenshin::renderer::GpuMeshRangePair> chainMeshRanges;
   kenshin::renderer::MaterialDecodePass decodePass;
   kenshin::renderer::DecodeParams decodeParams;
+  // M6.3: page-streaming driver (v3 assets; null otherwise).
+  std::unique_ptr<kenshin::renderer::StreamingManager> streamer;
   VgDebugState vgDebug;
   if (args.viewMode >= 0 && args.viewMode <= 5)
     vgDebug.viewMode = args.viewMode;
@@ -342,10 +366,39 @@ int main(int argc, char** argv) {
       // these; rendering still runs the CPU-cut path until S4.5.
       auto& vgScene =
           engine.registerSubsystem<kenshin::renderer::VirtualGeometryScene>();
-      const kenshin::u32 vgMeshId = vgScene.addMesh(kgeoPreview.dag);
-      vgScene.flushPools();
+      // M6.3: v3 assets (tables-only dag) take the paged branch - the
+      // vertex pools are never uploaded, the pages stream via the
+      // StreamingManager. slotCap = the budget's structural form.
+      const bool pagedAsset = kgeoPreview.dag.paged;
+      const kenshin::u32 vgMeshId =
+          pagedAsset ? vgScene.addMeshPaged(kgeoPreview.dag)
+                     : vgScene.addMesh(kgeoPreview.dag);
+      const kenshin::u32 slotCap =
+          pagedAsset && args.streamBudgetMb > 0
+              ? kenshin::u32((kenshin::u64(args.streamBudgetMb) * 1024 *
+                             1024) /
+                            kenshin::geometry::kPageSlotSize)
+              : 0xFFFFFFFFu;
+      vgScene.flushPools(slotCap);
       vgScene.setInstances(
           {kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}});
+      // M6.3: the streaming driver (v3 only). Declared above the kgeo
+      // block so the frame loop and shutdown see it; its shutdown runs
+      // explicitly before the engine tears the scene/backend down.
+      if (pagedAsset) {
+        streamer = std::make_unique<kenshin::renderer::StreamingManager>();
+        if (!streamer->init(engine.get<kenshin::backend::IRenderBackend>(),
+                            vgScene,
+                            args.streamBudgetMb > 0
+                                ? kenshin::usize(args.streamBudgetMb) * 1024 *
+                                      1024
+                                : 0)) {
+          KENSHIN_ERROR("[stream] manager init failed - falling back is "
+                        "impossible for a v3 asset, exiting");
+          return 1;
+        }
+        streamer->addAsset(vgMeshId, args.kgeo);
+      }
       // M4.4 CPU-cut retirement: kgeo IS the virtual chain; the
       // chain instances are set up unconditionally (--baseline is a
       // logged no-op for old scripts).
@@ -445,7 +498,7 @@ int main(int argc, char** argv) {
         for (kenshin::u32 i = 0; i < chainInstances.size(); ++i)
           chainMeshRanges.push_back({mesh.clusterBegin, mesh.clusterEnd});
       }
-      overlay.setExtraPanel([&kgeoPreview, &vgDebug] {
+      overlay.setExtraPanel([&kgeoPreview, &vgDebug, &streamer] {
         demo::drawLodPanel(kgeoPreview);
         {
           ImGui::Begin("Virtual Geometry");
@@ -491,6 +544,21 @@ int main(int argc, char** argv) {
             ImGui::PlotLines("##pruned", vgDebug.prunedHist.data(),
                              int(vgDebug.prunedHist.size()), 0, nullptr, 0.0f,
                              20000.0f, ImVec2(240, 40));
+          }
+          if (streamer && ImGui::CollapsingHeader("Streaming (M6)")) {
+            const double mb = 1024.0 * 1024.0;
+            ImGui::Text(
+                "resident %.1f MB (%u pages)  pending skips %u\n"
+                "missed pages %u  io queue %u",
+                double(streamer->residentBytes()) / mb,
+                streamer->residentPages(), vgDebug.pendingSkips,
+                vgDebug.missPages, streamer->pendingRequests());
+            ImGui::PlotLines("##pending", vgDebug.pendingHist.data(),
+                             int(vgDebug.pendingHist.size()), 0, nullptr, 0.0f,
+                             2000.0f, ImVec2(240, 40));
+            ImGui::PlotLines("##miss", vgDebug.missHist.data(),
+                             int(vgDebug.missHist.size()), 0, nullptr, 0.0f,
+                             500.0f, ImVec2(240, 40));
           }
           ImGui::End();
         }
@@ -621,14 +689,33 @@ int main(int argc, char** argv) {
         std::vector<kenshin::u32> meshHierRoots;
         for (const auto& mesh : vgScene->meshes())
           meshHierRoots.push_back(mesh.hierarchyRoot);
+        // M6.3: paged assets feed the slot pool + tables; the v2
+        // pools stay empty (the chain binds the pool at 1/2 itself).
+        kenshin::renderer::ChainPagedInputs pagedInputs;
+        kenshin::renderer::ChainPagedInputs* pagedPtr = nullptr;
+        if (vgScene->paged()) {
+          pagedInputs.slotPool = vgScene->pageSlotPool();
+          pagedInputs.clusterPage = vgScene->clusterPageBuffer();
+          pagedInputs.pageTable = vgScene->pageTableBuffer();
+          pagedInputs.pageHeader = vgScene->pageHeaderBuffer();
+          pagedInputs.pageCount = vgScene->pageCount();
+          pagedInputs.slotVertexTotal =
+              vgScene->pageSlotCount() *
+              (kenshin::geometry::kPageSlotSize / 16);
+          pagedInputs.slotIndexTotal =
+              vgScene->pageSlotCount() *
+              (kenshin::geometry::kPageSlotSize / 4);
+          pagedPtr = &pagedInputs;
+        }
         chainReady = chain.init(
             *vgBackend, shaders, vgScene->positions4(), vgScene->indices(),
             vgScene->clusterData(), vgScene->groupData(),
             vgScene->hierarchyData(), vgScene->groupRanges(), meshHierRoots,
             chainInstances, chainMeshRanges,
-            kenshin::u32(chainInstances.size()) * vgScene->clusterCount(), {},
-            nullptr, 1, 1);
-        if (chainReady) KENSHIN_INFO("[vgchain] in-frame chain ready");
+            kenshin::u32(chainInstances.size()) * vgScene->clusterCount(),
+            vgScene->clusterAabbs(), pagedPtr, 1, 1);
+        if (chainReady) KENSHIN_INFO("[vgchain] in-frame chain ready{}",
+                                     pagedPtr ? " (paged)" : "");
       }
       if (!decodeReady) decodeReady = decodePass.init(*vgBackend, shaders);
       if (chainReady && decodeReady) {
@@ -648,6 +735,9 @@ int main(int argc, char** argv) {
         kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
                                                 ci.planes);
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
+        // M6.3 A/B: --no-hw forces the pure-SW path (the paged HW route
+        // differential is exercised by --force-hw).
+        ci.hwMode = args.noHw ? 0 : (args.forceHw ? 2 : 1);
         ci.cullMode = !vgDebug.hierCull || args.cullLinear
                           ? 0u
                           : (args.cullPersistent ? 2u : 1u);
@@ -674,6 +764,7 @@ int main(int argc, char** argv) {
             vgDebug.srcTooCoarse = cs[4];
             vgDebug.visitedNodes = cs[13];
             vgDebug.prunedNodes = cs[14];
+            vgDebug.pendingSkips = cs[15];
             const kenshin::f32 cover =
                 100.0f * static_cast<kenshin::f32>(cs[5] + cs[10]) /
                 (ci.width * ci.height);
@@ -687,9 +778,24 @@ int main(int argc, char** argv) {
         decodeParams.camPos = camera.position();
         decodeParams.view =
             static_cast<kenshin::renderer::DecodeView>(vgDebug.viewMode);
-        decodePass.draw(*vgBackend, camera.viewProjMatrix(), *vgScene,
-                        decodeParams, ci.width, ci.height,
-                        chain.visBufferCurrent(*vgBackend));
+        if (vgScene->paged()) {
+          kenshin::renderer::DecodePagedInputs pd;
+          pd.slotPool = vgScene->pageSlotPool();
+          pd.clusterPage = vgScene->clusterPageBuffer();
+          pd.pageTable = vgScene->pageTableBuffer();
+          pd.pageHeader = vgScene->pageHeaderBuffer();
+          pd.slotVertexTotal = vgScene->pageSlotCount() *
+                               (kenshin::geometry::kPageSlotSize / 16);
+          pd.slotIndexTotal = vgScene->pageSlotCount() *
+                              (kenshin::geometry::kPageSlotSize / 4);
+          decodePass.drawPaged(*vgBackend, camera.viewProjMatrix(), *vgScene,
+                               decodeParams, ci.width, ci.height,
+                               chain.visBufferCurrent(*vgBackend), pd);
+        } else {
+          decodePass.draw(*vgBackend, camera.viewProjMatrix(), *vgScene,
+                          decodeParams, ci.width, ci.height,
+                          chain.visBufferCurrent(*vgBackend));
+        }
       }
     }
 
@@ -698,6 +804,14 @@ int main(int argc, char** argv) {
     if (!args.screenshotUi.empty() && exiting) renderer.requestFrameCapture();
 
     renderer.endFrame();
+
+    // M6.3: the streaming pump rides between endFrame and the next
+    // execute (readTouchedPages' pacing contract): consume the touched
+    // bitmap, drive LRU + misses, drain finished IO into uploads.
+    if (streamer && chainReady) {
+      streamer->onFrame(chain);
+      vgDebug.missPages = streamer->missedPages();
+    }
     engine.endFrame();
 
     stats.push(dt * 1000.0f);
@@ -732,6 +846,7 @@ int main(int argc, char** argv) {
   }
 
   KENSHIN_INFO("main loop exited after {} frames", frame);
+  if (streamer) streamer->shutdown();
   if (virtualPath) {
     decodePass.onShutdown(*vgBackend);
     if (chainReady) chain.onShutdown(*vgBackend);

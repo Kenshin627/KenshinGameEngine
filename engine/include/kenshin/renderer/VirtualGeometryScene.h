@@ -81,6 +81,11 @@ struct VgMeshRange {
   glm::vec4 boundsSphere{0.0f, 0.0f, 0.0f, -1.0f};  // union of cluster
                                                     // bounds (instance
                                                     // cull input)
+  /// M6.3 paged: this mesh's pages in the shared page tables
+  /// ([pageBegin, pageEnd) of the global page index space; page 0 of
+  /// each asset is the coarsest - the always-resident safety net).
+  u32 pageBegin = 0;
+  u32 pageEnd = 0;
 };
 
 /// One drawn instance: which mesh + its world transform. `boundsSphere`
@@ -103,9 +108,21 @@ class VirtualGeometryScene {
   /// caller may release its ClusterDag afterwards.
   u32 addMesh(const geometry::ClusterDag& dag);
 
+  /// M6.3: append a v3 (paged) dag's TABLES only (clusters keep their
+  /// PAGE-LOCAL offsets; the vertex pools are never uploaded). The page
+  /// blobs live in the asset file - the StreamingManager reads them via
+  /// KGeoPageReader. flushPools() then creates the slot pool + the
+  /// three page tables instead of the v2 pools.
+  u32 addMeshPaged(const geometry::ClusterDag& dag);
+
+  /// True once a paged dag was added (the v2 addMesh must not mix in).
+  bool paged() const { return m_paged; }
+
   /// Upload the shared pools (once, after all addMesh calls) with a CRC
-  /// round-trip per buffer. Idempotent until the next addMesh.
-  u32 flushPools();
+  /// round-trip per buffer. Idempotent until the next addMesh. In paged
+  /// mode `slotCap` bounds the slot pool's size (the streaming budget's
+  /// structural form); pages beyond the cap can never be co-resident.
+  u32 flushPools(u32 slotCap = 0xFFFFFFFFu);
 
   /// Replace the instance table (one-shot upload; per-frame updates
   /// move to the staging ring in a later stage).
@@ -146,6 +163,24 @@ class VirtualGeometryScene {
   const std::vector<u8>& hierarchyData() const { return m_hierarchyData; }
   const std::vector<glm::uvec2>& groupRanges() const { return m_groupRanges; }
 
+  // ---- M6.3 paged-mode outputs (valid after flushPools) ---------------
+  u32 pageSlotPool() const { return m_pageSlotPool; }
+  u32 clusterPageBuffer() const { return m_clusterPageBuffer; }
+  u32 pageTableBuffer() const { return m_pageTableBuffer; }
+  u32 pageHeaderBuffer() const { return m_pageHeaderBuffer; }
+  u32 pageCount() const { return m_pageCount; }
+  u32 pageSlotCount() const { return m_pageSlotCount; }
+  /// Persistently-mapped page table (u32 per page; 0xFFFFFFFF = not
+  /// resident) - the STREAMING MANAGER's write window.
+  u32* pageTableMapped() const {
+    return m_pageTable ? static_cast<u32*>(m_backend->mappedPtr(
+                             m_pageTableBuffer)) : nullptr;
+  }
+  /// Precomputed per-cluster AABB/maxEdge (3x vec4, the paged chain's
+  /// input - sphere-box conservative: min/max = center +/- radius,
+  /// maxEdge = 2*radius; exact vertex boxes would need the pools).
+  const std::vector<glm::vec4>& clusterAabbs() const { return m_aabbs; }
+
   void onShutdown();
 
  private:
@@ -168,6 +203,19 @@ class VirtualGeometryScene {
   std::vector<glm::vec2> m_uv2;
   std::vector<u32> m_indices;
   bool m_poolsDirty = false;
+
+  // ---- M6.3 paged mode ---------------------------------------------------
+  bool m_paged = false;
+  std::vector<u32> m_clusterPage;    // global cluster -> global page
+  std::vector<u32> m_pageMetaFlat;   // 6 u32 per global page
+  std::vector<glm::vec4> m_aabbs;    // paged: conservative sphere boxes
+  u32 m_pageCount = 0;
+  u32 m_pageSlotCount = 0;
+  u32 m_pageSlotPool = backend::IRenderBackend::kInvalidBufferHandle;
+  u32 m_clusterPageBuffer = backend::IRenderBackend::kInvalidBufferHandle;
+  u32 m_pageTableBuffer = backend::IRenderBackend::kInvalidBufferHandle;
+  u32 m_pageHeaderBuffer = backend::IRenderBackend::kInvalidBufferHandle;
+  bool m_pageTable = false;  // mapped-pointer validity gate
 
   u32 m_clusterBuffer = backend::IRenderBackend::kInvalidBufferHandle;
   u32 m_groupBuffer = backend::IRenderBackend::kInvalidBufferHandle;

@@ -274,7 +274,15 @@ bool VisBufferChain::init(
     m_touched[s] = makeHostBuffer(
         backend, usize(m_pageBitmapWords) * sizeof(u32), nullptr,
         "chain-touched");
-    m_argsTouch[s] = makeHostBuffer(backend, 12, nullptr, "chain-argsTouch");
+    // Indirect dispatch args need the INDIRECT usage bit (the makeArgs
+    // discipline - storage-only buffers validation-reject here and the
+    // driver eventually wedges).
+    backend::IRenderBackend::BufferDesc at;
+    at.size = 12;
+    at.usage = backend::IRenderBackend::BufferStorage |
+               backend::IRenderBackend::BufferIndirect;
+    at.debugName = "chain-argsTouch";
+    m_argsTouch[s] = backend.createBuffer(at);
   }
   // Conversion configs (static): {groupSize, fwdSlot, srcSlot, pad}.
   const u32 cfgExpand[4] = {64, 1, 0, 0};

@@ -170,8 +170,14 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const GpuCluster cluster = clusters[clusterIdx];
     const uint viewMode = uint(push.camFlags.w + 0.5);
 
-    // M6.3 paged section bases (see the binding comment).
+    // M6.3 paged section bases (see the binding comment). The derived
+    // bases clamp into the pool totals from decodeParams[0].y/.z on
+    // every use - the multi-level payload-dependent addressing chain is
+    // this driver's documented DEVICE_LOST trigger, and the value-level
+    // clamps are what dodge it (the S4.5 discipline; see the clamping
+    // comment above).
     uint posBase = 0, nrmBase = 0, uvBase = 0, idxBase = 0;
+    uint posTotal = 0xFFFFFFFFu, idxTotal = 0xFFFFFFFFu;
     if (uint(decodeParams[0].x) != 0u)
     {
         const uint page = clusterPage[clusterIdx];
@@ -181,6 +187,8 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         nrmBase = ph.nrmBase + slot * kSlotFloat4s;
         uvBase  = ph.uvBase  + slot * kSlotFloat2s;
         idxBase = ph.idxBase + slot * kSlotU32s;
+        posTotal = max(uint(decodeParams[0].y), 1u);
+        idxTotal = max(uint(decodeParams[0].z), 1u);
     }
 
     if (viewMode == 1u)
@@ -231,21 +239,24 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     }
 
     const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);
-    const uint i0 = min(indices[idxBase + cluster.indexOffset + tri3 + 0u],
+    const uint i0 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 0u,
+                                    idxTotal - 1u)],
                         cluster.vertexCount - 1u);
-    const uint i1 = min(indices[idxBase + cluster.indexOffset + tri3 + 1u],
+    const uint i1 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 1u,
+                                    idxTotal - 1u)],
                         cluster.vertexCount - 1u);
-    const uint i2 = min(indices[idxBase + cluster.indexOffset + tri3 + 2u],
+    const uint i2 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 2u,
+                                    idxTotal - 1u)],
                         cluster.vertexCount - 1u);
-    const float3 w0 =
-        applyModel(positions[posBase + cluster.vertexOffset + i0].xyz,
-                   instanceIdx);
-    const float3 w1 =
-        applyModel(positions[posBase + cluster.vertexOffset + i1].xyz,
-                   instanceIdx);
-    const float3 w2 =
-        applyModel(positions[posBase + cluster.vertexOffset + i2].xyz,
-                   instanceIdx);
+    const float3 w0 = applyModel(
+        positions[min(posBase + cluster.vertexOffset + i0, posTotal - 1u)].xyz,
+        instanceIdx);
+    const float3 w1 = applyModel(
+        positions[min(posBase + cluster.vertexOffset + i1, posTotal - 1u)].xyz,
+        instanceIdx);
+    const float3 w2 = applyModel(
+        positions[min(posBase + cluster.vertexOffset + i2, posTotal - 1u)].xyz,
+        instanceIdx);
 
     // NOTE: near-plane-crossing triangles (a vertex behind the camera)
     // used to be discarded outright - with the camera close to the mesh
@@ -293,12 +304,13 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
 
     // Interpolated attributes.
     const float3 nrm = normalize(
-        normals[nrmBase + cluster.vertexOffset + i0].xyz * p0 +
-        normals[nrmBase + cluster.vertexOffset + i1].xyz * p1 +
-        normals[nrmBase + cluster.vertexOffset + i2].xyz * p2);  // scale cancels
-    const float2 uv0 = uvs[uvBase + cluster.vertexOffset + i0];
-    const float2 uv1 = uvs[uvBase + cluster.vertexOffset + i1];
-    const float2 uv2 = uvs[uvBase + cluster.vertexOffset + i2];
+        normals[min(nrmBase + cluster.vertexOffset + i0, posTotal - 1u)].xyz * p0 +
+        normals[min(nrmBase + cluster.vertexOffset + i1, posTotal - 1u)].xyz * p1 +
+        normals[min(nrmBase + cluster.vertexOffset + i2, posTotal - 1u)].xyz * p2);  // scale cancels
+    const uint uvTotal = posTotal * 2u;
+    const float2 uv0 = uvs[min(uvBase + cluster.vertexOffset + i0, uvTotal - 1u)];
+    const float2 uv1 = uvs[min(uvBase + cluster.vertexOffset + i1, uvTotal - 1u)];
+    const float2 uv2 = uvs[min(uvBase + cluster.vertexOffset + i2, uvTotal - 1u)];
     const float2 uv = (uv0 * p0 + uv1 * p1 + uv2 * p2) * pSumInv;
 
     // Analytic UV derivatives of the rational interpolation (no

@@ -7,6 +7,7 @@
 #include "kenshin/Engine.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/geometry/ClusterDag.h"
+#include "kenshin/geometry/PagePacker.h"
 #include "kenshin/util/Crc32.h"
 
 KENSHIN_NS_BEGIN
@@ -171,6 +172,93 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
   return static_cast<u32>(m_meshRanges.size() - 1);
 }
 
+u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
+  // v3 (tables-only) dag: pools stay empty, cluster offsets are already
+  // PAGE-LOCAL (nothing to rebase - pages are the pool), and the page
+  // machinery appends into the shared page tables.
+  m_paged = true;
+  VgMeshRange range;
+  range.clusterBegin = m_clusterCount;
+  range.groupBegin = m_groupCount;
+  range.pageBegin = m_pageCount;
+
+  for (const auto& group : dag.groups)
+    appendGpuGroup(m_groupData, group, m_maxLodLevel);
+  m_groupCount += static_cast<u32>(dag.groups.size());
+  range.groupEnd = m_groupCount;
+
+  // Cluster table: offsets stay page-local (the shaders add the page's
+  // slot-strided section base). clusterPage rebases by the page base.
+  for (const auto& cluster : dag.clusters)
+    appendGpuCluster(m_clusterData, cluster);
+  m_clusterCount += static_cast<u32>(dag.clusters.size());
+  range.clusterEnd = m_clusterCount;
+  const u32 pageBase = m_pageCount;
+  for (const u32 page : dag.clusterPage)
+    m_clusterPage.push_back(page + pageBase);
+  for (const auto& m : dag.pageMeta)
+    m_pageMetaFlat.insert(m_pageMetaFlat.end(),
+                          {m.posBase, m.nrmBase, m.uvBase, m.idxBase,
+                           m.vertexCount, m.indexCount});
+  m_pageCount += dag.pageCount;
+  range.pageEnd = m_pageCount;
+
+  if (!dag.hierarchyNodes.empty()) {
+    const u32 nodeBase = static_cast<u32>(m_hierarchyData.size() /
+                                          sizeof(geometry::DagHierarchyNode));
+    m_hierarchyData.insert(
+        m_hierarchyData.end(),
+        reinterpret_cast<const u8*>(dag.hierarchyNodes.data()),
+        reinterpret_cast<const u8*>(dag.hierarchyNodes.data()) +
+            dag.hierarchyNodes.size() * sizeof(geometry::DagHierarchyNode));
+    range.hierarchyRoot = dag.hierarchyRoot == 0xFFFFFFFFu
+                              ? 0xFFFFFFFFu
+                              : dag.hierarchyRoot + nodeBase;
+  }
+  for (const auto& group : dag.groups) {
+    const u32 begin = group.clusters.empty()
+                          ? range.clusterBegin
+                          : group.clusters.front() + range.clusterBegin;
+    m_groupRanges.emplace_back(begin, static_cast<u32>(group.clusters.size()));
+  }
+
+  // Conservative per-cluster AABB/maxEdge from the bounds SPHERE (the
+  // exact vertex boxes would need the pools): min/max = center +/-
+  // radius, maxEdge = 2*radius (an upper bound - HW routing may
+  // over-route, occlusion boxes widen; both preserve correctness).
+  for (const auto& cluster : dag.clusters) {
+    const glm::vec3 c(cluster.boundsSphere);
+    const f32 r = cluster.boundsSphere.w;
+    m_aabbs.emplace_back(c - r, 0.0f);
+    m_aabbs.emplace_back(c + r, 0.0f);
+    m_aabbs.emplace_back(2.0f * r, 0.0f, 0.0f, 0.0f);
+  }
+
+  // Mesh cull sphere: same union-of-bounds walk as addMesh.
+  {
+    glm::vec4 bounds(0.0f, 0.0f, 0.0f, -1.0f);
+    for (u32 c = 0; c < dag.clusters.size(); ++c) {
+      const glm::vec4 bs(dag.clusters[c].boundsSphere);
+      const glm::vec3 pa(bounds), pb(bs);
+      const f32 d = glm::distance(pa, pb);
+      if (bounds.w < 0.0f)
+        bounds = bs;
+      else if (d + bounds.w < bs.w)
+        bounds = bs;
+      else if (d + bs.w > bounds.w) {
+        const glm::vec3 dir = d > 0.0f ? (pb - pa) / d : glm::vec3(0.0f);
+        bounds = glm::vec4(pa + dir * (d + bounds.w - bs.w) * 0.5f,
+                           (bounds.w + bs.w + d) * 0.5f);
+      }
+    }
+    range.boundsSphere = bounds;
+  }
+
+  m_meshRanges.push_back(range);
+  m_poolsDirty = true;
+  return static_cast<u32>(m_meshRanges.size() - 1);
+}
+
 void VirtualGeometryScene::setInstances(
     const std::vector<VgInstance>& instances) {
   if (m_backend == nullptr) return;
@@ -210,9 +298,11 @@ void VirtualGeometryScene::onShutdown() {
   if (m_backend == nullptr) return;
   for (const u32 handle :
        {m_clusterBuffer, m_groupBuffer, m_positionBuffer, m_normalBuffer,
-        m_uvBuffer, m_indexBuffer, m_instanceBuffer})
+        m_uvBuffer, m_indexBuffer, m_instanceBuffer, m_clusterPageBuffer,
+        m_pageHeaderBuffer, m_pageTableBuffer, m_pageSlotPool})
     if (handle != backend::IRenderBackend::kInvalidBufferHandle)
       m_backend->destroyBuffer(handle);
+  m_pageTable = false;
   m_backend = nullptr;
 }
 
@@ -221,7 +311,7 @@ void VirtualGeometryScene::onShutdown() {
 // keep the header lean): uploads the shared pools once and verifies each
 // with a CRC round trip. Registered as a member via a small wrapper.
 
-u32 VirtualGeometryScene::flushPools() {
+u32 VirtualGeometryScene::flushPools(u32 slotCap) {
   if (m_backend == nullptr || !m_poolsDirty) return m_clusterBuffer;
 
   f64 uploadMs = 0.0, verifyMs = 0.0;
@@ -232,6 +322,43 @@ u32 VirtualGeometryScene::flushPools() {
     verifyMs += v;
     return handle;
   };
+  if (m_paged) {
+    // Tables only; then the slot pool + the three page tables. The
+    // pageTable starts ALL-ABSENT (the streaming manager fills it);
+    // page 0 of each asset gets pinned-resident by the manager (the
+    // coarse-level safety net).
+    m_clusterBuffer =
+        upload(m_clusterData.data(), m_clusterData.size(), "vg-clusters");
+    m_groupBuffer = upload(m_groupData.data(), m_groupData.size(), "vg-groups");
+    m_clusterPageBuffer =
+        upload(m_clusterPage.data(), m_clusterPage.size() * 4, "vg-clusterPage");
+    m_pageHeaderBuffer =
+        upload(m_pageMetaFlat.data(), m_pageMetaFlat.size() * 4, "vg-pageHeader");
+    m_pageSlotCount = std::min(m_pageCount, slotCap);
+    m_pageSlotPool = m_backend->createPageSlotPool(m_pageSlotCount,
+                                                   geometry::kPageSlotSize);
+    backend::IRenderBackend::BufferDesc ptDesc;
+    ptDesc.size = usize(m_pageCount) * 4;
+    ptDesc.usage = backend::IRenderBackend::BufferStorage |
+                   backend::IRenderBackend::BufferHostVisible;
+    ptDesc.debugName = "vg-pageTable";
+    m_pageTableBuffer = m_backend->createBuffer(ptDesc);
+    if (m_pageTableBuffer != backend::IRenderBackend::kInvalidBufferHandle) {
+      m_pageTable = true;
+      u32* pt = pageTableMapped();
+      for (u32 p = 0; p < m_pageCount; ++p) pt[p] = 0xFFFFFFFFu;
+    }
+    KENSHIN_INFO(
+        "[vgscene] paged tables uploaded in {:.0f}ms: {} clusters / {} "
+        "groups / {} pages ({} MB slot pool = {}/{} slots)",
+        uploadMs + verifyMs, m_clusterCount, m_groupCount, m_pageCount,
+        double(usize(m_pageSlotCount) * geometry::kPageSlotSize) /
+            (1024.0 * 1024.0),
+        m_pageSlotCount, m_pageCount);
+    m_poolsDirty = false;
+    return m_clusterBuffer;
+  }
+
   m_clusterBuffer =
       upload(m_clusterData.data(), m_clusterData.size(), "vg-clusters");
   m_groupBuffer = upload(m_groupData.data(), m_groupData.size(), "vg-groups");
