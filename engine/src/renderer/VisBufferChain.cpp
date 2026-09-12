@@ -255,6 +255,12 @@ bool VisBufferChain::init(
                          positions4.data(), "chain-positions");
     m_indexBuffer = makeDeviceBuffer(backend, indices.size() * sizeof(u32),
                                      indices.data(), "chain-indices");
+    // P0 fix: the HW VS's index/vertex clamps read these totals - the
+    // M6.3 paged edit left them 0 in v2 mode, clamping EVERY raster_hw
+    // index read to 0 (all triangles degenerate, zero fragments - the
+    // grid64 holes whenever routing sent clusters to the HW path).
+    m_positionCount = static_cast<u32>(positions4.size());
+    m_indexCount = static_cast<u32>(indices.size());
   }
   // Runtime-derived per-cluster AABBs (the occlusion bound; static).
   // Paged mode receives them precomputed (the pools are empty there).

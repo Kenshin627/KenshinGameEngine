@@ -14,12 +14,14 @@ add_executable(kenshin_tests
     src/cpu_reference_cluster_cull.cpp
     src/cpu_reference_raster.cpp
     src/cpu_reference_cull.cpp
+    src/cut_coverage_tests.cpp
     src/crc32_tests.cpp
     src/dag_tests.cpp
     src/engine_tests.cpp
     src/kgeo_tests.cpp
     src/lodcut_tests.cpp
     src/pagestream_tests.cpp
+    src/p0_repro.cpp
     src/shader_reflection_tests.cpp
     src/shapes_tests.cpp
     src/smoke.cpp

@@ -226,9 +226,13 @@ void psMain(HwVsOut i) {
   const int64_t e0x = X1 - X0, e0y = Y1 - Y0;
   const int64_t e1x = X2 - X1, e1y = Y2 - Y1;
   const int64_t e2x = X0 - X2, e2y = Y0 - Y2;
-  // The pixel center at subpixel (x*256 + 128).
-  const int64_t px = int64_t(i.pos.x) * 256 + 128;
-  const int64_t py = int64_t(i.pos.y) * 256 + 128;
+  // The pixel center at subpixel (x*256 + 128). SV_Position arrives
+  // at the CENTER (x + 0.5): int-convert first to drop the half, then
+  // add the half-pixel in subpixel units (P0 fix: the old form
+  // evaluated at (x+0.5)*256+128 = the pixel CORNER - every edge test
+  // off by half a pixel).
+  const int64_t px = int64_t(i.pos.x - 0.5) * 256 + 128;
+  const int64_t py = int64_t(i.pos.y - 0.5) * 256 + 128;
   const int64_t w0 = e0x * (py - Y0) - e0y * (px - X0);
   const int64_t w1 = e1x * (py - Y1) - e1y * (px - X1);
   const int64_t w2 = e2x * (py - Y2) - e2y * (px - X2);
