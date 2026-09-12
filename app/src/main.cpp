@@ -139,6 +139,9 @@ struct Args {
   float camYaw = 0, camPitch = 0, camDist = 0;
   float camTarget[3] = {0, 0, 0};
   int viewMode = -1;  // --view; -1 = leave the panel state at Final
+  float hwThresholdPx = -1.0f;  // --hw-threshold: the SW/HW routing edge
+                                // threshold (UE's r.Nanite.MinPixelsPerEdgeHW
+                                // twin; <0 = keep the engine default)
   // M6.3: page-streaming budget in MB. 0 = unlimited (everything
   // streams in and stays resident - the v2-equivalent fast path);
   // N = the slot pool + residency cap for .kgeo v3 assets.
@@ -156,6 +159,8 @@ Args parseArgs(int argc, char** argv) {
       args.noHw = true;
     else if (std::strcmp(argv[i], "--force-hw") == 0)
       args.forceHw = true;
+    else if (std::strcmp(argv[i], "--hw-threshold") == 0 && i + 1 < argc)
+      args.hwThresholdPx = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
       args.frames = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc)
@@ -250,6 +255,7 @@ struct VgDebugState {
   bool occlusion = true;
   bool hierCull = true;  // M5.2: BVH8 traversal (off = linear A/B)
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
+  kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
                                        // (moved off KgeoPreview at the
                                        // M4.4 CPU-cut retirement)
   kenshin::f32 coveragePct = 0.0f;
@@ -359,6 +365,7 @@ int main(int argc, char** argv) {
     if (demo::loadKgeo(args.kgeo, kgeoPreview, kgeoLog)) {
       kgeoMode = true;
       vgDebug.pixelThreshold = args.lodThreshold;
+      if (args.hwThresholdPx > 0.0f) vgDebug.hwThresholdPx = args.hwThresholdPx;
 
       // S4.1: the dag also goes to the GPU-resident virtual geometry
       // pools (cluster/group tables + shared vertex/index pools), CRC
@@ -519,6 +526,8 @@ int main(int argc, char** argv) {
           ImGui::Checkbox("BVH8 cull", &vgDebug.hierCull);
           ImGui::SliderFloat("pixel error", &vgDebug.pixelThreshold, 0.05f,
                              32.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
+          ImGui::SliderFloat("HW route >=", &vgDebug.hwThresholdPx, 1.0f,
+                             128.0f, "%.0f px", ImGuiSliderFlags_Logarithmic);
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
                            int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
                            1200.0f, ImVec2(240, 40));
@@ -746,6 +755,7 @@ int main(int argc, char** argv) {
         // M6.3 A/B: --no-hw forces the pure-SW path (the paged HW route
         // differential is exercised by --force-hw).
         ci.hwMode = args.noHw ? 0 : (args.forceHw ? 2 : 1);
+        ci.hwThresholdPx = vgDebug.hwThresholdPx;  // CLI seeds, panel drives
         ci.cullMode = !vgDebug.hierCull || args.cullLinear
                           ? 0u
                           : (args.cullPersistent ? 2u : 1u);

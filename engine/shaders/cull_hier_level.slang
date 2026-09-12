@@ -209,6 +209,11 @@ void emitCluster(uint2 item, float4x4 model) {
   if (params[7].x > 0.5) {
     bool hw = params[7].x > 1.5;
     if (!hw) {
+      // Route mode: START routable - the guards below are VETOES only.
+      // (hw initialized false from the mode test made `hw && edge >=
+      // threshold` permanently false - routing dead since the M4.2
+      // near-guard refactor, masked by force-hw bypassing it.)
+      hw = true;
       const float maxScale =
           max(length(model[0].xyz),
               max(length(model[1].xyz), length(model[2].xyz)));

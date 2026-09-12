@@ -400,6 +400,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
                      meshRanges, static_cast<u32>(2 * dag.clusters.size()), {}, nullptr, W,
                      H));
   renderer::ChainInputs inputs;
+  inputs.hwMode = 0;  // pure-SW: the occ invariants are SW-path
   inputs.view = view;
   inputs.proj = proj;
   inputs.nearZ = 0.1f;
@@ -563,6 +564,7 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
     renderer::extractFrustumPlanes(proj * view, planes);
 
     renderer::ChainInputs ci;
+    ci.hwMode = 0;  // pure-SW: the occ invariants are SW-path
     ci.view = view;
     ci.proj = proj;
     ci.nearZ = 0.1f;
@@ -691,6 +693,7 @@ TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
                        H));
 
   renderer::ChainInputs ci;
+  ci.hwMode = 0;  // pure-SW: the occ invariants are SW-path
   ci.view = view;
   ci.proj = proj;
   ci.nearZ = 0.1f;
@@ -833,6 +836,7 @@ TEST_CASE("M4.2 HW raster path - force-HW vs all-SW coverage",
                        static_cast<u32>(2 * dag.clusters.size()), {}, nullptr, W, H));
 
   renderer::ChainInputs ci;
+  ci.hwMode = 0;  // pure-SW: the occ invariants are SW-path
   ci.view = view;
   ci.proj = proj;
   ci.nearZ = 0.1f;
