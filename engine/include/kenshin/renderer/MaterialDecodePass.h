@@ -33,6 +33,8 @@ enum class DecodeView : int {
   ErrorHeat = 2,  // log-scaled cluster error heatmap
   VisColor = 3,   // per-triangle hash color (VisBuffer structure)
   Checker = 4,    // UV checkerboard (analytic-derivative debug)
+  Clusters = 5,   // per-cluster hash color (cut boundaries)
+  RoutePath = 6,  // SW / HW / post-revived rasterizer routing (listSel)
 };
 
 struct DecodeParams {

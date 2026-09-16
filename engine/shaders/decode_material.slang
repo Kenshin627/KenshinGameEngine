@@ -247,6 +247,17 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
                       0.25 + 0.75 * float((h >> 8u) & 255u) / 255.0,
                       0.25 + 0.75 * float((h >> 16u) & 255u) / 255.0, 1.0);
     }
+    if (viewMode == 6u)
+    {
+        // Routing view (M4.2): which rasterizer path drew this pixel.
+        // The payload's listSel IS the pair-table selector: 0 = SW main
+        // (blue), 1 = HW fixed-function (red), 2 = post-pass revived
+        // (yellow - occlusion-culled then re-tested). Reacts live to
+        // the HW-route threshold slider.
+        if (listSel == 1u) return float4(0.95, 0.25, 0.15, 1.0);
+        if (listSel == 2u) return float4(0.95, 0.85, 0.15, 1.0);
+        return float4(0.20, 0.45, 0.95, 1.0);
+    }
 
     const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);
     const uint i0 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 0u,

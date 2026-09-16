@@ -244,7 +244,7 @@ std::string findShaderRoot() {
 /// S4.6 debug state: view mode + the chain's last stats and histories
 /// (the panel reads it; updated per frame from the chain stats).
 struct VgDebugState {
-  int viewMode = 0;  // DecodeView as int (0..4)
+  int viewMode = 0;  // DecodeView as int (0..6)
   kenshin::u32 visibleClusters = 0, cutTris = 0, pxWrites = 0;
   kenshin::u32 occCulled = 0;
   kenshin::u32 revived = 0;
@@ -352,7 +352,7 @@ int main(int argc, char** argv) {
   // M6.3: page-streaming driver (v3 assets; null otherwise).
   std::unique_ptr<kenshin::renderer::StreamingManager> streamer;
   VgDebugState vgDebug;
-  if (args.viewMode >= 0 && args.viewMode <= 5)
+  if (args.viewMode >= 0 && args.viewMode <= 6)
     vgDebug.viewMode = args.viewMode;
   else if (args.checker)
     vgDebug.viewMode = 4;  // checker = DecodeView::Checker
@@ -512,9 +512,10 @@ int main(int argc, char** argv) {
         {
           ImGui::Begin("Virtual Geometry");
           const char* names[] = {"final",     "LOD level", "error heat",
-                                 "triangles", "checker",   "clusters"};
-          for (int i = 0; i < 6; ++i)
-            ImGui::RadioButton(names[i], &vgDebug.viewMode, i);
+                                 "triangles", "checker",   "clusters",
+                                 "route path"};
+          ImGui::SetNextItemWidth(150.0f);
+          ImGui::Combo("view", &vgDebug.viewMode, names, 7);
           ImGui::Separator();
           ImGui::Text(
               "clusters %u  tris %u  writes %u  cover %.1f%%\n"
