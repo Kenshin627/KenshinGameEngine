@@ -136,6 +136,82 @@ void StreamingManager::ensureIoThread() {
   m_ioThread = std::thread(&StreamingManager::ioLoop, this);
 }
 
+bool StreamingManager::warmup() {
+  // First frame coarse (D14.3's promise, made synchronous): read each
+  // asset's leading pages on THIS thread (page order = coarsest first,
+  // the packer's lodLevel-descending fill), upload one batch, flip the
+  // table after the timeline wait - identical discipline to
+  // uploadReady, minus the queues.
+  const usize maxResident =
+      m_budgetBytes == 0 ? m_slotCount
+                         : std::max<usize>(1, m_budgetBytes / m_slotBytes);
+  usize budgetLeft = maxResident > m_residentPages
+                         ? maxResident - m_residentPages
+                         : 0;
+  struct Item {
+    u32 page;
+    std::vector<u8> bytes;
+  };
+  std::vector<Item> items;
+  for (const Asset& asset : m_assets) {
+    const u32 pages = asset.pageEnd - asset.pageBegin;
+    const u32 take = static_cast<u32>(
+        std::min<usize>({kPagesPerBatch, pages, budgetLeft}));
+    if (take == 0) break;
+    geometry::KGeoPageReader reader;
+    std::string log;
+    if (!reader.open(asset.path, log)) {
+      KENSHIN_ERROR("[stream] warmup open failed ({}): {}", asset.path, log);
+      return false;
+    }
+    for (u32 i = 0; i < take; ++i) {
+      Item item;
+      item.page = asset.pageBegin + i;
+      if (!reader.readPage(i, item.bytes, log)) {
+        KENSHIN_ERROR("[stream] warmup page {} read failed: {}", item.page,
+                      log);
+        return false;
+      }
+      items.push_back(std::move(item));
+    }
+    budgetLeft -= take;
+  }
+  if (items.empty()) return true;
+
+  u32 uploaded = 0;
+  if (m_backend->beginPageUploads(m_scene->pageSlotPool())) {
+    for (auto& item : items) {
+      PageState& st = m_state[item.page];
+      if (st.resident || m_freeSlots.empty()) continue;
+      const u32 slot = m_freeSlots.back();
+      if (!m_backend->copyPageToSlot(item.bytes.data(), slot,
+                                     static_cast<u32>(item.bytes.size())))
+        break;
+      m_freeSlots.pop_back();
+      st.slot = slot;
+      st.lastTouch = m_frameCounter;
+      ++uploaded;
+    }
+    const u64 value = m_backend->submitPageUploads();
+    if (value != 0) m_backend->waitPageUploads(value);
+  }
+  u32 resident = 0;
+  for (auto& item : items) {
+    PageState& st = m_state[item.page];
+    if (st.slot != 0xFFFFFFFFu && !st.resident) {
+      st.resident = true;
+      st.wanted = false;
+      st.inflight = false;
+      m_pageTable[item.page] = st.slot;
+      ++m_residentPages;
+      ++resident;
+    }
+  }
+  KENSHIN_INFO("[stream] warmup: {} pages resident (coarsest first) of {}",
+               resident, m_pageCount);
+  return uploaded > 0 || resident > 0;
+}
+
 void StreamingManager::onFrame(VisBufferChain& chain) {
   ++m_frameCounter;
   ensureIoThread();

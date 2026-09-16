@@ -109,6 +109,10 @@ struct ClusterDag {
   // this mode (pageMeta[clusterPage[c]] carries the section bases);
   // they are pool-global in the unpaged v2 mode.
   bool paged = false;
+  /// v4 paged: per-cluster max triangle edge in object space (the
+  /// HW/SW routing's EdgeLength, computed by the writer from the full
+  /// pools; empty = absent (v3) - fall back to the sphere 2r bound).
+  std::vector<f32> clusterMaxEdge;
   u32 pageCount = 0;
   u32 pageSlotSize = 0;
   bool pagesHaveNormals = false;

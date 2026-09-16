@@ -405,6 +405,12 @@ int main(int argc, char** argv) {
           return 1;
         }
         streamer->addAsset(vgMeshId, args.kgeo);
+        // First frame coarse: the leading (coarsest) pages resident
+        // before the loop starts - no black flash while the async
+        // thread spins up.
+        if (!streamer->warmup())
+          KENSHIN_WARN("[stream] warmup incomplete - early frames may be "
+                       "sparse");
       }
       // M4.4 CPU-cut retirement: kgeo IS the virtual chain; the
       // chain instances are set up unconditionally (--baseline is a

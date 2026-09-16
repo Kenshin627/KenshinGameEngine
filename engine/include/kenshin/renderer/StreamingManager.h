@@ -62,6 +62,14 @@ class StreamingManager {
   /// drives LRU + requests, drains finished IO into upload batches.
   void onFrame(VisBufferChain& chain);
 
+  /// Synchronously read + upload each asset's FIRST kPagesPerBatch
+  /// pages (the packer's coarse-first order) and flip the page table -
+  /// call after the last addAsset, BEFORE the frame loop. The first
+  /// rendered frame then has the coarsest LODs alive instead of black
+  /// ("first frame coarse"; the async thread takes over from frame 1).
+  /// Respects the budget; page 0 of each asset stays pinned.
+  bool warmup();
+
   /// Prefetch `page` at the next onFrame (root-page warmup etc).
   void request(u32 page) {
     if (page < m_state.size() && m_state[page].pin) return;

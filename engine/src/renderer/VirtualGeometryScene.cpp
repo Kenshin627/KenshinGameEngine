@@ -222,16 +222,20 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
     m_groupRanges.emplace_back(begin, static_cast<u32>(group.clusters.size()));
   }
 
-  // Conservative per-cluster AABB/maxEdge from the bounds SPHERE (the
-  // exact vertex boxes would need the pools): min/max = center +/-
-  // radius, maxEdge = 2*radius (an upper bound - HW routing may
-  // over-route, occlusion boxes widen; both preserve correctness).
-  for (const auto& cluster : dag.clusters) {
+  // Conservative per-cluster AABB from the bounds SPHERE (occlusion
+  // rects only widen - correctness preserved); maxEdge uses the v4
+  // per-cluster table when present (the routing's true EdgeLength,
+  // same formula as the v2 path) and falls back to the sphere's 2r
+  // upper bound on old v3 assets.
+  const bool exactMaxEdge = dag.clusterMaxEdge.size() == dag.clusters.size();
+  for (u32 ci = 0; ci < dag.clusters.size(); ++ci) {
+    const auto& cluster = dag.clusters[ci];
     const glm::vec3 c(cluster.boundsSphere);
     const f32 r = cluster.boundsSphere.w;
     m_aabbs.emplace_back(c - r, 0.0f);
     m_aabbs.emplace_back(c + r, 0.0f);
-    m_aabbs.emplace_back(2.0f * r, 0.0f, 0.0f, 0.0f);
+    m_aabbs.emplace_back(exactMaxEdge ? dag.clusterMaxEdge[ci] : 2.0f * r,
+                         0.0f, 0.0f, 0.0f);
   }
 
   // Mesh cull sphere: same union-of-bounds walk as addMesh.

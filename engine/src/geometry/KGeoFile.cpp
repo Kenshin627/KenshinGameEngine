@@ -4,6 +4,8 @@
 #include <cstring>
 #include <vector>
 
+#include <glm/glm.hpp>
+
 #include "kenshin/core/Log.h"
 
 KENSHIN_NS_BEGIN
@@ -14,7 +16,8 @@ namespace {
 constexpr u32 kMagic = 0x324F474B;  // "KGO2"
 constexpr u32 kVersion = 2;
 constexpr u32 kMagicV3 = 0x334F474B;  // "KGO3" (M6.1 paged)
-constexpr u32 kVersion3 = 3;
+constexpr u32 kVersion3 = 3;   // paged, no maxEdge table
+constexpr u32 kVersion4 = 4;   // paged + per-cluster maxEdge table
 
 #pragma pack(push, 4)
 struct FileHeader {
@@ -291,13 +294,33 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
       .pageSlotSize = kPageSlotSize,
   };
 
+  // v4: per-cluster max triangle edge (the routing's EdgeLength; the
+  // same formula as renderer::computeClusterAabbs - v2/v3 routing
+  // parity), written between the tables and the page blobs.
+  std::vector<f32> maxEdge(dag.clusters.size(), 0.0f);
+  for (u32 c = 0; c < dag.clusters.size(); ++c) {
+    const DagCluster& cl = dag.clusters[c];
+    f32 e = 0.0f;
+    for (u32 t = 0; t + 2 < cl.indexCount; t += 3) {
+      const glm::vec3& a = *reinterpret_cast<const glm::vec3*>(
+          dag.positions.data() + usize(cl.vertexOffset + dag.indices[usize(cl.indexOffset + t)]) * 3);
+      const glm::vec3& b = *reinterpret_cast<const glm::vec3*>(
+          dag.positions.data() + usize(cl.vertexOffset + dag.indices[usize(cl.indexOffset + t + 1)]) * 3);
+      const glm::vec3& c3 = *reinterpret_cast<const glm::vec3*>(
+          dag.positions.data() + usize(cl.vertexOffset + dag.indices[usize(cl.indexOffset + t + 2)]) * 3);
+      e = std::max({e, glm::length(b - a), glm::length(c3 - b),
+                    glm::length(a - c3)});
+    }
+    maxEdge[c] = e;
+  }
+
   bool ok = std::fwrite(&header, sizeof(header), 1, file) == 1 &&
             writeVector(file, groups) && writeVector(file, clusters) &&
             writeVector(file, childIndices) &&
             writeVector(file, memberIndices) && writeVector(file, parentIndices) &&
             writeVector(file, dag.hierarchyNodes) &&
             writeVector(file, dag.roots) && writeVector(file, pg.clusterPage) &&
-            writeVector(file, pageMetaFlat);
+            writeVector(file, pageMetaFlat) && writeVector(file, maxEdge);
 
   // Blobs (16 B aligned, offsets recorded); the DIRECTORY goes to the
   // file tail so the writer stays single-pass - the reader lands on it
@@ -341,7 +364,8 @@ bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log) {
     FileHeaderV3 h3{};
     std::rewind(file);
     if (std::fread(&h3, sizeof(h3), 1, file) != 1 ||
-        h3.magic != kMagicV3 || h3.version != kVersion3) {
+        h3.magic != kMagicV3 ||
+        (h3.version != kVersion3 && h3.version != kVersion4)) {
       log = "bad magic/version";
       std::fclose(file);
       return false;
@@ -524,6 +548,12 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     std::fclose(file);
     return false;
   }
+  if (h3.version == kVersion4 &&
+      !readVector(file, dag.clusterMaxEdge, h3.clusterCount)) {
+    log = "truncated (maxEdge table)";
+    std::fclose(file);
+    return false;
+  }
   dag.pageMeta.resize(h3.pageCount);
   for (u32 p = 0; p < h3.pageCount; ++p) {
     const u32* m = metaFlat.data() + usize(p) * 6;
@@ -568,7 +598,7 @@ bool KGeoPageReader::open(const std::string& path, std::string& log) {
   }
   FileHeaderV3 h3{};
   if (std::fread(&h3, sizeof(h3), 1, file) != 1 || h3.magic != kMagicV3 ||
-      h3.version != kVersion3) {
+      h3.version != kVersion3 && h3.version != kVersion4) {
     log = "not a v3 paged file: " + path;
     std::fclose(file);
     return false;
