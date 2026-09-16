@@ -405,8 +405,23 @@ u32 PipelineStore::createNullRaster(
   };
   // Cull BACK / front CCW: the same half the SW rasterizer drops under
   // the Y-flipped projection (the baseline pipeline's convention).
+  // Conservative OVERESTIMATE (P0 seam fix): the fixed-function
+  // rasterizer generates fragments from the UNSNAPPED triangle while
+  // the PS's coverage test judges the 1/256-snapped one - pixels the
+  // snapped triangle owns but the unsnapped one misses by <1/256px got
+  // NO fragment at all (single-pixel HW/SW seam holes). Overestimate
+  // rasterization widens fragment generation; the PS test still
+  // rejects everything outside the snapped triangle, so coverage
+  // lands exactly on the SW-agreed quantized footprint.
+  const VkPipelineRasterizationConservativeStateCreateInfoEXT conserv{
+      .sType =
+          VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT,
+      .conservativeRasterizationMode =
+          VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT,
+  };
   const VkPipelineRasterizationStateCreateInfo rasterization{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .pNext = info.conservativeRaster ? &conserv : nullptr,
       .polygonMode = VK_POLYGON_MODE_FILL,
       .cullMode = VK_CULL_MODE_BACK_BIT,
       .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,

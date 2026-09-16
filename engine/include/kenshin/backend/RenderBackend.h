@@ -231,6 +231,11 @@ class IRenderBackend {
     usize vsBytes = 0;
     const u32* fsSpirv = nullptr;
     usize fsBytes = 0;
+    /// Null pipelines only: rasterize CONSERVATIVELY (overestimate) so
+    /// every pixel the PS's exact quantized test can own gets a
+    /// fragment (the fixed-function unsnapped rasterization misses
+    /// snapped-but-not-unsnapped pixels - single-pixel HW/SW seams).
+    bool conservativeRaster = false;
   };
   virtual u32 createFullscreenPipeline(const FullscreenPipelineInfo& info) = 0;
   /// M4.2 hardware raster path: VS+FS with ZERO attachments (the PS

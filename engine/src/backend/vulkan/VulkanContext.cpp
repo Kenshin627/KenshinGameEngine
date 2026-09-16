@@ -263,6 +263,23 @@ bool VulkanContext::pickPhysicalDevice() {
   supportsDynamicRendering = features13.dynamicRendering != VK_FALSE;
   supportsDrawParameters = features11.shaderDrawParameters != VK_FALSE;
 
+  // Device extensions (P0 seam fix: conservative rasterization for the
+  // HW path's null pipeline).
+  {
+    u32 devExtCount = 0;
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &devExtCount,
+                                         nullptr);
+    std::vector<VkExtensionProperties> devExts(devExtCount);
+    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &devExtCount,
+                                         devExts.data());
+    for (const auto& e : devExts)
+      if (std::strcmp(e.extensionName,
+                      VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME) == 0) {
+        supportsConservativeRaster = true;
+        break;
+      }
+  }
+
   KENSHIN_INFO("[vulkan] GPU selected: {} (api {}.{})", props.deviceName,
                VK_API_VERSION_MAJOR(props.apiVersion),
                VK_API_VERSION_MINOR(props.apiVersion));

@@ -26,6 +26,9 @@ struct VulkanContext {
   bool supportsDrawParameters = false;  // SV_VertexID (fullscreen passes)
   bool supportsSynchronization2 = false;
   bool supportsDynamicRendering = false;
+  // P0 seam fix: VK_EXT_conservative_rasterization (the HW raster
+  // pipeline's overestimate mode - see createNullRaster).
+  bool supportsConservativeRaster = false;
 
   // True when surface extensions were enabled at instance creation.
   bool surfaceEnabled = false;

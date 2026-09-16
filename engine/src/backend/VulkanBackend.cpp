@@ -1081,7 +1081,9 @@ void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
 // ── in-frame compute (链入帧化) ────────────────────────────────
 
 u32 VulkanBackend::createNullPipeline(const FullscreenPipelineInfo& info) {
-  return m_impl->pipelines.createNullRaster(m_impl->device.device, info);
+  FullscreenPipelineInfo patched = info;
+  patched.conservativeRaster = m_impl->context.supportsConservativeRaster;
+  return m_impl->pipelines.createNullRaster(m_impl->device.device, patched);
 }
 
 void VulkanBackend::destroyNullPipeline(u32 pipeline) {

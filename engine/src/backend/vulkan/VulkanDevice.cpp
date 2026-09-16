@@ -180,6 +180,12 @@ bool VulkanDevice::init(const VulkanContext& context) {
   std::vector<const char*> deviceExtensions;
   if (context.surfaceEnabled)
     deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  // P0 seam fix: the HW raster path wants conservative overestimate
+  // rasterization (pixels the quantized coverage test owns but the
+  // unsnapped triangle misses by <1/256px - see createNullRaster).
+  if (context.supportsConservativeRaster)
+    deviceExtensions.push_back(
+        VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
 
   const VkDeviceCreateInfo createInfo{
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
