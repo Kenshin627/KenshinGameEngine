@@ -247,19 +247,17 @@ bool VisBufferChain::init(
     // page tables are CALLER-owned (the scene / streaming manager).
     m_positionBuffer = m_pagedInputs.slotPool;
     m_indexBuffer = m_pagedInputs.slotPool;
-    m_positionCount = m_pagedInputs.slotVertexTotal;
-    m_indexCount = m_pagedInputs.slotIndexTotal;
+    m_positionCount = m_pagedInputs.slotU32Total;
+    m_indexCount = m_pagedInputs.slotU32Total;
   } else {
     m_positionBuffer =
         makeDeviceBuffer(backend, positions4.size() * sizeof(glm::vec4),
                          positions4.data(), "chain-positions");
     m_indexBuffer = makeDeviceBuffer(backend, indices.size() * sizeof(u32),
                                      indices.data(), "chain-indices");
-    // P0 fix: the HW VS's index/vertex clamps read these totals - the
-    // M6.3 paged edit left them 0 in v2 mode, clamping EVERY raster_hw
-    // index read to 0 (all triangles degenerate, zero fragments - the
-    // grid64 holes whenever routing sent clusters to the HW path).
-    m_positionCount = static_cast<u32>(positions4.size());
+    // The HW VS clamps into U32 capacities (the shader reads the pools
+    // as u32 views): positions are 4 u32 per float4, indices 1.
+    m_positionCount = static_cast<u32>(positions4.size()) * 4u;
     m_indexCount = static_cast<u32>(indices.size());
   }
   // Runtime-derived per-cluster AABBs (the occlusion bound; static).
@@ -740,11 +738,14 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   const u32 pagedPageTable = m_paged ? m_pagedInputs.pageTable : m_dummyU32[1];
   const u32 pagedPageHeader =
       m_paged ? m_pagedInputs.pageHeader : m_dummyPageHeader;
-  const u32 rasterHandles[11] = {
+  const u32 pagedClusterMeta =
+      m_paged ? m_pagedInputs.clusterMeta : m_dummyU32[0];
+  const u32 rasterHandles[12] = {
       m_rasterParams[slot], m_positionBuffer, m_indexBuffer, m_clusterBuffer,
       m_instanceBuffer,     m_pairs[slot],    m_vis[slot],   m_rasterCnt[slot],
-      pagedClusterPage,     pagedPageTable,   pagedPageHeader};
-  backend.dispatchComputeIndirect(m_pipeRaster, rasterHandles, 11,
+      pagedClusterPage,     pagedPageTable,   pagedPageHeader,
+      pagedClusterMeta};
+  backend.dispatchComputeIndirect(m_pipeRaster, rasterHandles, 12,
                                   m_argsRaster[slot], 0);
 
   // ---- M3.3 post half + the final HZB stay on the CHAIN side (they
@@ -794,12 +795,12 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     b(m_argsPostRaster[slot]);
     b(m_postRasterCnt[slot]);
 
-    const u32 postRasterHandles[11] = {
+    const u32 postRasterHandles[12] = {
         m_postRasterParams[slot], m_positionBuffer,   m_indexBuffer,
         m_clusterBuffer,          m_instanceBuffer,   m_postPairs[slot],
         m_vis[slot],              m_postRasterCnt[slot], pagedClusterPage,
-        pagedPageTable,           pagedPageHeader};
-    backend.dispatchComputeIndirect(m_pipeRasterPost, postRasterHandles, 11,
+        pagedPageTable,           pagedPageHeader,    pagedClusterMeta};
+    backend.dispatchComputeIndirect(m_pipeRasterPost, postRasterHandles, 12,
                                     m_argsPostRaster[slot], 0);
     b(m_vis[slot]);
   }
@@ -875,7 +876,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     // M6.3: bindings 7/8/9/10 = the paged tables + the pending counter
     // (the same rasterCnt[4] word the SW path skips count into; v2
     // binds dummies - the VS's paged reads are params-gated).
-    const u32 hwHandles[11] = {m_hwParams[slot],
+    const u32 hwHandles[12] = {m_hwParams[slot],
                                m_hwPairs[slot],
                                m_clusterBuffer,
                                m_positionBuffer,
@@ -885,7 +886,8 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
                                pagedClusterPage,
                                pagedPageTable,
                                pagedPageHeader,
-                               m_rasterCnt[slot]};
+                               m_rasterCnt[slot],
+                               pagedClusterMeta};
     backend.drawNullIndirect(m_pipeHwRaster, hwHandles, 11, m_hwDrawArgs[slot],
                              0, in.width, in.height);
   }

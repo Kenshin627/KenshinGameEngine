@@ -717,12 +717,10 @@ int main(int argc, char** argv) {
           pagedInputs.pageTable = vgScene->pageTableBuffer();
           pagedInputs.pageHeader = vgScene->pageHeaderBuffer();
           pagedInputs.pageCount = vgScene->pageCount();
-          pagedInputs.slotVertexTotal =
-              vgScene->pageSlotCount() *
-              (kenshin::geometry::kPageSlotSize / 16);
-          pagedInputs.slotIndexTotal =
+          pagedInputs.slotU32Total =
               vgScene->pageSlotCount() *
               (kenshin::geometry::kPageSlotSize / 4);
+          pagedInputs.clusterMeta = vgScene->clusterMetaBuffer();
           pagedPtr = &pagedInputs;
         }
         chainReady = chain.init(
@@ -809,10 +807,9 @@ int main(int argc, char** argv) {
           pd.clusterPage = vgScene->clusterPageBuffer();
           pd.pageTable = vgScene->pageTableBuffer();
           pd.pageHeader = vgScene->pageHeaderBuffer();
-          pd.slotVertexTotal = vgScene->pageSlotCount() *
-                               (kenshin::geometry::kPageSlotSize / 16);
-          pd.slotIndexTotal = vgScene->pageSlotCount() *
-                              (kenshin::geometry::kPageSlotSize / 4);
+          pd.slotU32Total = vgScene->pageSlotCount() *
+                            (kenshin::geometry::kPageSlotSize / 4);
+          pd.clusterMeta = vgScene->clusterMetaBuffer();
           decodePass.drawPaged(*vgBackend, camera.viewProjMatrix(), *vgScene,
                                decodeParams, ci.width, ci.height,
                                chain.visBufferCurrent(*vgBackend), pd,

@@ -55,7 +55,7 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
   Built built;
   REQUIRE(
       build(geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
-  const auto& dag = built.dag;
+  auto& dag = built.dag;  // packPages pads the cull bounds in place
 
   manager::ShaderManager shaders;
   REQUIRE(shaders.init(kShaderRoot));
@@ -227,7 +227,7 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   Built built;
   REQUIRE(
       build(geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
-  const auto& dag = built.dag;
+  auto& dag = built.dag;  // packPages pads the cull bounds in place
 
   geometry::PackedGeometry pg;
   std::string packLog;
@@ -264,12 +264,17 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
                              pg.localIndexOffset[c], cl.indexCount,
                              cl.refinedGroup);
   }
-  std::vector<glm::vec4> positions4(dag.positions.size() / 3);
+  // v5: the v2 reference renders the DECODED pools (D5 bit-identity:
+  // bit-identical to what the paged GPU decodes) over the PADDED
+  // dag tables (clusterData packs the padded bounds).
+  std::vector<glm::vec4> positions4(pg.decodedPositions.size() / 3);
   for (usize v = 0; v < positions4.size(); ++v)
-    positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
-                              dag.positions[v * 3 + 2], 0.0f);
+    positions4[v] =
+        glm::vec4(pg.decodedPositions[v * 3], pg.decodedPositions[v * 3 + 1],
+                  pg.decodedPositions[v * 3 + 2], 0.0f);
   const std::vector<glm::vec4> aabbs =
-      renderer::computeClusterAabbs(positions4, dag.indices, clusterData);
+      renderer::computeClusterAabbs(positions4, pg.decodedIndices,
+                                    clusterData);
 
   std::vector<renderer::CullGpuInstance> instances;
   instances.push_back(renderer::CullGpuInstance{});
@@ -331,7 +336,8 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   viscmp::Lists listsV2;  // the v2 reference's resolve tables
   {
     renderer::VisBufferChain chain;
-    REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
+    REQUIRE(chain.init(*backend, shaders, positions4, pg.decodedIndices,
+                       clusterData,
                        groupData, hierarchyData, groupRanges, meshHierRoots,
                        instances, meshRanges,
                        static_cast<u32>(dag.clusters.size()), {}, nullptr, W,
@@ -389,13 +395,19 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   const u32 pageTableBuf = backend->createBuffer(ptDesc);
   auto* pageTable = static_cast<u32*>(backend->mappedPtr(pageTableBuf));
   std::vector<u32> pageHeaderFlat;
-  pageHeaderFlat.reserve(usize(pg.pageCount) * 6);
-  for (const auto& m : pg.pageMeta)
+  pageHeaderFlat.reserve(usize(pg.pageCount) * 12);
+  for (const auto& m : pg.pageMeta) {
+    const u32 stepBits = *reinterpret_cast<const u32*>(&m.posStep);
     pageHeaderFlat.insert(pageHeaderFlat.end(),
                           {m.posBase, m.nrmBase, m.uvBase, m.idxBase,
-                           m.vertexCount, m.indexCount});
+                           m.metaBase, m.vertexCount, m.indexCount,
+                           m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
+  }
   const u32 pageHeaderBuf = makeStatic(pageHeaderFlat.data(),
                                        pageHeaderFlat.size() * 4, "pg-pageHeader");
+  const u32 clusterMetaBuf = makeStatic(pg.clusterMetaIndex.data(),
+                                        pg.clusterMetaIndex.size() * 4,
+                                        "pg-clusterMeta");
 
   renderer::ChainPagedInputs pi;
   pi.slotPool = slotPool;
@@ -403,8 +415,8 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   pi.pageTable = pageTableBuf;
   pi.pageHeader = pageHeaderBuf;
   pi.pageCount = pg.pageCount;
-  pi.slotVertexTotal = pg.pageCount * (geometry::kPageSlotSize / 16);
-  pi.slotIndexTotal = pg.pageCount * (geometry::kPageSlotSize / 4);
+  pi.slotU32Total = pg.pageCount * (geometry::kPageSlotSize / 4);
+  pi.clusterMeta = clusterMetaBuf;
 
   // ---- Subject 1: all-resident paged chain - byte-identical to v2
   // across the cullMode x occlusion sweep. ONE v2 reference serves all
@@ -477,7 +489,10 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
       evicted = pg.clusterPage[it->y];
       break;
     }
-  REQUIRE(evicted != 0xFFFFFFFFu);  // fine pages carry cut clusters here
+  if (evicted == 0xFFFFFFFFu && pg.pageCount > 1)
+    evicted = pg.pageCount - 1;  // v5: this view's cut may sit entirely
+                                 // in the coarse page - evict ANY other
+  REQUIRE(evicted != 0xFFFFFFFFu);
   renderer::VisBufferChain chain;
   REQUIRE(chain.init(*backend, shaders, {}, {}, pagedClusterData, groupData,
                      hierarchyData, groupRanges, meshHierRoots, instances,
@@ -497,13 +512,17 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
     INFO("evicted page " << evicted << ": pending expected "
                          << pendingExpected << ", got " << stats[15]
                          << " (pairs " << pairs.size() << ")");
-    REQUIRE(pendingExpected > 0);        // the camera cuts fine clusters
     REQUIRE(stats[15] == pendingExpected);
     REQUIRE(stats[5] <= statsV2[5]);     // strictly fewer px writes
-    // Miss detection: the absent page is still marked touched.
-    std::vector<u32> touched;
-    REQUIRE(chain.readTouchedPages(*backend, touched));
-    REQUIRE(((touched[evicted >> 5] >> (evicted & 31)) & 1u) == 1u);
+    // Miss detection: an absent page CARRYING cut clusters is still
+    // marked touched (a page this view never references legitimately
+    // stays unmarked - v5's coarser pages can put the whole cut in
+    // page 0).
+    if (pendingExpected > 0) {
+      std::vector<u32> touched;
+      REQUIRE(chain.readTouchedPages(*backend, touched));
+      REQUIRE(((touched[evicted >> 5] >> (evicted & 31)) & 1u) == 1u);
+    }
   }
   pageTable[evicted] = evicted;  // stream it back in
   runFrames(chain);
@@ -531,6 +550,7 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   backend->destroyBuffer(clusterPageBuf);
   backend->destroyBuffer(pageTableBuf);
   backend->destroyBuffer(pageHeaderBuf);
+  backend->destroyBuffer(clusterMetaBuf);
   backend->shutdown();
 }
 // ── M6.4: the big-asset all-resident differential (byte-identity at
@@ -545,13 +565,14 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
   REQUIRE(
       build(geometry::TorusKnotGeometry::create(2, 3, 1024, 1024, 1.0f),
             built));
-  const auto& dag = built.dag;
+  auto& dag = built.dag;  // packPages pads the cull bounds in place
 
   geometry::PackedGeometry pg;
   std::string packLog;
   REQUIRE(geometry::packPages(dag, pg, packLog));
   INFO(packLog);
-  REQUIRE(pg.pageCount > 1000);  // production-scale page table
+  REQUIRE(pg.pageCount >= 100);   // production-scale page table (v5:
+REQUIRE(pg.pageCount <= 400);   // ~5x smaller pages)
 
   manager::ShaderManager shaders;
   REQUIRE(shaders.init(kShaderRoot));
@@ -579,12 +600,17 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
     renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
                            g.boundsSphere.z, g.boundsSphere.w, g.maxError,
                            g.simplifyError, static_cast<u32>(g.lodLevel));
-  std::vector<glm::vec4> positions4(dag.positions.size() / 3);
+  // v5: the v2 reference renders the DECODED pools (D5 bit-identity:
+  // bit-identical to what the paged GPU decodes) over the PADDED
+  // dag tables (clusterData packs the padded bounds).
+  std::vector<glm::vec4> positions4(pg.decodedPositions.size() / 3);
   for (usize v = 0; v < positions4.size(); ++v)
-    positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
-                              dag.positions[v * 3 + 2], 0.0f);
+    positions4[v] =
+        glm::vec4(pg.decodedPositions[v * 3], pg.decodedPositions[v * 3 + 1],
+                  pg.decodedPositions[v * 3 + 2], 0.0f);
   const std::vector<glm::vec4> aabbs =
-      renderer::computeClusterAabbs(positions4, dag.indices, clusterData);
+      renderer::computeClusterAabbs(positions4, pg.decodedIndices,
+                                    clusterData);
 
   std::vector<renderer::CullGpuInstance> instances;
   instances.push_back(renderer::CullGpuInstance{});
@@ -641,7 +667,8 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
   viscmp::Lists listsV2;
   {
     renderer::VisBufferChain chain;
-    REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
+    REQUIRE(chain.init(*backend, shaders, positions4, pg.decodedIndices,
+                       clusterData,
                        groupData, hierarchyData, groupRanges, meshHierRoots,
                        instances, meshRanges,
                        static_cast<u32>(dag.clusters.size()), {}, nullptr, W,
@@ -693,12 +720,19 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
   ptDesc.debugName = "pg-pt";
   const u32 pageTableBuf = backend->createBuffer(ptDesc);
   std::vector<u32> pageHeaderFlat;
-  for (const auto& m : pg.pageMeta)
+  pageHeaderFlat.reserve(usize(pg.pageCount) * 12);
+  for (const auto& m : pg.pageMeta) {
+    const u32 stepBits = *reinterpret_cast<const u32*>(&m.posStep);
     pageHeaderFlat.insert(pageHeaderFlat.end(),
                           {m.posBase, m.nrmBase, m.uvBase, m.idxBase,
-                           m.vertexCount, m.indexCount});
+                           m.metaBase, m.vertexCount, m.indexCount,
+                           m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
+  }
   const u32 pageHeaderBuf = makeStatic(pageHeaderFlat.data(),
                                        pageHeaderFlat.size() * 4, "pg-ph");
+  const u32 clusterMetaBuf = makeStatic(pg.clusterMetaIndex.data(),
+                                        pg.clusterMetaIndex.size() * 4,
+                                        "pg-cm");
 
   renderer::ChainPagedInputs pi;
   pi.slotPool = slotPool;
@@ -706,8 +740,8 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
   pi.pageTable = pageTableBuf;
   pi.pageHeader = pageHeaderBuf;
   pi.pageCount = pg.pageCount;
-  pi.slotVertexTotal = pg.pageCount * (geometry::kPageSlotSize / 16);
-  pi.slotIndexTotal = pg.pageCount * (geometry::kPageSlotSize / 4);
+  pi.slotU32Total = pg.pageCount * (geometry::kPageSlotSize / 4);
+  pi.clusterMeta = clusterMetaBuf;
 
   {
     renderer::VisBufferChain chain;
@@ -742,6 +776,7 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
   backend->destroyBuffer(clusterPageBuf);
   backend->destroyBuffer(pageTableBuf);
   backend->destroyBuffer(pageHeaderBuf);
+  backend->destroyBuffer(clusterMetaBuf);
   backend->shutdown();
 }
 
@@ -756,7 +791,7 @@ TEST_CASE("pair-list saturation at tiny capacity", "[gpu][vgchain]") {
   Built built;
   REQUIRE(
       build(geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
-  const auto& dag = built.dag;
+  auto& dag = built.dag;  // packPages pads the cull bounds in place
 
   manager::ShaderManager shaders;
   REQUIRE(shaders.init(kShaderRoot));

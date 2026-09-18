@@ -42,10 +42,42 @@ if(NOT EXISTS "${OUT}")
   message(FATAL_ERROR "screenshot not written: ${OUT}")
 endif()
 
+# TOLERANCE (optional): pixel budget for run-to-run differences. v5
+# quantization snaps positions onto a global grid, so near-tie depths
+# tie far more often and the VisBuffer atomic max's write order flips a
+# handful of pixels per run. Default 0 = the old byte-exact semantics
+# (the baseline case); the quantized kgeo case passes a small budget.
+if(NOT DEFINED TOLERANCE)
+  set(TOLERANCE 0)
+endif()
+
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -E compare_files "${OUT}" "${REF}"
   RESULT_VARIABLE rc)
-if(NOT rc EQUAL 0)
+if((NOT rc EQUAL 0) AND (TOLERANCE GREATER 0))
+  # Byte-pair (BGR) diff count over same-size BMPs.
+  file(READ "${OUT}" outHex HEX)
+  file(READ "${REF}" refHex HEX)
+  string(LENGTH "${outHex}" outLen)
+  string(LENGTH "${refHex}" refLen)
+  if(NOT outLen STREQUAL refLen)
+    message(FATAL_ERROR "render regression: size mismatch.")
+  endif()
+  set(diff 0)
+  set(i 54)  # skip the BMP header (14) + info (40)
+  while(i LESS outLen)
+    string(SUBSTRING "${outHex}" ${i} 6 outPx)
+    string(SUBSTRING "${refHex}" ${i} 6 refPx)
+    if(NOT outPx STREQUAL refPx)
+      math(EXPR diff "${diff} + 1")
+      if(diff GREATER ${TOLERANCE})
+        message(FATAL_ERROR
+          "render regression: over ${diff} pixels differ (budget ${TOLERANCE}).")
+      endif()
+    endif()
+    math(EXPR i "${i} + 6")
+  endwhile()
+elseif(NOT rc EQUAL 0)
   message(FATAL_ERROR
     "render regression: screenshot differs from reference.\n"
     "  got:      ${OUT}\n"

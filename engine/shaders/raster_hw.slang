@@ -57,18 +57,48 @@
 
 static const uint kMaxTrisPerCluster = 128;  // matches the builder cap
 
-// kPageSlotSize (128 KB) in elements - mirrors rasterize_sw / CPU.
-static const uint kSlotFloat4s = 8192;
-static const uint kSlotU32s    = 32768;
+// kPageSlotSize (128 KB) in u32 elements - mirrors rasterize_sw / CPU
+// (v5: all page sections are u32-addressed).
+static const uint kSlotU32s = 32768;
 
-struct GpuPageHeader {
+struct GpuPageHeader  // M7.1 v5: 12 u32, uniform u32 units
+{
   uint posBase;
   uint nrmBase;
   uint uvBase;
   uint idxBase;
+  uint metaBase;
   uint vertexCount;
-  uint indexCount;
+  uint indexCount;   // idx section BYTE total
+  uint clusterCount; // meta array bound
+  float posStep;
+  uint flags;
+  uint pad0;
+  uint pad1;
 };
+
+struct GpuClusterQuant  // 10 u32, mirrors ClusterQuantMeta
+{
+  int posStartX;
+  int posStartY;
+  int posStartZ;
+  uint widths;
+  uint posWordOff;
+  float uvMinX;
+  float uvMinY;
+  float uvRangeX;
+  float uvRangeY;
+  uint reserved;
+};
+
+// v5 decode helpers (CPU mirror = ClusterQuant.cpp, op-for-op - the D5
+// bit-identity contract). VALUE path only - never feeds addresses.
+uint loadBits2(uint w0, uint w1, uint bitIdx, uint bits) {
+    const uint shift = bitIdx & 31u;
+  const uint mask = (1u << bits) - 1u;  // bits <= 24
+  if (shift + bits <= 32u) return (w0 >> shift) & mask;
+  return ((w0 >> shift) | (w1 << (32u - shift))) & mask;
+}
 
 struct GpuCluster {
   float4 bounds;
@@ -94,7 +124,7 @@ struct GpuInstance {
 [[vk::binding(0)]] StructuredBuffer<float4> params;
 [[vk::binding(1)]] StructuredBuffer<uint2> hwPairs;
 [[vk::binding(2)]] StructuredBuffer<GpuCluster> clusters;
-[[vk::binding(3)]] StructuredBuffer<float4> positions;
+[[vk::binding(3)]] StructuredBuffer<uint> positions;  // v2: float4-as-4-u32; paged v5: the slot pool bit stream
 [[vk::binding(4)]] StructuredBuffer<uint> indices;
 [[vk::binding(5)]] StructuredBuffer<GpuInstance> instances;
 [[vk::binding(6)]] RWStructuredBuffer<uint64_t> visBuffer;
@@ -102,6 +132,7 @@ struct GpuInstance {
 [[vk::binding(8)]] StructuredBuffer<uint> pageTable;
 [[vk::binding(9)]] StructuredBuffer<GpuPageHeader> pageHeader;
 [[vk::binding(10)]] RWStructuredBuffer<uint> pending;
+[[vk::binding(11)]] StructuredBuffer<uint> clusterMeta;  // v5: per-cluster ordinal into its page's meta array
 
 struct HwVsOut {
   float4 pos : SV_Position;
@@ -145,10 +176,13 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
   const uint tri = vertexId / 3u;
   const uint corner = vertexId - tri * 3u;
 
-  // M6.3 paged addressing: slot-strided section bases, or the
-  // initialized degenerate output + a pending count when the page is
-  // not resident (zero-area triangle: no pixels, no PS side effects).
+  // v5 paged addressing: slot-strided u32 bases + the cluster's
+  // quantization record, or the initialized degenerate output + a
+  // pending count when the page is not resident.
   uint posBase = 0, idxBase = 0;
+  GpuClusterQuant qm;
+  float posStep = 1.0;
+  uint nV = cluster.vertexCount;
   if (uint(params[5].y) != 0u) {
     const uint page = clusterPage[itemC.y];
     const uint slot = pageTable[page];
@@ -157,8 +191,22 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
       return o;
     }
     const GpuPageHeader ph = pageHeader[page];
-    posBase = ph.posBase + slot * kSlotFloat4s;
-    idxBase = ph.idxBase + slot * kSlotU32s;
+    const uint pool = slot * kSlotU32s;
+    posBase = pool + ph.posBase;
+    idxBase = pool + ph.idxBase;
+    posStep = ph.posStep;
+    const uint ord = min(clusterMeta[itemC.y], ph.clusterCount - 1u);
+    const uint mb = pool + ph.metaBase + ord * 10u;
+    qm.posStartX = int(positions[mb]);
+    qm.posStartY = int(positions[mb + 1u]);
+    qm.posStartZ = int(positions[mb + 2u]);
+    qm.widths = positions[mb + 3u];
+    qm.posWordOff = positions[mb + 4u];
+    qm.uvMinX = asfloat(positions[mb + 5u]);
+    qm.uvMinY = asfloat(positions[mb + 6u]);
+    qm.uvRangeX = asfloat(positions[mb + 7u]);
+    qm.uvRangeY = asfloat(positions[mb + 8u]);
+    qm.reserved = positions[mb + 9u];
   }
 
   if (tri < min(cluster.indexCount, 3u * kMaxTrisPerCluster) / 3u) {
@@ -170,12 +218,49 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
                                      params[3]);
     float2 q[3];
     for (uint k = 0; k < 3u; ++k) {
-      const uint ii =
-          min(idxBase + cluster.indexOffset + tri * 3u + k, indexCount - 1u);
-      const uint vi =
-          min(indices[ii] + posBase + cluster.vertexOffset,
-              positionCount - 1u);
-      const float3 lp = positions[vi].xyz;
+      float3 lp;
+      if (uint(params[5].y) != 0u) {
+        // v5: u8 index lane at the cluster's index BYTE offset (u32
+        // math only - this driver's Slang vertex-stage emit chokes on
+        // u64 locals).
+        const uint byteOff = cluster.indexOffset + tri * 3u + k;
+        const uint lane = byteOff & 3u;
+        const uint w0 = indices[min(idxBase + byteOff / 4u, indexCount - 1u)];
+        uint vi8;
+        if (lane == 0u) vi8 = w0 & 0xFFu;
+        else if (lane == 1u) vi8 = (w0 >> 8u) & 0xFFu;
+        else if (lane == 2u) vi8 = (w0 >> 16u) & 0xFFu;
+        else vi8 = (w0 >> 24u) & 0xFFu;
+        // v5: three SOA bit fields on the mesh's integer grid (page
+        // offsets fit 32 bits: < 128 KB -> < 2^21 bits).
+        const uint b0 = qm.widths & 0xFu;
+        const uint b1 = (qm.widths >> 4) & 0xFu;
+        const uint b2 = (qm.widths >> 8) & 0xFu;
+        const uint base = qm.posWordOff * 32u;
+        const uint bitA = base + vi8 * b0;
+        const uint bitB = base + nV * b0 + vi8 * b1;
+        const uint bitC = base + nV * (b0 + b1) + vi8 * b2;
+        const uint qa = loadBits2(positions[min(posBase + bitA / 32u, positionCount - 1u)],
+                                  positions[min(posBase + bitA / 32u + 1u, positionCount - 1u)],
+                                  bitA & 31u, b0);
+        const uint qb = loadBits2(positions[min(posBase + bitB / 32u, positionCount - 1u)],
+                                  positions[min(posBase + bitB / 32u + 1u, positionCount - 1u)],
+                                  bitB & 31u, b1);
+        const uint qc = loadBits2(positions[min(posBase + bitC / 32u, positionCount - 1u)],
+                                  positions[min(posBase + bitC / 32u + 1u, positionCount - 1u)],
+                                  bitC & 31u, b2);
+        const int3 iq = int3(int(qa), int(qb), int(qc)) +
+                        int3(qm.posStartX, qm.posStartY, qm.posStartZ);
+        lp = float3(iq) * posStep;
+      } else {
+        // v2: float4 elements as 4 u32 (w unused).
+        const uint ii = min(idxBase + cluster.indexOffset + tri * 3u + k,
+                            indexCount - 1u);
+        const uint vi = min(indices[ii] + posBase + cluster.vertexOffset,
+                            positionCount - 1u);
+        lp = float3(asfloat(positions[vi * 4u]), asfloat(positions[vi * 4u + 1u]),
+                    asfloat(positions[vi * 4u + 2u]));
+      }
       const float3 wp = model[0].xyz * lp.x + model[1].xyz * lp.y +
                         model[2].xyz * lp.z + model[3].xyz;
       const float4 clip = params[0] * wp.x + params[1] * wp.y +

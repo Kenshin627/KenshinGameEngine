@@ -127,6 +127,19 @@ struct ClusterDag {
     u32 indexCount = 0;
   };
   std::vector<DagPageMeta> pageMeta;
+  /// v5 (M7.1): the quantized page header (12 u32, uniform u32 units).
+  struct DagPageMetaV5 {
+    u32 posBase = 0, nrmBase = 0, uvBase = 0, idxBase = 0, metaBase = 0;
+    u32 vertexCount = 0, indexCount = 0, clusterCount = 0;
+    f32 posStep = 1.0f;
+    u32 flags = 0, pad0 = 0, pad1 = 0;
+  };
+  std::vector<DagPageMetaV5> pageMetaV5;
+  /// v5: true when the paged blobs are quantized (the runtime gate);
+  /// v3/v4 assets (false) are rejected by the scene loader.
+  bool pagesQuantized = false;
+  /// v5: per-cluster ordinal into its page's clusterMeta array.
+  std::vector<u32> clusterMetaIndex;
 
   // ---- queries -------------------------------------------------------
   u32 triangleCount(u32 cluster) const {

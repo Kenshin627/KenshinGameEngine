@@ -74,8 +74,11 @@ struct ChainPagedInputs {
   u32 pageTable = 0xFFFFFFFFu;
   u32 pageHeader = 0xFFFFFFFFu;
   u32 pageCount = 0;
-  u32 slotVertexTotal = 0;  // float4s across the pool
-  u32 slotIndexTotal = 0;   // u32s across the pool
+  // M7.1 v5: every page section is u32-addressed - ONE u32 capacity
+  // for the whole pool (raster_hw's clamp bound).
+  u32 slotU32Total = 0;
+  // v5: per-cluster ordinal into its page's clusterMeta array.
+  u32 clusterMeta = 0xFFFFFFFFu;
 };
 
 class VisBufferChain {

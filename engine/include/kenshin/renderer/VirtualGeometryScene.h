@@ -168,6 +168,7 @@ class VirtualGeometryScene {
   u32 clusterPageBuffer() const { return m_clusterPageBuffer; }
   u32 pageTableBuffer() const { return m_pageTableBuffer; }
   u32 pageHeaderBuffer() const { return m_pageHeaderBuffer; }
+  u32 clusterMetaBuffer() const { return m_clusterMetaBuffer; }
   u32 pageCount() const { return m_pageCount; }
   u32 pageSlotCount() const { return m_pageSlotCount; }
   /// Persistently-mapped page table (u32 per page; 0xFFFFFFFF = not
@@ -206,7 +207,8 @@ class VirtualGeometryScene {
 
   // ---- M6.3 paged mode ---------------------------------------------------
   bool m_paged = false;
-  std::vector<u32> m_clusterPage;    // global cluster -> global page
+  std::vector<u32> m_clusterPage;
+  std::vector<u32> m_clusterMetaFlat;  // v5 per-cluster meta ordinals    // global cluster -> global page
   std::vector<u32> m_pageMetaFlat;   // 6 u32 per global page
   std::vector<glm::vec4> m_aabbs;    // paged: conservative sphere boxes
   u32 m_pageCount = 0;
@@ -215,6 +217,7 @@ class VirtualGeometryScene {
   u32 m_clusterPageBuffer = backend::IRenderBackend::kInvalidBufferHandle;
   u32 m_pageTableBuffer = backend::IRenderBackend::kInvalidBufferHandle;
   u32 m_pageHeaderBuffer = backend::IRenderBackend::kInvalidBufferHandle;
+  u32 m_clusterMetaBuffer = backend::IRenderBackend::kInvalidBufferHandle;
   bool m_pageTable = false;  // mapped-pointer validity gate
 
   u32 m_clusterBuffer = backend::IRenderBackend::kInvalidBufferHandle;

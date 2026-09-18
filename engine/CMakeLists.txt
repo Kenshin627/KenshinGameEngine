@@ -21,6 +21,7 @@ endif()
 add_library(kenshin_engine STATIC
     src/assets/ObjLoader.cpp
     src/geometry/ClusterDag.cpp
+    src/geometry/ClusterQuant.cpp
     src/geometry/LodCut.cpp
     src/geometry/shapes/BoxGeometry.cpp
     src/geometry/shapes/CylinderGeometry.cpp

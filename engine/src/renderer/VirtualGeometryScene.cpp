@@ -196,10 +196,16 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   const u32 pageBase = m_pageCount;
   for (const u32 page : dag.clusterPage)
     m_clusterPage.push_back(page + pageBase);
-  for (const auto& m : dag.pageMeta)
+  for (const auto& m : dag.pageMetaV5) {
+    const u32 stepBits = *reinterpret_cast<const u32*>(&m.posStep);
     m_pageMetaFlat.insert(m_pageMetaFlat.end(),
                           {m.posBase, m.nrmBase, m.uvBase, m.idxBase,
-                           m.vertexCount, m.indexCount});
+                           m.metaBase, m.vertexCount, m.indexCount,
+                           m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
+  }
+  m_clusterMetaFlat.insert(m_clusterMetaFlat.end(),
+                           dag.clusterMetaIndex.begin(),
+                           dag.clusterMetaIndex.end());
   m_pageCount += dag.pageCount;
   range.pageEnd = m_pageCount;
 
@@ -338,6 +344,8 @@ u32 VirtualGeometryScene::flushPools(u32 slotCap) {
         upload(m_clusterPage.data(), m_clusterPage.size() * 4, "vg-clusterPage");
     m_pageHeaderBuffer =
         upload(m_pageMetaFlat.data(), m_pageMetaFlat.size() * 4, "vg-pageHeader");
+    m_clusterMetaBuffer = upload(m_clusterMetaFlat.data(),
+                                 m_clusterMetaFlat.size() * 4, "vg-clusterMeta");
     m_pageSlotCount = std::min(m_pageCount, slotCap);
     m_pageSlotPool = m_backend->createPageSlotPool(m_pageSlotCount,
                                                    geometry::kPageSlotSize);

@@ -14,6 +14,7 @@ add_executable(kenshin_tests
     src/cpu_reference_cluster_cull.cpp
     src/cpu_reference_raster.cpp
     src/cpu_reference_cull.cpp
+    src/clusterquant_tests.cpp
     src/cut_coverage_tests.cpp
     src/crc32_tests.cpp
     src/dag_tests.cpp
@@ -33,6 +34,8 @@ add_executable(kenshin_tests
 # crash_main.cpp provides main() with the SEH crash filter (the app's
 # crashLogFilter twin); Catch2WithMain would carry a second main.
 target_link_libraries(kenshin_tests PRIVATE kenshin::engine Catch2::Catch2)
+# meshopt inline helpers (quantizeSnorm) used by the quant tests
+target_include_directories(kenshin_tests PRIVATE ${CMAKE_SOURCE_DIR}/ThirdParty)
 
 # Headless Slang compilation in tests: the shader tree lives in the source
 # dir and the Slang runtime DLLs must sit next to the test executable.
@@ -72,6 +75,8 @@ add_test(NAME render_kgeo
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_out.bmp
         -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
         -DKGEO=1 -DPROC=knot -DLOD=1
+        # v5 quantized grid -> near-tie depth flips across runs
+        -DTOLERANCE=8
         -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
 set_tests_properties(render_baseline render_kgeo PROPERTIES LABELS "gpu")
 

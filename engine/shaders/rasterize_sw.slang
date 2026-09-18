@@ -32,7 +32,7 @@
 //   3: GpuCluster clusters[] - 48B, mirrors packGpuCluster
 //   4: GpuInstance instances[] - 96B (model transform)
 //   5: uint2  visiblePairs[] - (instanceIdx, clusterIdx), one per group
-//   6: uint64 visBuffer[width*height] - ZERO-INITIALIZED; max wins
+//   6: uint64_t visBuffer[width*height] - ZERO-INITIALIZED; max wins
 //   7: uint   counters[6] - [0] pair count (in; GPU-written by the
 //                            in-frame chain or pre-filled one-shot);
 //                            [1] pixel writes, [2] backface culls,
@@ -75,28 +75,53 @@ struct GpuInstance
     float4 bounds;
 };
 
-struct GpuPageHeader
+struct GpuPageHeader  // M7.1 v5: 12 u32, uniform u32 units
 {
-    uint posBase;  // float4 elements within the page
-    uint nrmBase;  // float4 elements
-    uint uvBase;   // float2 elements
-    uint idxBase;  // u32 elements
+    uint posBase;   // posBits section (u32 words)
+    uint nrmBase;   // u32 units; byte start = nrmBase*4
+    uint uvBase;    // u32 units
+    uint idxBase;   // u32 units
+    uint metaBase;  // clusterMeta array (u32 units)
     uint vertexCount;
-    uint indexCount;
+    uint indexCount;   // idx section BYTE total
+    uint clusterCount; // meta array bound
+    float posStep;     // the mesh grid's 2^-P
+    uint flags; uint pad0; uint pad1;
 };
 
-// kPageSlotSize (128 KB) in float4 / u32 elements - the CPU-side
+struct GpuClusterQuant  // 10 u32, mirrors ClusterQuantMeta
+{
+    int posStartX; int posStartY; int posStartZ;
+    uint widths;      // bx | by<<4 | bz<<8
+    uint posWordOff;  // u32 words into posBits
+    float uvMinX; float uvMinY; float uvRangeX; float uvRangeY;
+    uint reserved;
+};
+
+// v5 decode helpers (M7.1; CPU mirror = ClusterQuant.cpp, op-for-op -
+// the D5 bit-identity contract behind the differential tests).
+uint loadBits2(uint w0, uint w1, uint bitIdx, uint bits)
+{
+    // VALUE path only - never feeds address arithmetic (the driver's
+    // documented DEVICE_LOST discipline).
+      const uint shift = bitIdx & 31u;
+  const uint mask = (1u << bits) - 1u;  // bits <= 24
+  if (shift + bits <= 32u) return (w0 >> shift) & mask;
+  return ((w0 >> shift) | (w1 << (32u - shift))) & mask;
+}
+
+// kPageSlotSize (128 KB) in u32 elements - the CPU-side
 // createPageSlotPool asserts the pool was created with the same slot
-// size before the paged mode is ever armed.
-static const uint kSlotFloat4s = 8192;
-static const uint kSlotU32s    = 32768;
+// size before the paged mode is ever armed. (v5: all page sections are
+// u32-addressed; the old float4/float2 element constants are gone.)
+static const uint kSlotU32s = 32768;
 
 // NOTE on matrices: glm stores column-major and Slang's mul(model, v)
 // reads buffer vec4s as ROWS (probe-verified in S4.3) - every transform
 // below is an explicit linear combination of the stored columns.
 
 [[vk::binding(0)]] StructuredBuffer<float4> params;
-[[vk::binding(1)]] StructuredBuffer<float4> positions;
+[[vk::binding(1)]] StructuredBuffer<uint> positions;  // v2: float4-as-4-u32; paged v5: the slot pool bit stream
 [[vk::binding(2)]] StructuredBuffer<uint>   indices;
 [[vk::binding(3)]] StructuredBuffer<GpuCluster> clusters;
 [[vk::binding(4)]] StructuredBuffer<GpuInstance> instances;
@@ -106,6 +131,7 @@ static const uint kSlotU32s    = 32768;
 [[vk::binding(8)]] StructuredBuffer<uint>          clusterPage;
 [[vk::binding(9)]] StructuredBuffer<uint>          pageTable;
 [[vk::binding(10)]] StructuredBuffer<GpuPageHeader> pageHeader;
+[[vk::binding(11)]] StructuredBuffer<uint> clusterMeta;  // v5: per-cluster ordinal into its page's meta array
 
 groupshared float3 sViewPos[256];
 
@@ -320,8 +346,10 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     const GpuCluster cluster = clusters[pair.y];
     const GpuInstance inst = instances[pair.x];
 
-    // ---- M6.3 paged addressing (see the header comment) -------------
+    // ---- v5 paged addressing (see the header comment) ----------------
     uint posBase = 0, idxBase = 0;
+    GpuClusterQuant qm;          // valid only in paged mode
+    float posStep = 1.0;
     if (uint(params[9].y) != 0u)
     {
         const uint page = clusterPage[pair.y];
@@ -335,8 +363,18 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
             return;
         }
         const GpuPageHeader ph = pageHeader[page];
-        posBase = ph.posBase + slot * kSlotFloat4s;
-        idxBase = ph.idxBase + slot * kSlotU32s;
+        const uint pool = slot * kSlotU32s;  // this slot's u32 window
+        posBase = pool + ph.posBase;
+        idxBase = pool + ph.idxBase;
+        posStep = ph.posStep;
+        const uint ord = min(clusterMeta[pair.y], ph.clusterCount - 1u);
+        const uint mb = pool + ph.metaBase + ord * 10u;
+        qm.posStartX = int(positions[mb]); qm.posStartY = int(positions[mb + 1u]);
+        qm.posStartZ = int(positions[mb + 2u]);
+        qm.widths = positions[mb + 3u]; qm.posWordOff = positions[mb + 4u];
+        qm.uvMinX = asfloat(positions[mb + 5u]); qm.uvMinY = asfloat(positions[mb + 6u]);
+        qm.uvRangeX = asfloat(positions[mb + 7u]); qm.uvRangeY = asfloat(positions[mb + 8u]);
+        qm.reserved = positions[mb + 9u];
     }
 
     const float4 viewC0 = params[0];
@@ -354,9 +392,39 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     const uint vertCount = cluster.vertexCount;
     for (uint v = gtid.x; v < vertCount; v += 128)
     {
-        // float4 elements: a vec3 ARRAY in std430 strides 16, so the
-        // host packs xyz+pad (w unused).
-        const float3 lp = positions[posBase + cluster.vertexOffset + v].xyz;
+        float3 lp;
+        if (uint(params[9].y) != 0u)
+        {
+            // v5: three SOA bit fields on the mesh's integer grid
+            // (D9.2's anti-crack scheme - see ClusterQuant.cpp).
+            const uint b0 = qm.widths & 0xFu;
+            const uint b1 = (qm.widths >> 4) & 0xFu;
+            const uint b2 = (qm.widths >> 8) & 0xFu;
+            const uint64_t base = uint64_t(qm.posWordOff) * 32u;
+            const uint64_t bitA = base + uint64_t(v) * b0;
+            const uint64_t bitB = base + uint64_t(vertCount) * b0 + uint64_t(v) * b1;
+            const uint64_t bitC = base + uint64_t(vertCount) * (b0 + b1) + uint64_t(v) * b2;
+            const uint q0 = loadBits2(positions[posBase + uint(bitA / 32u)],
+                                      positions[posBase + uint(bitA / 32u) + 1u],
+                                      uint(bitA & 31u), b0);
+            const uint q1 = loadBits2(positions[posBase + uint(bitB / 32u)],
+                                      positions[posBase + uint(bitB / 32u) + 1u],
+                                      uint(bitB & 31u), b1);
+            const uint q2 = loadBits2(positions[posBase + uint(bitC / 32u)],
+                                      positions[posBase + uint(bitC / 32u) + 1u],
+                                      uint(bitC & 31u), b2);
+            const int3 iq = int3(int(q0), int(q1), int(q2))
+                          + int3(qm.posStartX, qm.posStartY, qm.posStartZ);
+            lp = float3(iq) * posStep;
+        }
+        else
+        {
+            // v2: float4 elements as 4 u32 (w unused).
+            const uint p4 = posBase + cluster.vertexOffset + v;
+            lp = float3(asfloat(positions[p4 * 4u]),
+                       asfloat(positions[p4 * 4u + 1u]),
+                       asfloat(positions[p4 * 4u + 2u]));
+        }
         // world = inst.model * lp  (explicit glm-column combination)
         const float3 wp = inst.model[0].xyz * lp.x + inst.model[1].xyz * lp.y
                         + inst.model[2].xyz * lp.z + inst.model[3].xyz;
@@ -370,9 +438,37 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     // ---- Phase 2: one thread per triangle ------------------------------
     const uint triCount = cluster.indexCount / 3;
     if (gtid.x >= triCount) return;
-    const uint i0 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 0];
-    const uint i1 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 1];
-    const uint i2 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 2];
+    uint i0, i1, i2;
+    if (uint(params[9].y) != 0u)
+    {
+        // v5: flat u8 lanes at the cluster's index BYTE offset.
+        const uint byteOff = cluster.indexOffset + gtid.x * 3u;
+        const uint lane = byteOff & 3u;
+        const uint w0 = indices[idxBase + byteOff / 4u];
+        const uint w1 = indices[idxBase + byteOff / 4u + 1u];
+        // Three consecutive lanes starting at `lane` (quant_probe's
+        // audited shape; the old ternary form misread i2 at lane==1).
+        i0 = (w0 >> (8u * lane)) & 0xFFu;
+        if (lane == 0u) {
+            i1 = (w0 >> 8u) & 0xFFu;
+            i2 = (w0 >> 16u) & 0xFFu;
+        } else if (lane == 1u) {
+            i1 = (w0 >> 16u) & 0xFFu;
+            i2 = (w0 >> 24u) & 0xFFu;
+        } else if (lane == 2u) {
+            i1 = (w0 >> 24u) & 0xFFu;
+            i2 = w1 & 0xFFu;
+        } else {
+            i1 = w1 & 0xFFu;
+            i2 = (w1 >> 8u) & 0xFFu;
+        }
+    }
+    else
+    {
+        i0 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 0];
+        i1 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 1];
+        i2 = indices[idxBase + cluster.indexOffset + gtid.x * 3 + 2];
+    }
     const float3 v0 = sViewPos[i0];
     const float3 v1 = sViewPos[i1];
     const float3 v2 = sViewPos[i2];

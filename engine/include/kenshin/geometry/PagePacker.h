@@ -1,23 +1,30 @@
 #pragma once
 
-// ── PagePacker — M6.1: pack a ClusterDag's pools into fixed-size pages ──
-// nanite.md D14 (self-designed per the milestone plan): fixed 128 KB
-// pages, cluster-granularity packing (groups may split across pages),
-// the GPU-ready layout inside each page
-//   [positions vec4 | normals vec4 | uvs vec2 | indices u32]
-// with per-page element bases for the four sections. The v2 pools are
-// already cluster-local (per-cluster dedup at assembly), so packing is
-// slice concatenation - no cross-cluster dedup exists to do. Clusters
-// are assigned to pages in lodLevel-DESCENDING order, so the first
-// pages hold the coarsest data: those become the always-resident root
-// pages (D14.3's streaming safety net).
+// ── PagePacker — M6.1/M7.1: pack a ClusterDag into fixed-size pages ──
+// nanite.md D14 + §17/D9: fixed 128 KB slots, cluster-granularity
+// packing, coarsest-first page order (D14.3's root-page safety net).
+// M7.1 v5: the page payload is QUANTIZED (see ClusterQuant) -
+//
+//   [clusterMeta 10 u32/cluster][posBits u32 words][nrmOct 2 B/vertex]
+//   [uvQ 2 B/vertex][idxU8 1 B/index, section 4B-padded]
+//
+// all section bases in uniform u32 units. Positions live on the mesh's
+// GLOBAL 2^-P integer grid with per-cluster integer anchors (D9.2's
+// anti-crack discipline - shared border vertices decode bit-identically
+// across clusters), so the dag's cull bounds are padded by one grid
+// step at pack time and maxEdge is computed from the DECODED positions
+// (routing sees what actually rasterizes).
+//
+// `PackedGeometry` also carries the D5-exact decoded mirror pools in
+// DAG order - the v2-shaped reference the tests' reference chain and
+// the writer consume.
 
-#include <array>
 #include <string>
 #include <vector>
 
 #include "kenshin/Common.h"
 #include "kenshin/geometry/ClusterDag.h"
+#include "kenshin/geometry/ClusterQuant.h"
 
 KENSHIN_NS_BEGIN
 
@@ -30,20 +37,36 @@ struct PackedGeometry {
   u32 pageCount = 0;
   bool hasNormals = false;
   bool hasUvs = false;
-  std::vector<u32> clusterPage;         // per cluster -> page index
-  std::vector<u32> localVertexOffset;   // per cluster, page-local (elements)
-  std::vector<u32> localIndexOffset;    // per cluster, page-local (elements)
-  std::vector<ClusterDag::DagPageMeta> pageMeta;
-  std::vector<std::vector<u8>> pages;   // GPU-layout blobs
+  std::vector<u32> clusterPage;        // per cluster -> page index
+  std::vector<u32> localVertexOffset;  // page vertex ordinal (nrm/uv)
+  std::vector<u32> localIndexOffset;   // page index BYTE offset (v5)
+  std::vector<ClusterDag::DagPageMetaV5> pageMeta;
+  std::vector<std::vector<u8>> pages;  // GPU-layout blobs
+
+  // ---- v5 quantization ----------------------------------------------
+  QuantMeshGrid grid;
+  /// cluster -> ordinal within its page's clusterMeta array.
+  std::vector<u32> clusterMetaIndex;
+  /// D5-exact decoded mirror pools in DAG cluster order (v2-shaped
+  /// reference: identical slicing discipline to dag.positions etc.).
+  std::vector<f32> decodedPositions;  // 3/vertex
+  std::vector<f32> decodedNormals;    // 3/vertex
+  std::vector<f32> decodedUvs;        // 2/vertex
+  std::vector<u32> decodedIndices;
 };
 
-/// Pack `dag`'s pools into pages. The dag is unchanged (its offsets
-/// stay pool-global); the page-local offsets land in `out`.
-bool packPages(const ClusterDag& dag, PackedGeometry& out, std::string& log);
+/// Pack + quantize `dag`. The dag is MUTATED: cull bounds (cluster and
+/// group spheres, hierarchy AABBs) padded by one grid step so they
+/// provably cover the decoded geometry; positions/indices untouched.
+/// Page-local offsets land in `out` (indexOffset semantics: BYTES into
+/// the page's idx section).
+bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log);
 
-/// Structural verification of a packing against its dag (tests + the
-/// v3 load path): every cluster's page-local slice, re-extracted from
-/// its page blob, must equal the dag pool slice bit-for-bit.
+/// Dequantize-aware verification (tests + the v5 load path): every
+/// cluster's payload, re-decoded from its PAGE BLOB, must match the
+/// decoded mirror bit-for-bit and the dag pools within the quantizer's
+/// error bounds (position <= step/2, normal <= 1.5 deg, uv <=
+/// range/508, indices exact) - plus conservation and watertight checks.
 bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
                    std::string& log);
 

@@ -53,8 +53,8 @@ struct DecodePagedInputs {
   u32 clusterPage = 0xFFFFFFFFu;
   u32 pageTable = 0xFFFFFFFFu;
   u32 pageHeader = 0xFFFFFFFFu;
-  u32 slotVertexTotal = 0;  // float4s across the pool
-  u32 slotIndexTotal = 0;   // u32s across the pool
+  u32 slotU32Total = 0;  // M7.1 v5: one u32 capacity for the pool
+  u32 clusterMeta = 0xFFFFFFFFu;  // v5 per-cluster meta ordinals
 };
 
 class MaterialDecodePass {

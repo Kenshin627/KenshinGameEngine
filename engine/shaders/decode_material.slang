@@ -51,15 +51,112 @@ struct GpuGroup
     float _pad4;
 };
 
-struct GpuPageHeader
+struct GpuPageHeader  // M7.1 v5: 12 u32, uniform u32 units
 {
-    uint posBase;  // float4 elements within the page
-    uint nrmBase;  // float4 elements
-    uint uvBase;   // float2 elements
-    uint idxBase;  // u32 elements
+    uint posBase;   // posBits section (u32 words)
+    uint nrmBase;   // u32 units; byte start = nrmBase*4
+    uint uvBase;    // u32 units
+    uint idxBase;   // u32 units
+    uint metaBase;  // clusterMeta array (u32 units)
     uint vertexCount;
-    uint indexCount;
+    uint indexCount;   // idx section BYTE total
+    uint clusterCount; // meta array bound
+    float posStep;     // the mesh grid's 2^-P
+    uint flags; uint pad0; uint pad1;
 };
+
+struct GpuClusterQuant  // 10 u32, mirrors ClusterQuantMeta
+{
+    int posStartX; int posStartY; int posStartZ;
+    uint widths;      // bx | by<<4 | bz<<8
+    uint posWordOff;  // u32 words into posBits
+    float uvMinX; float uvMinY; float uvRangeX; float uvRangeY;
+    uint reserved;
+};
+
+// v5 decode helpers (CPU mirror = ClusterQuant.cpp, op-for-op - the D5
+// bit-identity contract). VALUE path only - the u64 combine never
+// feeds address arithmetic (the documented DEVICE_LOST discipline).
+uint loadBits2(uint w0, uint w1, uint bitIdx, uint bits)
+{
+    const uint shift = bitIdx & 31u;
+    const uint mask = (1u << bits) - 1u;  // bits <= 24
+    if (shift + bits <= 32u) return (w0 >> shift) & mask;
+    return ((w0 >> shift) | (w1 << (32u - shift))) & mask;
+}
+float3 octDecodeN(uint q0, uint q1)
+{
+    // snorm-8 pair -> unit vector (meshopt decodeFilterOct's int stage
+    // with fo = 127, then normalize).
+    int x8 = int(q0) - (q0 >= 128u ? 256 : 0);
+    int y8 = int(q1) - (q1 >= 128u ? 256 : 0);
+    float x = float(x8);
+    float y = float(y8);
+    float z = 127.0 - abs(x) - abs(y);
+    float t = z >= 0.0 ? 0.0 : z;
+    x += x >= 0.0 ? t : -t;
+    y += y >= 0.0 ? t : -t;
+    return normalize(float3(x, y, z));
+}
+
+// v5 per-vertex decoders (file scope, explicit state - no captures).
+// VALUE path only; the callers clamp the word addresses.
+float3 v5Pos(uint vi, GpuClusterQuant qm, uint posBase, uint posTotal,
+             uint vertexCount, float posStep)
+{
+    const uint b0 = qm.widths & 0xFu;
+    const uint b1 = (qm.widths >> 4) & 0xFu;
+    const uint b2 = (qm.widths >> 8) & 0xFu;
+    const uint64_t base = uint64_t(qm.posWordOff) * 32u;
+    const uint64_t bitA = base + uint64_t(vi) * b0;
+    const uint64_t bitB = base + uint64_t(vertexCount) * b0 + uint64_t(vi) * b1;
+    const uint64_t bitC = base + uint64_t(vertexCount) * (b0 + b1) + uint64_t(vi) * b2;
+    const uint qa = loadBits2(positions[min(posBase + uint(bitA / 32u), posTotal - 1u)],
+                              positions[min(posBase + uint(bitA / 32u) + 1u, posTotal - 1u)],
+                              uint(bitA & 31u), b0);
+    const uint qb = loadBits2(positions[min(posBase + uint(bitB / 32u), posTotal - 1u)],
+                              positions[min(posBase + uint(bitB / 32u) + 1u, posTotal - 1u)],
+                              uint(bitB & 31u), b1);
+    const uint qc = loadBits2(positions[min(posBase + uint(bitC / 32u), posTotal - 1u)],
+                              positions[min(posBase + uint(bitC / 32u) + 1u, posTotal - 1u)],
+                              uint(bitC & 31u), b2);
+    const int3 iq = int3(int(qa), int(qb), int(qc)) +
+                    int3(qm.posStartX, qm.posStartY, qm.posStartZ);
+    return float3(iq) * posStep;
+}
+
+float3 v5Nrm(uint vi, uint nrmBase, uint poolTotal, uint vertexOffset)
+{
+    // 2-byte oct pair at the cluster's vertex ordinal.
+    const uint byteOff = vertexOffset * 2u + vi * 2u;
+    const uint word = normals[min(nrmBase + byteOff / 4u, poolTotal - 1u)];
+    const uint lane = byteOff & 3u;
+    const uint q0 = (word >> (8u * lane)) & 0xFFu;
+    const uint q1 = (word >> (8u * ((lane + 1u) & 3u))) & 0xFFu;
+    // lane+1 crossing the word boundary only happens at lane == 3
+    // (byte pairs are 2-aligned, so lane is 0 or 2 - never 3).
+    return octDecodeN(q0, q1);
+}
+
+float2 v5Uv(uint vi, uint uvBase, uint poolTotal, uint vertexOffset,
+            GpuClusterQuant qm)
+{
+    const uint byteOff = vertexOffset * 2u + vi * 2u;
+    const uint word = uvs[min(uvBase + byteOff / 4u, poolTotal - 1u)];
+    const uint lane = byteOff & 3u;  // 0 or 2 (pairs are 2-aligned)
+    const uint qx = (word >> (8u * lane)) & 0xFFu;
+    const uint qy = (word >> (8u * (lane + 1u))) & 0xFFu;
+    return float2(qm.uvMinX + float(qx) * (qm.uvRangeX / 255.0),
+                  qm.uvMinY + float(qy) * (qm.uvRangeY / 255.0));
+}
+
+// Flat u8 index lanes at an arbitrary byte offset (indices are 3 B/tri,
+// so lanes wrap words): i in 0..5 spans the two words.
+uint byteAt2(uint w0, uint w1, uint i)
+{
+    return i < 4u ? (w0 >> (8u * i)) & 0xFFu
+                  : (w1 >> (8u * (i - 4u))) & 0xFFu;
+}
 
 struct DecodePush
 {
@@ -81,9 +178,9 @@ struct DecodePush
 [[vk::binding(0)]] StructuredBuffer<uint> vis;
 [[vk::binding(1)]] StructuredBuffer<GpuCluster> clusters;
 [[vk::binding(2)]] StructuredBuffer<GpuInstance> instances;
-[[vk::binding(3)]] StructuredBuffer<float4> positions;
-[[vk::binding(4)]] StructuredBuffer<float4> normals;
-[[vk::binding(5)]] StructuredBuffer<float2> uvs;
+[[vk::binding(3)]] StructuredBuffer<uint> positions;  // v2: float4-as-4-u32; paged v5: the slot pool
+[[vk::binding(4)]] StructuredBuffer<uint> normals;     // v2: float4-as-4-u32; paged v5: the slot pool
+[[vk::binding(5)]] StructuredBuffer<uint> uvs;         // v2: float2-as-2-u32; paged v5: the slot pool
 [[vk::binding(6)]] StructuredBuffer<uint> indices;
 [[vk::binding(7)]] StructuredBuffer<GpuGroup> groups;  // S4.6 debug views
 // M6.3 paged addressing (decodeParams[0].x != 0): bindings 3..6 are the
@@ -103,11 +200,11 @@ struct DecodePush
 [[vk::binding(12)]] StructuredBuffer<uint2> pairs;
 [[vk::binding(13)]] StructuredBuffer<uint2> hwPairs;
 [[vk::binding(14)]] StructuredBuffer<uint2> postPairs;
+[[vk::binding(15)]] StructuredBuffer<uint> clusterMeta;  // v5: per-cluster ordinal into its page's meta array
 
-// kPageSlotSize (128 KB) in elements - mirrors rasterize_sw / CPU.
-static const uint kSlotFloat4s  = 8192;
-static const uint kSlotFloat2s  = 16384;
-static const uint kSlotU32s     = 32768;
+// kPageSlotSize (128 KB) in u32 elements - mirrors rasterize_sw / CPU
+// (v5: all page sections are u32-addressed).
+static const uint kSlotU32s = 32768;
 
 float2 worldToScreen(float3 w)
 {
@@ -180,26 +277,50 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const GpuCluster cluster = clusters[clusterIdx];
     const uint viewMode = uint(push.camFlags.w + 0.5);
 
-    // M6.3 paged section bases (see the binding comment). The derived
-    // bases clamp into the pool totals from decodeParams[0].y/.z on
-    // every use - the multi-level payload-dependent addressing chain is
-    // this driver's documented DEVICE_LOST trigger, and the value-level
-    // clamps are what dodge it (the S4.5 discipline; see the clamping
-    // comment above).
+    // v5 paged section bases + the cluster's quantization record (see
+    // the binding comment). The derived bases clamp into the pool total
+    // (decodeParams[0].y - one u32 capacity for every section, all
+    // sections share the slot pool) on every use - the multi-level
+    // payload-dependent addressing chain is this driver's documented
+    // DEVICE_LOST trigger, and the value-level clamps are what dodge
+    // it (the S4.5 discipline).
     uint posBase = 0, nrmBase = 0, uvBase = 0, idxBase = 0;
     uint posTotal = 0xFFFFFFFFu, idxTotal = 0xFFFFFFFFu;
-    if (uint(decodeParams[0].x) != 0u)
+    GpuClusterQuant qm;
+    float posStep = 1.0;
+    const bool paged = uint(decodeParams[0].x) != 0u;
+    if (paged)
     {
         const uint page = clusterPage[clusterIdx];
         const GpuPageHeader ph = pageHeader[page];
         const uint slot = pageTable[page];
-        posBase = ph.posBase + slot * kSlotFloat4s;
-        nrmBase = ph.nrmBase + slot * kSlotFloat4s;
-        uvBase  = ph.uvBase  + slot * kSlotFloat2s;
-        idxBase = ph.idxBase + slot * kSlotU32s;
+        const uint pool = slot * kSlotU32s;
         posTotal = max(uint(decodeParams[0].y), 1u);
-        idxTotal = max(uint(decodeParams[0].z), 1u);
+        idxTotal = posTotal;
+        posBase = min(pool + ph.posBase, posTotal - 1u);
+        nrmBase = min(pool + ph.nrmBase, posTotal - 1u);
+        uvBase  = min(pool + ph.uvBase, posTotal - 1u);
+        idxBase = min(pool + ph.idxBase, posTotal - 1u);
+        posStep = ph.posStep;
+        // EVERY meta read is clamped against the pool capacity - the
+        // multi-level payload->cluster->page->meta chain is this
+        // driver's documented DEVICE_LOST trigger, and decode serves
+        // ARBITRARY pixels (first-frame stale payloads included).
+        const uint ord = min(clusterMeta[clusterIdx], ph.clusterCount - 1u);
+        const uint metaEnd = posTotal - 10u;
+        const uint mb = min(pool + ph.metaBase + ord * 10u, metaEnd);
+        qm.posStartX = int(positions[min(mb, metaEnd)]);
+        qm.posStartY = int(positions[min(mb + 1u, metaEnd)]);
+        qm.posStartZ = int(positions[min(mb + 2u, metaEnd)]);
+        qm.widths = positions[min(mb + 3u, metaEnd)];
+        qm.posWordOff = positions[min(mb + 4u, metaEnd)];
+        qm.uvMinX = asfloat(positions[min(mb + 5u, metaEnd)]);
+        qm.uvMinY = asfloat(positions[min(mb + 6u, metaEnd)]);
+        qm.uvRangeX = asfloat(positions[min(mb + 7u, metaEnd)]);
+        qm.uvRangeY = asfloat(positions[min(mb + 8u, metaEnd)]);
+        qm.reserved = positions[min(mb + 9u, metaEnd)];
     }
+
 
     if (viewMode == 1u)
     {
@@ -260,24 +381,51 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     }
 
     const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);
-    const uint i0 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 0u,
-                                    idxTotal - 1u)],
-                        cluster.vertexCount - 1u);
-    const uint i1 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 1u,
-                                    idxTotal - 1u)],
-                        cluster.vertexCount - 1u);
-    const uint i2 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 2u,
-                                    idxTotal - 1u)],
-                        cluster.vertexCount - 1u);
-    const float3 w0 = applyModel(
-        positions[min(posBase + cluster.vertexOffset + i0, posTotal - 1u)].xyz,
-        instanceIdx);
-    const float3 w1 = applyModel(
-        positions[min(posBase + cluster.vertexOffset + i1, posTotal - 1u)].xyz,
-        instanceIdx);
-    const float3 w2 = applyModel(
-        positions[min(posBase + cluster.vertexOffset + i2, posTotal - 1u)].xyz,
-        instanceIdx);
+    uint i0, i1, i2;
+    if (paged)
+    {
+        const uint byteOff = cluster.indexOffset + tri3;
+        const uint lane = byteOff & 3u;
+        const uint w0 = indices[min(idxBase + byteOff / 4u, idxTotal - 1u)];
+        const uint w1 = indices[min(idxBase + byteOff / 4u + 1u, idxTotal - 1u)];
+        i0 = min(byteAt2(w0, w1, lane), cluster.vertexCount - 1u);
+        i1 = min(byteAt2(w0, w1, lane + 1u), cluster.vertexCount - 1u);
+        i2 = min(byteAt2(w0, w1, lane + 2u), cluster.vertexCount - 1u);
+    }
+    else
+    {
+        i0 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 0u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+        i1 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 1u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+        i2 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 2u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+    }
+    float3 lp0, lp1, lp2;
+    if (paged)
+    {
+        lp0 = v5Pos(i0, qm, posBase, posTotal, cluster.vertexCount, posStep);
+        lp1 = v5Pos(i1, qm, posBase, posTotal, cluster.vertexCount, posStep);
+        lp2 = v5Pos(i2, qm, posBase, posTotal, cluster.vertexCount, posStep);
+    }
+    else
+    {
+        const uint p0 = min((posBase + cluster.vertexOffset + i0) * 4u, posTotal - 2u);
+        const uint p1 = min((posBase + cluster.vertexOffset + i1) * 4u, posTotal - 2u);
+        const uint p2 = min((posBase + cluster.vertexOffset + i2) * 4u, posTotal - 2u);
+        lp0 = float3(asfloat(positions[p0]), asfloat(positions[p0 + 1u]),
+                     asfloat(positions[p0 + 2u]));
+        lp1 = float3(asfloat(positions[p1]), asfloat(positions[p1 + 1u]),
+                     asfloat(positions[p1 + 2u]));
+        lp2 = float3(asfloat(positions[p2]), asfloat(positions[p2 + 1u]),
+                     asfloat(positions[p2 + 2u]));
+    }
+    const float3 w0 = applyModel(lp0, instanceIdx);
+    const float3 w1 = applyModel(lp1, instanceIdx);
+    const float3 w2 = applyModel(lp2, instanceIdx);
 
     // NOTE: near-plane-crossing triangles (a vertex behind the camera)
     // used to be discarded outright - with the camera close to the mesh
@@ -324,14 +472,40 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const float pSumInv = 1.0 / pSumSafe;
 
     // Interpolated attributes.
-    const float3 nrm = normalize(
-        normals[min(nrmBase + cluster.vertexOffset + i0, posTotal - 1u)].xyz * p0 +
-        normals[min(nrmBase + cluster.vertexOffset + i1, posTotal - 1u)].xyz * p1 +
-        normals[min(nrmBase + cluster.vertexOffset + i2, posTotal - 1u)].xyz * p2);  // scale cancels
-    const uint uvTotal = posTotal * 2u;
-    const float2 uv0 = uvs[min(uvBase + cluster.vertexOffset + i0, uvTotal - 1u)];
-    const float2 uv1 = uvs[min(uvBase + cluster.vertexOffset + i1, uvTotal - 1u)];
-    const float2 uv2 = uvs[min(uvBase + cluster.vertexOffset + i2, uvTotal - 1u)];
+    float3 n0, n1, n2;
+    if (paged)
+    {
+        n0 = v5Nrm(i0, nrmBase, posTotal, cluster.vertexOffset);
+        n1 = v5Nrm(i1, nrmBase, posTotal, cluster.vertexOffset);
+        n2 = v5Nrm(i2, nrmBase, posTotal, cluster.vertexOffset);
+    }
+    else
+    {
+        const uint n0a = min((nrmBase + cluster.vertexOffset + i0) * 4u, posTotal - 2u);
+        const uint n1a = min((nrmBase + cluster.vertexOffset + i1) * 4u, posTotal - 2u);
+        const uint n2a = min((nrmBase + cluster.vertexOffset + i2) * 4u, posTotal - 2u);
+        n0 = float3(asfloat(normals[n0a]), asfloat(normals[n0a + 1u]), asfloat(normals[n0a + 2u]));
+        n1 = float3(asfloat(normals[n1a]), asfloat(normals[n1a + 1u]), asfloat(normals[n1a + 2u]));
+        n2 = float3(asfloat(normals[n2a]), asfloat(normals[n2a + 1u]), asfloat(normals[n2a + 2u]));
+    }
+    const float3 nrm = normalize(n0 * p0 + n1 * p1 + n2 * p2);  // scale cancels
+    float2 uv0, uv1, uv2;
+    if (paged)
+    {
+        uv0 = v5Uv(i0, uvBase, posTotal, cluster.vertexOffset, qm);
+        uv1 = v5Uv(i1, uvBase, posTotal, cluster.vertexOffset, qm);
+        uv2 = v5Uv(i2, uvBase, posTotal, cluster.vertexOffset, qm);
+    }
+    else
+    {
+        const uint uvTotal = posTotal;  // no clamp in v2 (both ~0xFFFFFFFF)
+        const uint a = min((uvBase + cluster.vertexOffset + i0) * 2u, uvTotal - 2u);
+        const uint b = min((uvBase + cluster.vertexOffset + i1) * 2u, uvTotal - 2u);
+        const uint c2 = min((uvBase + cluster.vertexOffset + i2) * 2u, uvTotal - 2u);
+        uv0 = float2(asfloat(uvs[a]), asfloat(uvs[a + 1u]));
+        uv1 = float2(asfloat(uvs[b]), asfloat(uvs[b + 1u]));
+        uv2 = float2(asfloat(uvs[c2]), asfloat(uvs[c2 + 1u]));
+    }
     const float2 uv = (uv0 * p0 + uv1 * p1 + uv2 * p2) * pSumInv;
 
     // Analytic UV derivatives of the rational interpolation (no

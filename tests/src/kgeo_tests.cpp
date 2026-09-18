@@ -11,6 +11,7 @@
 #include "kenshin/geometry/ClusterDag.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
 #include "kenshin/geometry/KGeoFile.h"
+#include "kenshin/geometry/ClusterQuant.h"
 #include "kenshin/geometry/PagePacker.h"
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
@@ -102,7 +103,7 @@ TEST_CASE("kgeo rejects corrupt magic", "[geometry][kgeo]") {
 
 // ── M6.1: paged v3 ────────────────────────────────────────────────
 
-TEST_CASE("kgeo v3 paged roundtrip", "[geometry][kgeo][paged]") {
+TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
   // Multi-page asset: 128x32 knot packs into ~195 pages.
   const auto mesh =
       kenshin::geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f);
@@ -162,20 +163,26 @@ TEST_CASE("kgeo v3 paged roundtrip", "[geometry][kgeo][paged]") {
   REQUIRE(kenshin::geometry::readKGeo("out/roundtrip_v3.kgeo", loaded, log));
   INFO("log: " << log);
   REQUIRE(loaded.paged);
+  REQUIRE(loaded.pagesQuantized);  // v5 gate
   REQUIRE(loaded.pageCount == pg.pageCount);
   REQUIRE(loaded.pageSlotSize == kenshin::geometry::kPageSlotSize);
   REQUIRE(loaded.pagesHaveNormals == pg.hasNormals);
   REQUIRE(loaded.pagesHaveUvs == pg.hasUvs);
   REQUIRE(loaded.clusterPage == pg.clusterPage);
-  REQUIRE(loaded.pageMeta.size() == pg.pageMeta.size());
+  REQUIRE(loaded.clusterMetaIndex == pg.clusterMetaIndex);
+  REQUIRE(loaded.pageMetaV5.size() == pg.pageMeta.size());
   for (kenshin::u32 p = 0; p < pg.pageCount; ++p) {
-    REQUIRE(loaded.pageMeta[p].posBase == pg.pageMeta[p].posBase);
-    REQUIRE(loaded.pageMeta[p].nrmBase == pg.pageMeta[p].nrmBase);
-    REQUIRE(loaded.pageMeta[p].uvBase == pg.pageMeta[p].uvBase);
-    REQUIRE(loaded.pageMeta[p].idxBase == pg.pageMeta[p].idxBase);
-    REQUIRE(loaded.pageMeta[p].vertexCount == pg.pageMeta[p].vertexCount);
-    REQUIRE(loaded.pageMeta[p].indexCount == pg.pageMeta[p].indexCount);
+    REQUIRE(loaded.pageMetaV5[p].posBase == pg.pageMeta[p].posBase);
+    REQUIRE(loaded.pageMetaV5[p].nrmBase == pg.pageMeta[p].nrmBase);
+    REQUIRE(loaded.pageMetaV5[p].uvBase == pg.pageMeta[p].uvBase);
+    REQUIRE(loaded.pageMetaV5[p].idxBase == pg.pageMeta[p].idxBase);
+    REQUIRE(loaded.pageMetaV5[p].metaBase == pg.pageMeta[p].metaBase);
+    REQUIRE(loaded.pageMetaV5[p].vertexCount == pg.pageMeta[p].vertexCount);
+    REQUIRE(loaded.pageMetaV5[p].indexCount == pg.pageMeta[p].indexCount);
+    REQUIRE(loaded.pageMetaV5[p].clusterCount == pg.pageMeta[p].clusterCount);
+    REQUIRE(loaded.pageMetaV5[p].posStep == pg.pageMeta[p].posStep);
   }
+  REQUIRE(loaded.clusterMaxEdge.size() == dag.clusters.size());
   // Tables roundtrip exactly (v3 ClusterDisk offsets are page-local).
   REQUIRE(loaded.groups.size() == dag.groups.size());
   REQUIRE(loaded.clusters.size() == dag.clusters.size());
@@ -199,28 +206,51 @@ TEST_CASE("kgeo v3 paged roundtrip", "[geometry][kgeo][paged]") {
   std::vector<kenshin::u8> blob;
   for (kenshin::u32 p = 0; p < pg.pageCount; ++p)
     REQUIRE(reader.readPage(p, blob, log));
+  const kenshin::f32 step = pg.grid.step;
   for (kenshin::u32 c = 0; c < loaded.clusters.size(); ++c) {
     const auto& cl = loaded.clusters[c];
-    const auto& m = loaded.pageMeta[loaded.clusterPage[c]];
+    const auto& m = loaded.pageMetaV5[loaded.clusterPage[c]];
     REQUIRE(reader.readPage(loaded.clusterPage[c], blob, log));
-    const auto* pos = reinterpret_cast<const float*>(
-        blob.data() + kenshin::usize(m.posBase) * 16);
-    for (kenshin::u32 v = 0; v < cl.vertexCount; ++v) {
-      const kenshin::usize s =
+    const auto* words = reinterpret_cast<const kenshin::u32*>(blob.data());
+    kenshin::geometry::ClusterQuantMeta meta;
+    std::memcpy(&meta,
+                words + m.metaBase +
+                    kenshin::usize(loaded.clusterMetaIndex[c]) * 10,
+                10 * sizeof(kenshin::u32));
+    const kenshin::u32 b[3] = {meta.widths & 0xFu,
+                               (meta.widths >> 4) & 0xFu,
+                               (meta.widths >> 8) & 0xFu};
+    const kenshin::u32 nV = cl.vertexCount;
+    const kenshin::u64 axisBase[3] = {
+        kenshin::u64(meta.posWordOff) * 32,
+        kenshin::u64(meta.posWordOff) * 32 + kenshin::u64(nV) * b[0],
+        kenshin::u64(meta.posWordOff) * 32 +
+            kenshin::u64(nV) * (b[0] + b[1])};
+    const kenshin::u32* posSec = words + m.posBase;
+    for (kenshin::u32 v = 0; v < nV; ++v) {
+      kenshin::f32 dec[3];
+      for (int a = 0; a < 3; ++a) {
+        const kenshin::u32 bits = kenshin::geometry::readBits(
+            posSec, axisBase[a] + kenshin::u64(v) * b[a], b[a]);
+        dec[a] =
+            kenshin::f32(kenshin::i32(bits) + meta.posStart[a]) * step;
+      }
+      const kenshin::f32* mirror =
+          pg.decodedPositions.data() +
           kenshin::usize(dag.clusters[c].vertexOffset + v) * 3;
-      REQUIRE(pos[(kenshin::usize(cl.vertexOffset) + v) * 4 + 0] ==
-              dag.positions[s]);
-      REQUIRE(pos[(kenshin::usize(cl.vertexOffset) + v) * 4 + 1] ==
-              dag.positions[s + 1]);
-      REQUIRE(pos[(kenshin::usize(cl.vertexOffset) + v) * 4 + 2] ==
-              dag.positions[s + 2]);
-      REQUIRE(pos[(kenshin::usize(cl.vertexOffset) + v) * 4 + 3] == 0.0f);
+      REQUIRE(dec[0] == mirror[0]);
+      REQUIRE(dec[1] == mirror[1]);
+      REQUIRE(dec[2] == mirror[2]);
+      const kenshin::f32* raw =
+          dag.positions.data() +
+          kenshin::usize(dag.clusters[c].vertexOffset + v) * 3;
+      for (int a = 0; a < 3; ++a)
+        REQUIRE(std::fabs(raw[a] - dec[a]) <= step * 0.5f + 1e-7f);
     }
-    const auto* idx = reinterpret_cast<const kenshin::u32*>(
-        blob.data() +
-        (kenshin::usize(m.idxBase) + cl.indexOffset) * 4);
+    const auto* idxBytes = blob.data() + kenshin::usize(m.idxBase) * 4;
     for (kenshin::u32 i = 0; i < cl.indexCount; ++i)
-      REQUIRE(idx[i] == dag.indices[dag.clusters[c].indexOffset + i]);
+      REQUIRE(kenshin::u32(idxBytes[cl.indexOffset + i]) ==
+              dag.indices[dag.clusters[c].indexOffset + i]);
   }
   reader.close();
   std::remove("out/roundtrip_v3.kgeo");
