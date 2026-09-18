@@ -888,7 +888,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
                                pagedPageHeader,
                                m_rasterCnt[slot],
                                pagedClusterMeta};
-    backend.drawNullIndirect(m_pipeHwRaster, hwHandles, 11, m_hwDrawArgs[slot],
+    // 12 handles: binding 11 (clusterMeta) is the v5 meta table - the
+    // count was left at 11 when the array grew, so the binding read
+    // undefined data and HW-routed clusters decoded to garbage (holes).
+    backend.drawNullIndirect(m_pipeHwRaster, hwHandles, 12, m_hwDrawArgs[slot],
                              0, in.width, in.height);
   }
   (void)asyncChain;
