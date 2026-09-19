@@ -347,6 +347,9 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     const GpuInstance inst = instances[pair.x];
 
     // ---- v5 paged addressing (see the header comment) ----------------
+    // Pool u32 capacities ([10].xy) - the v5 clamp discipline bound for
+    // the meta/bit/word reads below (both branches; v2 scales x4).
+    const uint posTotal = max(uint(params[10].x), 1u);
     uint posBase = 0, idxBase = 0;
     GpuClusterQuant qm;          // valid only in paged mode
     float posStep = 1.0;
@@ -368,7 +371,9 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         idxBase = pool + ph.idxBase;
         posStep = ph.posStep;
         const uint ord = min(clusterMeta[pair.y], ph.clusterCount - 1u);
-        const uint mb = pool + ph.metaBase + ord * 10u;
+        // The 10-word meta record must fit the pool's u32 capacity
+        // (decode's metaEnd pattern).
+        const uint mb = min(pool + ph.metaBase + ord * 10u, posTotal - 10u);
         qm.posStartX = int(positions[mb]); qm.posStartY = int(positions[mb + 1u]);
         qm.posStartZ = int(positions[mb + 2u]);
         qm.widths = positions[mb + 3u]; qm.posWordOff = positions[mb + 4u];
@@ -404,14 +409,15 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
             const uint64_t bitA = base + uint64_t(v) * b0;
             const uint64_t bitB = base + uint64_t(vertCount) * b0 + uint64_t(v) * b1;
             const uint64_t bitC = base + uint64_t(vertCount) * (b0 + b1) + uint64_t(v) * b2;
-            const uint q0 = loadBits2(positions[posBase + uint(bitA / 32u)],
-                                      positions[posBase + uint(bitA / 32u) + 1u],
+            const uint posEnd = posTotal - 1u;
+            const uint q0 = loadBits2(positions[min(posBase + uint(bitA / 32u), posEnd)],
+                                      positions[min(posBase + uint(bitA / 32u) + 1u, posEnd)],
                                       uint(bitA & 31u), b0);
-            const uint q1 = loadBits2(positions[posBase + uint(bitB / 32u)],
-                                      positions[posBase + uint(bitB / 32u) + 1u],
+            const uint q1 = loadBits2(positions[min(posBase + uint(bitB / 32u), posEnd)],
+                                      positions[min(posBase + uint(bitB / 32u) + 1u, posEnd)],
                                       uint(bitB & 31u), b1);
-            const uint q2 = loadBits2(positions[posBase + uint(bitC / 32u)],
-                                      positions[posBase + uint(bitC / 32u) + 1u],
+            const uint q2 = loadBits2(positions[min(posBase + uint(bitC / 32u), posEnd)],
+                                      positions[min(posBase + uint(bitC / 32u) + 1u, posEnd)],
                                       uint(bitC & 31u), b2);
             const int3 iq = int3(int(q0), int(q1), int(q2))
                           + int3(qm.posStartX, qm.posStartY, qm.posStartZ);
@@ -419,11 +425,13 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         }
         else
         {
-            // v2: float4 elements as 4 u32 (w unused).
-            const uint p4 = posBase + cluster.vertexOffset + v;
-            lp = float3(asfloat(positions[p4 * 4u]),
-                       asfloat(positions[p4 * 4u + 1u]),
-                       asfloat(positions[p4 * 4u + 2u]));
+            // v2: float4 elements as 4 u32 (w unused). Word-unit clamp
+            // against the pool's u32 capacity ([10].x).
+            const uint vw = min((posBase + cluster.vertexOffset + v) * 4u,
+                                posTotal - 3u);
+            lp = float3(asfloat(positions[vw]),
+                       asfloat(positions[vw + 1u]),
+                       asfloat(positions[vw + 2u]));
         }
         // world = inst.model * lp  (explicit glm-column combination)
         const float3 wp = inst.model[0].xyz * lp.x + inst.model[1].xyz * lp.y
@@ -441,11 +449,15 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     uint i0, i1, i2;
     if (uint(params[9].y) != 0u)
     {
-        // v5: flat u8 lanes at the cluster's index BYTE offset.
+        // v5: flat u8 lanes at the cluster's index BYTE offset. w1 can
+        // address one word past the idx section's last word - clamp both
+        // against the pool's u32 capacity ([10].y; the last word of the
+        // last page would otherwise read past the slot pool).
+        const uint idxTotal = max(uint(params[10].y), 1u);
         const uint byteOff = cluster.indexOffset + gtid.x * 3u;
         const uint lane = byteOff & 3u;
-        const uint w0 = indices[idxBase + byteOff / 4u];
-        const uint w1 = indices[idxBase + byteOff / 4u + 1u];
+        const uint w0 = indices[min(idxBase + byteOff / 4u, idxTotal - 1u)];
+        const uint w1 = indices[min(idxBase + byteOff / 4u + 1u, idxTotal - 1u)];
         // Three consecutive lanes starting at `lane` (quant_probe's
         // audited shape; the old ternary form misread i2 at lane==1).
         i0 = (w0 >> (8u * lane)) & 0xFFu;

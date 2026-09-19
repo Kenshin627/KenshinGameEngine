@@ -21,7 +21,7 @@ int main(int argc, char** argv) {
   KENSHIN_INFO("{}", kenshin::getBanner());
 
   std::string input, output = "out/mesh.kgeo";
-  std::string proc;  // "sphere" or "knot"
+  std::string proc;      // "sphere" or "knot"
   bool unpaged = false;  // --unpaged: emit v2 (pools) instead of v3 (pages)
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
     kenshin::log::shutdown();
     return 1;
   }
-  KENSHIN_INFO("[builder] written (v3 paged): {}", output);
+  KENSHIN_INFO("[builder] written (v5 quantized paged): {}", output);
   kenshin::log::shutdown();
   return 0;
 }

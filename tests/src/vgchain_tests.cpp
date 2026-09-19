@@ -5,8 +5,8 @@
 // dispatches + host-visible params vs per-call one-shot everything) -
 // the VisBuffers must match EXACTLY, pixel for pixel.
 
-#include <catch2/catch_test_macros.hpp>
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -149,11 +149,10 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
                              static_cast<u32>(g.clusters.size()));
   const std::vector<u32> meshHierRoots{dag.hierarchyRoot};
   renderer::VisBufferChain chain;
-  REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
-                     groupData, hierarchyData, groupRanges, meshHierRoots,
-                     instances, meshRanges,
-                     static_cast<u32>(kInst * dag.clusters.size()), {},
-                     nullptr, W, H));
+  REQUIRE(chain.init(
+      *backend, shaders, positions4, dag.indices, clusterData, groupData,
+      hierarchyData, groupRanges, meshHierRoots, instances, meshRanges,
+      static_cast<u32>(kInst * dag.clusters.size()), {}, nullptr, W, H));
   renderer::ChainInputs inputs;  // (planes cannot be aggregate-named)
   inputs.view = view;
   inputs.proj = proj;
@@ -204,10 +203,10 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
     REQUIRE(chain.readHwPairs(*backend, chainLists.hw));
     REQUIRE(chain.readPostPairs(*backend, chainLists.post));
     const viscmp::Lists oneShotLists{pairsOneShot, {}, {}};
-    const usize mismatches = viscmp::mismatches(
-        visOneShot.data(), oneShotLists,
-        reinterpret_cast<const u64*>(visBytes.data()), chainLists,
-        visOneShot.size());
+    const usize mismatches =
+        viscmp::mismatches(visOneShot.data(), oneShotLists,
+                           reinterpret_cast<const u64*>(visBytes.data()),
+                           chainLists, visOneShot.size());
     INFO("cullMode " << cullMode << ": vis pixels " << visOneShot.size()
                      << ", mismatches " << mismatches);
     REQUIRE(mismatches == 0);
@@ -257,12 +256,11 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   std::vector<u8> pagedClusterData;
   for (u32 c = 0; c < dag.clusters.size(); ++c) {
     const auto& cl = dag.clusters[c];
-    renderer::packGpuCluster(pagedClusterData, cl.group, cl.boundsSphere.x,
-                             cl.boundsSphere.y, cl.boundsSphere.z,
-                             cl.boundsSphere.w, cl.error, cl.parentError,
-                             pg.localVertexOffset[c], cl.vertexCount,
-                             pg.localIndexOffset[c], cl.indexCount,
-                             cl.refinedGroup);
+    renderer::packGpuCluster(
+        pagedClusterData, cl.group, cl.boundsSphere.x, cl.boundsSphere.y,
+        cl.boundsSphere.z, cl.boundsSphere.w, cl.error, cl.parentError,
+        pg.localVertexOffset[c], cl.vertexCount, pg.localIndexOffset[c],
+        cl.indexCount, cl.refinedGroup);
   }
   // v5: the v2 reference renders the DECODED pools (D5 bit-identity:
   // bit-identical to what the paged GPU decodes) over the PADDED
@@ -273,8 +271,7 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
         glm::vec4(pg.decodedPositions[v * 3], pg.decodedPositions[v * 3 + 1],
                   pg.decodedPositions[v * 3 + 2], 0.0f);
   const std::vector<glm::vec4> aabbs =
-      renderer::computeClusterAabbs(positions4, pg.decodedIndices,
-                                    clusterData);
+      renderer::computeClusterAabbs(positions4, pg.decodedIndices, clusterData);
 
   std::vector<renderer::CullGpuInstance> instances;
   instances.push_back(renderer::CullGpuInstance{});
@@ -336,12 +333,10 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   viscmp::Lists listsV2;  // the v2 reference's resolve tables
   {
     renderer::VisBufferChain chain;
-    REQUIRE(chain.init(*backend, shaders, positions4, pg.decodedIndices,
-                       clusterData,
-                       groupData, hierarchyData, groupRanges, meshHierRoots,
-                       instances, meshRanges,
-                       static_cast<u32>(dag.clusters.size()), {}, nullptr, W,
-                       H));
+    REQUIRE(chain.init(
+        *backend, shaders, positions4, pg.decodedIndices, clusterData,
+        groupData, hierarchyData, groupRanges, meshHierRoots, instances,
+        meshRanges, static_cast<u32>(dag.clusters.size()), {}, nullptr, W, H));
     runFrames(chain);
     REQUIRE(backend->readbackBuffer(chain.visBuffer(*backend), 0,
                                     usize(W) * H * sizeof(u64), visV2Bytes));
@@ -357,14 +352,13 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   }
 
   // ---- Paged setup: slot pool + identity page table + static tables.
-  const u32 slotPool = backend->createPageSlotPool(pg.pageCount,
-                                                   geometry::kPageSlotSize);
+  const u32 slotPool =
+      backend->createPageSlotPool(pg.pageCount, geometry::kPageSlotSize);
   REQUIRE(slotPool != backend::IRenderBackend::kInvalidBufferHandle);
   {
     // Upload every page through the M6.2 batch API (<= 64 pages/batch).
     for (u32 base = 0; base < pg.pageCount;) {
-      const u32 n =
-          std::min<u32>(64, pg.pageCount - base);
+      const u32 n = std::min<u32>(64, pg.pageCount - base);
       REQUIRE(backend->beginPageUploads(slotPool));
       for (u32 i = 0; i < n; ++i)
         REQUIRE(backend->copyPageToSlot(
@@ -382,8 +376,8 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
     d.debugName = name;
     return backend->createBuffer(d);
   };
-  const u32 clusterPageBuf = makeStatic(pg.clusterPage.data(),
-                                        pg.clusterPage.size() * 4, "pg-clusterPage");
+  const u32 clusterPageBuf = makeStatic(
+      pg.clusterPage.data(), pg.clusterPage.size() * 4, "pg-clusterPage");
   std::vector<u32> pageTableInit(pg.pageCount);
   for (u32 p = 0; p < pg.pageCount; ++p) pageTableInit[p] = p;
   backend::IRenderBackend::BufferDesc ptDesc;
@@ -398,16 +392,16 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   pageHeaderFlat.reserve(usize(pg.pageCount) * 12);
   for (const auto& m : pg.pageMeta) {
     const u32 stepBits = *reinterpret_cast<const u32*>(&m.posStep);
-    pageHeaderFlat.insert(pageHeaderFlat.end(),
-                          {m.posBase, m.nrmBase, m.uvBase, m.idxBase,
-                           m.metaBase, m.vertexCount, m.indexCount,
-                           m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
+    pageHeaderFlat.insert(
+        pageHeaderFlat.end(),
+        {m.posBase, m.nrmBase, m.uvBase, m.idxBase, m.metaBase, m.vertexCount,
+         m.indexCount, m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
   }
-  const u32 pageHeaderBuf = makeStatic(pageHeaderFlat.data(),
-                                       pageHeaderFlat.size() * 4, "pg-pageHeader");
-  const u32 clusterMetaBuf = makeStatic(pg.clusterMetaIndex.data(),
-                                        pg.clusterMetaIndex.size() * 4,
-                                        "pg-clusterMeta");
+  const u32 pageHeaderBuf = makeStatic(
+      pageHeaderFlat.data(), pageHeaderFlat.size() * 4, "pg-pageHeader");
+  const u32 clusterMetaBuf =
+      makeStatic(pg.clusterMetaIndex.data(), pg.clusterMetaIndex.size() * 4,
+                 "pg-clusterMeta");
 
   renderer::ChainPagedInputs pi;
   pi.slotPool = slotPool;
@@ -425,7 +419,7 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   // chain-vs-one-shot result - here they re-verify through the PAGED
   // addressing path.
   for (u32 config = 0; config < 6; ++config) {
-    const u32 cullMode = config % 3;   // 0 linear / 1 level / 2 persist
+    const u32 cullMode = config % 3;  // 0 linear / 1 level / 2 persist
     const bool occ = config < 3;
     inputs.cullMode = cullMode;
     inputs.occlusionEnabled = occ;
@@ -471,15 +465,80 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
     REQUIRE(markedPages >= 1);
     REQUIRE(markedPages <= pg.pageCount);
     for (const auto& pr : pairs)
-      REQUIRE(((touched[pg.clusterPage[pr.y] >> 5] >>
-                (pg.clusterPage[pr.y] & 31)) &
-               1u) == 1u);
+      REQUIRE(
+          ((touched[pg.clusterPage[pr.y] >> 5] >> (pg.clusterPage[pr.y] & 31)) &
+           1u) == 1u);
     chain.onShutdown(*backend);
   }
 
   // Restore the default inputs (Subject 1's sweep mutated them).
   inputs.cullMode = 1;
   inputs.occlusionEnabled = true;
+  // ---- Subject 1b: FORCE-HW paged chain (hwMode 2). Every cluster
+  // routes through raster_hw's paged v5 decode + the 12-handle
+  // drawNullIndirect - the exact app-default wiring where the a13ba83
+  // handle-count bug lived invisible to every suite. The invariant is
+  // COVERAGE exactness vs the v2 reference (the M4.2 force-HW result);
+  // payload words are not comparable cross-scheme (HW depth is
+  // perspective-correct, SW affine - see the note at the assert).
+  {
+    inputs.hwMode = 2;
+    inputs.occlusionEnabled = false;
+    renderer::VisBufferChain chain;
+    REQUIRE(chain.init(*backend, shaders, {}, {}, pagedClusterData, groupData,
+                       hierarchyData, groupRanges, meshHierRoots, instances,
+                       meshRanges, static_cast<u32>(dag.clusters.size()), aabbs,
+                       &pi, W, H));
+    runFrames(chain);
+    std::vector<u8> visBytes;
+    REQUIRE(backend->readbackBuffer(chain.visBuffer(*backend), 0,
+                                    usize(W) * H * sizeof(u64), visBytes));
+    u32 stats[16] = {};
+    REQUIRE(chain.readStats(*backend, stats));
+    // hzb_tests' force-HW pattern: stats[2] is the SW-side pair count -
+    // 0 BY DESIGN under force; stats[12] proves the HW path took them.
+    REQUIRE(stats[12] > 0);   // hw-routed pairs
+    REQUIRE(stats[2] == 0);   // ... ALL of them (force mode)
+    REQUIRE(stats[15] == 0);  // nothing skipped (residency)
+    // Coverage vs the v2 reference must be exact (the M4.2 result).
+    // Payload mismatches get a budget: HW depth is perspective-correct
+    // where SW is affine, so near-tie winners flip; the a13ba83 class
+    // read ~16% of pixels wrong - 3 orders above the budget.
+    const u64* v2w = reinterpret_cast<const u64*>(visV2Bytes.data());
+    const u64* hwW = reinterpret_cast<const u64*>(visBytes.data());
+    usize nzV2 = 0, nzHw = 0, holes = 0, extra = 0;
+    for (usize i = 0; i < usize(W) * H; ++i) {
+      const bool s = v2w[i] != 0;
+      const bool h = hwW[i] != 0;
+      nzV2 += s;
+      nzHw += h;
+      if (s && !h) ++holes;
+      if (h && !s) ++extra;
+    }
+    INFO("paged FORCE-HW: nz v2 " << nzV2 << " hw " << nzHw << " holes "
+                                  << holes << " extra " << extra);
+    REQUIRE(holes == 0);
+    REQUIRE(extra == 0);
+    // No payload-word compare here, by design: HW depth is
+    // perspective-correct where SW is affine, so the depth word (and
+    // near-tie winners) differ on essentially every pixel - viscmp
+    // resolves depth into its compare, making cross-scheme mismatch
+    // counts by-construction ~100% (measured 812/824). The M4.2
+    // force-HW precedent: COVERAGE exactness is the invariant that
+    // catches decode garbage (degenerate triangles -> holes,
+    // splinters -> extra); wrong-geometry-with-right-payload-id is
+    // invisible to any VisBuffer compare and is the SW-path D5
+    // differential's job.
+    viscmp::Lists lists;
+    REQUIRE(chain.readVisiblePairs(*backend, lists.pairs));
+    REQUIRE(chain.readHwPairs(*backend, lists.hw));
+    REQUIRE(chain.readPostPairs(*backend, lists.post));
+    REQUIRE(lists.hw.size() > 0);  // actually routed HW
+    chain.onShutdown(*backend);
+    inputs.hwMode = 0;
+    inputs.occlusionEnabled = true;
+  }
+
   // ---- Subject 2: eviction - a page that provably carries CUT  // clusters (chosen from the v2 pair set) goes absent: skips counted,
   // the touched bitmap still marks it (miss detection), and restoring
   // the page returns the VisBuffer to byte-identity (pop-in recovery).
@@ -503,17 +562,17 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   {
     u32 stats[16] = {};
     REQUIRE(chain.readStats(*backend, stats));
-    REQUIRE(stats[2] == statsV2[2]);            // cull untouched (metadata)
+    REQUIRE(stats[2] == statsV2[2]);  // cull untouched (metadata)
     std::vector<glm::uvec2> pairs;
     REQUIRE(chain.readVisiblePairs(*backend, pairs));
     u32 pendingExpected = 0;
     for (const auto& pr : pairs)
       if (pg.clusterPage[pr.y] == evicted) ++pendingExpected;
-    INFO("evicted page " << evicted << ": pending expected "
-                         << pendingExpected << ", got " << stats[15]
-                         << " (pairs " << pairs.size() << ")");
+    INFO("evicted page " << evicted << ": pending expected " << pendingExpected
+                         << ", got " << stats[15] << " (pairs " << pairs.size()
+                         << ")");
     REQUIRE(stats[15] == pendingExpected);
-    REQUIRE(stats[5] <= statsV2[5]);     // strictly fewer px writes
+    REQUIRE(stats[5] <= statsV2[5]);  // strictly fewer px writes
     // Miss detection: an absent page CARRYING cut clusters is still
     // marked touched (a page this view never references legitimately
     // stays unmarked - v5's coarser pages can put the whole cut in
@@ -562,17 +621,16 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
 TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
   using namespace kenshin;
   Built built;
-  REQUIRE(
-      build(geometry::TorusKnotGeometry::create(2, 3, 1024, 1024, 1.0f),
-            built));
+  REQUIRE(build(geometry::TorusKnotGeometry::create(2, 3, 1024, 1024, 1.0f),
+                built));
   auto& dag = built.dag;  // packPages pads the cull bounds in place
 
   geometry::PackedGeometry pg;
   std::string packLog;
   REQUIRE(geometry::packPages(dag, pg, packLog));
   INFO(packLog);
-  REQUIRE(pg.pageCount >= 100);   // production-scale page table (v5:
-REQUIRE(pg.pageCount <= 400);   // ~5x smaller pages)
+  REQUIRE(pg.pageCount >= 100);  // production-scale page table (v5:
+  REQUIRE(pg.pageCount <= 400);  // ~5x smaller pages)
 
   manager::ShaderManager shaders;
   REQUIRE(shaders.init(kShaderRoot));
@@ -589,12 +647,11 @@ REQUIRE(pg.pageCount <= 400);   // ~5x smaller pages)
                              c.indexCount, c.refinedGroup);
   for (u32 c = 0; c < dag.clusters.size(); ++c) {
     const auto& cl = dag.clusters[c];
-    renderer::packGpuCluster(pagedClusterData, cl.group, cl.boundsSphere.x,
-                             cl.boundsSphere.y, cl.boundsSphere.z,
-                             cl.boundsSphere.w, cl.error, cl.parentError,
-                             pg.localVertexOffset[c], cl.vertexCount,
-                             pg.localIndexOffset[c], cl.indexCount,
-                             cl.refinedGroup);
+    renderer::packGpuCluster(
+        pagedClusterData, cl.group, cl.boundsSphere.x, cl.boundsSphere.y,
+        cl.boundsSphere.z, cl.boundsSphere.w, cl.error, cl.parentError,
+        pg.localVertexOffset[c], cl.vertexCount, pg.localIndexOffset[c],
+        cl.indexCount, cl.refinedGroup);
   }
   for (const auto& g : dag.groups)
     renderer::packGpuGroup(groupData, g.boundsSphere.x, g.boundsSphere.y,
@@ -609,8 +666,7 @@ REQUIRE(pg.pageCount <= 400);   // ~5x smaller pages)
         glm::vec4(pg.decodedPositions[v * 3], pg.decodedPositions[v * 3 + 1],
                   pg.decodedPositions[v * 3 + 2], 0.0f);
   const std::vector<glm::vec4> aabbs =
-      renderer::computeClusterAabbs(positions4, pg.decodedIndices,
-                                    clusterData);
+      renderer::computeClusterAabbs(positions4, pg.decodedIndices, clusterData);
 
   std::vector<renderer::CullGpuInstance> instances;
   instances.push_back(renderer::CullGpuInstance{});
@@ -667,12 +723,10 @@ REQUIRE(pg.pageCount <= 400);   // ~5x smaller pages)
   viscmp::Lists listsV2;
   {
     renderer::VisBufferChain chain;
-    REQUIRE(chain.init(*backend, shaders, positions4, pg.decodedIndices,
-                       clusterData,
-                       groupData, hierarchyData, groupRanges, meshHierRoots,
-                       instances, meshRanges,
-                       static_cast<u32>(dag.clusters.size()), {}, nullptr, W,
-                       H));
+    REQUIRE(chain.init(
+        *backend, shaders, positions4, pg.decodedIndices, clusterData,
+        groupData, hierarchyData, groupRanges, meshHierRoots, instances,
+        meshRanges, static_cast<u32>(dag.clusters.size()), {}, nullptr, W, H));
     runFrames(chain);
     REQUIRE(backend->readbackBuffer(chain.visBuffer(*backend), 0,
                                     usize(W) * H * sizeof(u64), visV2Bytes));
@@ -694,9 +748,9 @@ REQUIRE(pg.pageCount <= 400);   // ~5x smaller pages)
     const u32 n = std::min<u32>(64, pg.pageCount - base);
     REQUIRE(backend->beginPageUploads(slotPool));
     for (u32 i = 0; i < n; ++i)
-      REQUIRE(backend->copyPageToSlot(pg.pages[base + i].data(), base + i,
-                                      static_cast<u32>(
-                                          pg.pages[base + i].size())));
+      REQUIRE(
+          backend->copyPageToSlot(pg.pages[base + i].data(), base + i,
+                                  static_cast<u32>(pg.pages[base + i].size())));
     REQUIRE(backend->waitPageUploads(backend->submitPageUploads()));
     base += n;
   }
@@ -708,8 +762,8 @@ REQUIRE(pg.pageCount <= 400);   // ~5x smaller pages)
     d.debugName = name;
     return backend->createBuffer(d);
   };
-  const u32 clusterPageBuf = makeStatic(pg.clusterPage.data(),
-                                        pg.clusterPage.size() * 4, "pg-cp");
+  const u32 clusterPageBuf =
+      makeStatic(pg.clusterPage.data(), pg.clusterPage.size() * 4, "pg-cp");
   std::vector<u32> pageTableInit(pg.pageCount);
   for (u32 p = 0; p < pg.pageCount; ++p) pageTableInit[p] = p;
   backend::IRenderBackend::BufferDesc ptDesc;
@@ -723,16 +777,15 @@ REQUIRE(pg.pageCount <= 400);   // ~5x smaller pages)
   pageHeaderFlat.reserve(usize(pg.pageCount) * 12);
   for (const auto& m : pg.pageMeta) {
     const u32 stepBits = *reinterpret_cast<const u32*>(&m.posStep);
-    pageHeaderFlat.insert(pageHeaderFlat.end(),
-                          {m.posBase, m.nrmBase, m.uvBase, m.idxBase,
-                           m.metaBase, m.vertexCount, m.indexCount,
-                           m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
+    pageHeaderFlat.insert(
+        pageHeaderFlat.end(),
+        {m.posBase, m.nrmBase, m.uvBase, m.idxBase, m.metaBase, m.vertexCount,
+         m.indexCount, m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
   }
-  const u32 pageHeaderBuf = makeStatic(pageHeaderFlat.data(),
-                                       pageHeaderFlat.size() * 4, "pg-ph");
-  const u32 clusterMetaBuf = makeStatic(pg.clusterMetaIndex.data(),
-                                        pg.clusterMetaIndex.size() * 4,
-                                        "pg-cm");
+  const u32 pageHeaderBuf =
+      makeStatic(pageHeaderFlat.data(), pageHeaderFlat.size() * 4, "pg-ph");
+  const u32 clusterMetaBuf = makeStatic(
+      pg.clusterMetaIndex.data(), pg.clusterMetaIndex.size() * 4, "pg-cm");
 
   renderer::ChainPagedInputs pi;
   pi.slotPool = slotPool;
@@ -815,8 +868,7 @@ TEST_CASE("pair-list saturation at tiny capacity", "[gpu][vgchain]") {
     positions4[v] = glm::vec4(dag.positions[v * 3], dag.positions[v * 3 + 1],
                               dag.positions[v * 3 + 2], 0.0f);
   std::vector<renderer::CullGpuInstance> instances;
-  for (u32 i = 0; i < 24; ++i)
-    instances.push_back(renderer::CullGpuInstance{});
+  for (u32 i = 0; i < 24; ++i) instances.push_back(renderer::CullGpuInstance{});
   const std::vector<renderer::GpuMeshRangePair> meshRanges = {
       {0u, static_cast<u32>(dag.clusters.size())}};
 
@@ -847,8 +899,7 @@ TEST_CASE("pair-list saturation at tiny capacity", "[gpu][vgchain]") {
     REQUIRE(chain.init(*backend, shaders, positions4, dag.indices, clusterData,
                        groupData, hierarchyData, groupRanges, hierRoots,
                        instances, meshRanges,
-                       /*maxPairs=*/600,
-                       {}, nullptr, W, H));
+                       /*maxPairs=*/600, {}, nullptr, W, H));
     renderer::ChainInputs inputs;
     inputs.view = view;
     inputs.proj = proj;
@@ -875,8 +926,8 @@ TEST_CASE("pair-list saturation at tiny capacity", "[gpu][vgchain]") {
     // Saturation PROOF: the raw count exceeded the 5-pair capacity
     // (reservations past it were dropped by the writers).
     INFO("cullMode " << cullMode << ": pairs " << stats[2] << " visible "
-                      << stats[0] << " visited " << stats[13] << " pruned "
-                      << stats[14] << " tooCoarse " << stats[3]);
+                     << stats[0] << " visited " << stats[13] << " pruned "
+                     << stats[14] << " tooCoarse " << stats[3]);
     // Saturation PROOF (hierarchy modes process everything and cap the
     // WRITES: the raw count runs past the capacity; the linear mode
     // saturates UPSTREAM in the expand - only 5 items ever exist).

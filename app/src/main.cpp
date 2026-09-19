@@ -42,16 +42,16 @@
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Timer.h"
 #include "kenshin/core/Window.h"
+#include "kenshin/geometry/PagePacker.h"
 #include "kenshin/manager/MeshPool.h"
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/renderer/ClusterCullPass.h"
 #include "kenshin/renderer/MaterialDecodePass.h"
 #include "kenshin/renderer/Renderer.h"
 #include "kenshin/renderer/SoftRasterPass.h"
+#include "kenshin/renderer/StreamingManager.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
-#include "kenshin/geometry/PagePacker.h"
-#include "kenshin/renderer/StreamingManager.h"
 #include "kenshin/scene/Camera.h"
 #include "kenshin/scene/CameraController.h"
 #include "kenshin/util/BmpWriter.h"
@@ -138,7 +138,7 @@ struct Args {
   bool hasCam = false;
   float camYaw = 0, camPitch = 0, camDist = 0;
   float camTarget[3] = {0, 0, 0};
-  int viewMode = -1;  // --view; -1 = leave the panel state at Final
+  int viewMode = -1;            // --view; -1 = leave the panel state at Final
   float hwThresholdPx = -1.0f;  // --hw-threshold: the SW/HW routing edge
                                 // threshold (UE's r.Nanite.MinPixelsPerEdgeHW
                                 // twin; <0 = keep the engine default)
@@ -250,8 +250,8 @@ struct VgDebugState {
   kenshin::u32 revived = 0;
   kenshin::u32 hwClusters = 0;
   kenshin::u32 workItems = 0, tooCoarse = 0, srcTooCoarse = 0;
-  kenshin::u32 pendingSkips = 0;   // M6.3 non-resident skips
-  kenshin::u32 missPages = 0;      // M6.3 touched-absent pages
+  kenshin::u32 pendingSkips = 0;  // M6.3 non-resident skips
+  kenshin::u32 missPages = 0;     // M6.3 touched-absent pages
   bool occlusion = true;
   bool hierCull = true;  // M5.2: BVH8 traversal (off = linear A/B)
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
@@ -377,14 +377,22 @@ int main(int argc, char** argv) {
       // vertex pools are never uploaded, the pages stream via the
       // StreamingManager. slotCap = the budget's structural form.
       const bool pagedAsset = kgeoPreview.dag.paged;
-      const kenshin::u32 vgMeshId =
-          pagedAsset ? vgScene.addMeshPaged(kgeoPreview.dag)
-                     : vgScene.addMesh(kgeoPreview.dag);
+      const kenshin::u32 vgMeshId = pagedAsset
+                                        ? vgScene.addMeshPaged(kgeoPreview.dag)
+                                        : vgScene.addMesh(kgeoPreview.dag);
+      // v5 gate: pre-v5 paged assets are rejected (their empty v5 tables
+      // would silently drop every dispatch - black viewport, no warning).
+      if (vgMeshId == 0xFFFFFFFFu) {
+        KENSHIN_ERROR(
+            "[main] asset rejected: rebuild {} with the current "
+            "kgeo_builder",
+            args.kgeo);
+        return 1;
+      }
       const kenshin::u32 slotCap =
           pagedAsset && args.streamBudgetMb > 0
-              ? kenshin::u32((kenshin::u64(args.streamBudgetMb) * 1024 *
-                             1024) /
-                            kenshin::geometry::kPageSlotSize)
+              ? kenshin::u32((kenshin::u64(args.streamBudgetMb) * 1024 * 1024) /
+                             kenshin::geometry::kPageSlotSize)
               : 0xFFFFFFFFu;
       vgScene.flushPools(slotCap);
       vgScene.setInstances(
@@ -394,14 +402,14 @@ int main(int argc, char** argv) {
       // explicitly before the engine tears the scene/backend down.
       if (pagedAsset) {
         streamer = std::make_unique<kenshin::renderer::StreamingManager>();
-        if (!streamer->init(engine.get<kenshin::backend::IRenderBackend>(),
-                            vgScene,
-                            args.streamBudgetMb > 0
-                                ? kenshin::usize(args.streamBudgetMb) * 1024 *
-                                      1024
-                                : 0)) {
-          KENSHIN_ERROR("[stream] manager init failed - falling back is "
-                        "impossible for a v3 asset, exiting");
+        if (!streamer->init(
+                engine.get<kenshin::backend::IRenderBackend>(), vgScene,
+                args.streamBudgetMb > 0
+                    ? kenshin::usize(args.streamBudgetMb) * 1024 * 1024
+                    : 0)) {
+          KENSHIN_ERROR(
+              "[stream] manager init failed - falling back is "
+              "impossible for a v3 asset, exiting");
           return 1;
         }
         streamer->addAsset(vgMeshId, args.kgeo);
@@ -409,8 +417,9 @@ int main(int argc, char** argv) {
         // before the loop starts - no black flash while the async
         // thread spins up.
         if (!streamer->warmup())
-          KENSHIN_WARN("[stream] warmup incomplete - early frames may be "
-                       "sparse");
+          KENSHIN_WARN(
+              "[stream] warmup incomplete - early frames may be "
+              "sparse");
       }
       // M4.4 CPU-cut retirement: kgeo IS the virtual chain; the
       // chain instances are set up unconditionally (--baseline is a
@@ -718,8 +727,7 @@ int main(int argc, char** argv) {
           pagedInputs.pageHeader = vgScene->pageHeaderBuffer();
           pagedInputs.pageCount = vgScene->pageCount();
           pagedInputs.slotU32Total =
-              vgScene->pageSlotCount() *
-              (kenshin::geometry::kPageSlotSize / 4);
+              vgScene->pageSlotCount() * (kenshin::geometry::kPageSlotSize / 4);
           pagedInputs.clusterMeta = vgScene->clusterMetaBuffer();
           pagedPtr = &pagedInputs;
         }
@@ -732,12 +740,12 @@ int main(int argc, char** argv) {
             // 4M pairs) - the cull writers saturate and the consumers
             // clamp at this cap (the wide-instance scaling form).
             kenshin::u32(std::min<kenshin::u64>(
-                kenshin::u64(chainInstances.size()) *
-                    vgScene->clusterCount(),
+                kenshin::u64(chainInstances.size()) * vgScene->clusterCount(),
                 kenshin::u64(4) << 20)),
             vgScene->clusterAabbs(), pagedPtr, 1, 1);
-        if (chainReady) KENSHIN_INFO("[vgchain] in-frame chain ready{}",
-                                     pagedPtr ? " (paged)" : "");
+        if (chainReady)
+          KENSHIN_INFO("[vgchain] in-frame chain ready{}",
+                       pagedPtr ? " (paged)" : "");
       }
       if (!decodeReady) decodeReady = decodePass.init(*vgBackend, shaders);
       if (chainReady && decodeReady) {
@@ -807,24 +815,20 @@ int main(int argc, char** argv) {
           pd.clusterPage = vgScene->clusterPageBuffer();
           pd.pageTable = vgScene->pageTableBuffer();
           pd.pageHeader = vgScene->pageHeaderBuffer();
-          pd.slotU32Total = vgScene->pageSlotCount() *
-                            (kenshin::geometry::kPageSlotSize / 4);
+          pd.slotU32Total =
+              vgScene->pageSlotCount() * (kenshin::geometry::kPageSlotSize / 4);
           pd.clusterMeta = vgScene->clusterMetaBuffer();
-          decodePass.drawPaged(*vgBackend, camera.viewProjMatrix(), *vgScene,
-                               decodeParams, ci.width, ci.height,
-                               chain.visBufferCurrent(*vgBackend), pd,
-                               chain.pairsCurrent(*vgBackend),
-                               chain.hwPairsCurrent(*vgBackend),
-                               chain.postPairsCurrent(*vgBackend),
-                               chain.maxPairs());
+          decodePass.drawPaged(
+              *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+              ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
+              chain.pairsCurrent(*vgBackend), chain.hwPairsCurrent(*vgBackend),
+              chain.postPairsCurrent(*vgBackend), chain.maxPairs());
         } else {
-          decodePass.draw(*vgBackend, camera.viewProjMatrix(), *vgScene,
-                          decodeParams, ci.width, ci.height,
-                          chain.visBufferCurrent(*vgBackend),
-                          chain.pairsCurrent(*vgBackend),
-                          chain.hwPairsCurrent(*vgBackend),
-                          chain.postPairsCurrent(*vgBackend),
-                          chain.maxPairs());
+          decodePass.draw(
+              *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+              ci.width, ci.height, chain.visBufferCurrent(*vgBackend),
+              chain.pairsCurrent(*vgBackend), chain.hwPairsCurrent(*vgBackend),
+              chain.postPairsCurrent(*vgBackend), chain.maxPairs());
         }
       }
     }

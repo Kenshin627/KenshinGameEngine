@@ -78,7 +78,21 @@ add_test(NAME render_kgeo
         # v5 quantized grid -> near-tie depth flips across runs
         -DTOLERANCE=8
         -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
-set_tests_properties(render_baseline render_kgeo PROPERTIES LABELS "gpu")
+# HW-path anchor: same reference, --no-hw. Route and no-hw render
+# byte-identically (verified after a13ba83), so both tests sharing one
+# reference pin that equivalence - a HW-only regression splits them.
+add_test(NAME render_kgeo_nohw
+    COMMAND ${CMAKE_COMMAND}
+        -DDEMO=$<TARGET_FILE:KENSHINDemo>
+        -DBUILDER=$<TARGET_FILE:kgeo_builder>
+        -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_kgeo_ref.bmp
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_nohw_out.bmp
+        -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
+        -DKGEO=1 -DPROC=knot -DLOD=1 -DNOHW=1
+        -DTOLERANCE=8
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
+set_tests_properties(render_baseline render_kgeo render_kgeo_nohw
+    PROPERTIES LABELS "gpu")
 
 add_test(NAME kenshin_tests COMMAND kenshin_tests)
 set_tests_properties(kenshin_tests PROPERTIES

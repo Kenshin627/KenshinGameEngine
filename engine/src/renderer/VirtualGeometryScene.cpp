@@ -176,6 +176,16 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   // v3 (tables-only) dag: pools stay empty, cluster offsets are already
   // PAGE-LOCAL (nothing to rebase - pages are the pool), and the page
   // machinery appends into the shared page tables.
+  // v5 gate (M7.1): the raster/decode shaders only speak the quantized
+  // v5 page format. A v3/v4 paged asset would flow through with EMPTY
+  // pageMetaV5/clusterMetaIndex tables -> 0-byte buffers -> silently
+  // dropped dispatches (a black viewport with zero diagnostics).
+  if (!dag.pagesQuantized) {
+    KENSHIN_ERROR(
+        "[vgscene] paged asset is pre-v5 (no quantized pages); rebuild it "
+        "with the current kgeo_builder - the shaders only decode v5");
+    return 0xFFFFFFFFu;  // the app checks and exits loudly
+  }
   m_paged = true;
   VgMeshRange range;
   range.clusterBegin = m_clusterCount;
@@ -198,10 +208,10 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
     m_clusterPage.push_back(page + pageBase);
   for (const auto& m : dag.pageMetaV5) {
     const u32 stepBits = *reinterpret_cast<const u32*>(&m.posStep);
-    m_pageMetaFlat.insert(m_pageMetaFlat.end(),
-                          {m.posBase, m.nrmBase, m.uvBase, m.idxBase,
-                           m.metaBase, m.vertexCount, m.indexCount,
-                           m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
+    m_pageMetaFlat.insert(
+        m_pageMetaFlat.end(),
+        {m.posBase, m.nrmBase, m.uvBase, m.idxBase, m.metaBase, m.vertexCount,
+         m.indexCount, m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
   }
   m_clusterMetaFlat.insert(m_clusterMetaFlat.end(),
                            dag.clusterMetaIndex.begin(),
@@ -240,8 +250,8 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
     const f32 r = cluster.boundsSphere.w;
     m_aabbs.emplace_back(c - r, 0.0f);
     m_aabbs.emplace_back(c + r, 0.0f);
-    m_aabbs.emplace_back(exactMaxEdge ? dag.clusterMaxEdge[ci] : 2.0f * r,
-                         0.0f, 0.0f, 0.0f);
+    m_aabbs.emplace_back(exactMaxEdge ? dag.clusterMaxEdge[ci] : 2.0f * r, 0.0f,
+                         0.0f, 0.0f);
   }
 
   // Mesh cull sphere: same union-of-bounds walk as addMesh.
@@ -309,7 +319,8 @@ void VirtualGeometryScene::onShutdown() {
   for (const u32 handle :
        {m_clusterBuffer, m_groupBuffer, m_positionBuffer, m_normalBuffer,
         m_uvBuffer, m_indexBuffer, m_instanceBuffer, m_clusterPageBuffer,
-        m_pageHeaderBuffer, m_pageTableBuffer, m_pageSlotPool})
+        m_clusterMetaBuffer, m_pageHeaderBuffer, m_pageTableBuffer,
+        m_pageSlotPool})
     if (handle != backend::IRenderBackend::kInvalidBufferHandle)
       m_backend->destroyBuffer(handle);
   m_pageTable = false;
@@ -340,15 +351,16 @@ u32 VirtualGeometryScene::flushPools(u32 slotCap) {
     m_clusterBuffer =
         upload(m_clusterData.data(), m_clusterData.size(), "vg-clusters");
     m_groupBuffer = upload(m_groupData.data(), m_groupData.size(), "vg-groups");
-    m_clusterPageBuffer =
-        upload(m_clusterPage.data(), m_clusterPage.size() * 4, "vg-clusterPage");
-    m_pageHeaderBuffer =
-        upload(m_pageMetaFlat.data(), m_pageMetaFlat.size() * 4, "vg-pageHeader");
-    m_clusterMetaBuffer = upload(m_clusterMetaFlat.data(),
-                                 m_clusterMetaFlat.size() * 4, "vg-clusterMeta");
+    m_clusterPageBuffer = upload(m_clusterPage.data(), m_clusterPage.size() * 4,
+                                 "vg-clusterPage");
+    m_pageHeaderBuffer = upload(m_pageMetaFlat.data(),
+                                m_pageMetaFlat.size() * 4, "vg-pageHeader");
+    m_clusterMetaBuffer =
+        upload(m_clusterMetaFlat.data(), m_clusterMetaFlat.size() * 4,
+               "vg-clusterMeta");
     m_pageSlotCount = std::min(m_pageCount, slotCap);
-    m_pageSlotPool = m_backend->createPageSlotPool(m_pageSlotCount,
-                                                   geometry::kPageSlotSize);
+    m_pageSlotPool =
+        m_backend->createPageSlotPool(m_pageSlotCount, geometry::kPageSlotSize);
     backend::IRenderBackend::BufferDesc ptDesc;
     ptDesc.size = usize(m_pageCount) * 4;
     ptDesc.usage = backend::IRenderBackend::BufferStorage |

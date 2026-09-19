@@ -6,6 +6,13 @@
 #   -DREF=<reference bmp>         -DOUT=<output bmp>
 #   -DEXEDIR=<exe dir: imgui.ini lives there>
 #   [-DKGEO=1 -DPROC=knot -DLOD=1]
+#   [-DNOHW=1  render with --no-hw]
+#
+# The NOHW variant anchors the HW-raster path: routing (default) and
+# --no-hw render byte-identically, so BOTH ctests compare against the
+# SAME reference - a regression that only touches the HW draw trips
+# the routed test while the no-hw test stays green (and a reference
+# regenerated on a broken build fails one of the two).
 #
 # Reference regeneration (after an INTENDED rendering change):
 #   1. cmake --build --preset windows-msvc-release
@@ -28,6 +35,10 @@ if(KGEO)
   set(EXTRA_ARGS --kgeo "${KGEO_FILE}" --lod-threshold "${LOD}")
 else()
   set(EXTRA_ARGS)
+endif()
+
+if(NOHW)
+  list(APPEND EXTRA_ARGS --no-hw)
 endif()
 
 execute_process(

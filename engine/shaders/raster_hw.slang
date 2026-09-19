@@ -196,7 +196,10 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
     idxBase = pool + ph.idxBase;
     posStep = ph.posStep;
     const uint ord = min(clusterMeta[itemC.y], ph.clusterCount - 1u);
-    const uint mb = pool + ph.metaBase + ord * 10u;
+    // The 10-word meta record must also fit the pool's u32 capacity
+    // (decode's metaEnd discipline - pageHeader fields are upload data,
+    // not payload-derived, but the clamp costs nothing).
+    const uint mb = min(pool + ph.metaBase + ord * 10u, positionCount - 10u);
     qm.posStartX = int(positions[mb]);
     qm.posStartY = int(positions[mb + 1u]);
     qm.posStartZ = int(positions[mb + 2u]);
@@ -253,13 +256,16 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
                         int3(qm.posStartX, qm.posStartY, qm.posStartZ);
         lp = float3(iq) * posStep;
       } else {
-        // v2: float4 elements as 4 u32 (w unused).
+        // v2: float4 elements as 4 u32 (w unused). Clamp in u32 WORD
+        // units - the capacity is the pool's word count; the old form
+        // clamped the vec4 ORDINAL against the 4x-larger word bound,
+        // admitting word reads up to 16N in a 4N pool.
         const uint ii = min(idxBase + cluster.indexOffset + tri * 3u + k,
                             indexCount - 1u);
-        const uint vi = min(indices[ii] + posBase + cluster.vertexOffset,
-                            positionCount - 1u);
-        lp = float3(asfloat(positions[vi * 4u]), asfloat(positions[vi * 4u + 1u]),
-                    asfloat(positions[vi * 4u + 2u]));
+        const uint vw = min((indices[ii] + posBase + cluster.vertexOffset) * 4u,
+                            positionCount - 3u);
+        lp = float3(asfloat(positions[vw]), asfloat(positions[vw + 1u]),
+                    asfloat(positions[vw + 2u]));
       }
       const float3 wp = model[0].xyz * lp.x + model[1].xyz * lp.y +
                         model[2].xyz * lp.z + model[3].xyz;

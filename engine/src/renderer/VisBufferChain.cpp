@@ -273,24 +273,25 @@ bool VisBufferChain::init(
   m_dummyU32[0] = makeDeviceBuffer(backend, 4, zero4, "chain-dummyU32a");
   m_dummyU32[1] = makeDeviceBuffer(backend, 4, zero4, "chain-dummyU32b");
   m_dummyU32[2] = makeDeviceBuffer(backend, 4, zero4, "chain-dummyPend");
-  const u32 zero24[6] = {};
-  m_dummyPageHeader = makeDeviceBuffer(backend, 24, zero24, "chain-dummyPh");
+  // v5 page headers are 12 u32 (48 B) - the dummy must match or a
+  // params-gate miss would read past a 24 B stand-in.
+  const u32 zero48[12] = {};
+  m_dummyPageHeader = makeDeviceBuffer(backend, 48, zero48, "chain-dummyPh");
 
   // M6.3 page_touch feedback: two pipeline instances (SW / HW pair
   // lists), per-slot host-visible bitmaps, the HW-list args convert.
   // Compiled/created in v2 runs too - page_touch.slang stays
   // regression-gated and the dispatch is a cheap no-op over dummies.
-  m_pageBitmapWords =
-      m_paged ? (m_pagedInputs.pageCount + 31u) / 32u : 1u;
+  m_pageBitmapWords = m_paged ? (m_pagedInputs.pageCount + 31u) / 32u : 1u;
   if (!makePipe("page_touch.slang", m_pipeTouchPairs)) return false;
   if (!makePipe("page_touch.slang", m_pipeTouchHw)) return false;
   if (!makePipe("count_to_indirect.slang", m_pipeConvertTouch)) return false;
   const u32 cfgTouch[4] = {0, 0, 7, m_maxPairs};  // groupsX = cull counters[7]
   m_cfgTouch = makeHostBuffer(backend, sizeof(cfgTouch), cfgTouch, "cfgT");
   for (u32 s = 0; s < kSlots; ++s) {
-    m_touched[s] = makeHostBuffer(
-        backend, usize(m_pageBitmapWords) * sizeof(u32), nullptr,
-        "chain-touched");
+    m_touched[s] =
+        makeHostBuffer(backend, usize(m_pageBitmapWords) * sizeof(u32), nullptr,
+                       "chain-touched");
     // Indirect dispatch args need the INDIRECT usage bit (the makeArgs
     // discipline - storage-only buffers validation-reject here and the
     // driver eventually wedges).
@@ -305,8 +306,9 @@ bool VisBufferChain::init(
   const u32 cfgExpand[4] = {64, 1, 0, m_maxPairs};
   const u32 cfgCull[4] = {64, 3, 0, m_maxPairs};
   const u32 cfgRaster[4] = {0, 0, 0, m_maxPairs};
-  const u32 cfgPost[4] = {0, 0, 5, m_maxPairs};      // post raster: src = cull [5]
-  const u32 cfgHwDraw[4] = {384, 0, 7, m_maxPairs};  // 3*128 verts, src = cull [7]
+  const u32 cfgPost[4] = {0, 0, 5, m_maxPairs};  // post raster: src = cull [5]
+  const u32 cfgHwDraw[4] = {384, 0, 7,
+                            m_maxPairs};  // 3*128 verts, src = cull [7]
   m_cfgExpand = makeHostBuffer(backend, sizeof(cfgExpand), cfgExpand, "cfgE");
   m_cfgCull = makeHostBuffer(backend, sizeof(cfgCull), cfgCull, "cfgC");
   m_cfgRaster = makeHostBuffer(backend, sizeof(cfgRaster), cfgRaster, "cfgR");
@@ -568,7 +570,11 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     for (int c = 0; c < 4; ++c) p[4 + c] = in.proj[c];
     p[8] = glm::vec4(f32(in.width), f32(in.height), 0.0f, in.nearZ);
     p[9] = glm::vec4(1.0f, m_paged ? 1.0f : 0.0f, 0.0f, f32(m_maxPairs));
-    for (int c = 10; c < 12; ++c) p[c] = glm::vec4(0.0f);
+    // [10] = the pool u32 capacities (the v5 clamp discipline: every
+    // meta/bit/word read in the paged branch is min-clamped against
+    // these; v2 gets the raw pool sizes - its float4 reads scale x4).
+    p[10] = glm::vec4(f32(m_positionCount), f32(m_indexCount), 0.0f, 0.0f);
+    p[11] = glm::vec4(0.0f);
     glm::vec4* pp =
         static_cast<glm::vec4*>(backend.mappedPtr(m_postRasterParams[slot]));
     for (int c = 0; c < 12; ++c) pp[c] = p[c];
@@ -612,9 +618,9 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // cap the no-wraparound proof breaks, so level-wise takes over.
   const bool persist = hier && in.cullMode == 2u && m_persistUsable;
   if (!hier) {
-    const u32 expandHandles[6] = {m_workItems[slot], m_expCnt[slot],
+    const u32 expandHandles[6] = {m_workItems[slot],   m_expCnt[slot],
                                   m_visibleList[slot], m_instanceBuffer,
-                                  m_meshRangeBuffer, m_pairCapBuffer};
+                                  m_meshRangeBuffer,   m_pairCapBuffer};
     backend.dispatchComputeIndirect(m_pipeExpand, expandHandles, 6,
                                     m_argsExpand[slot], 0);
     b(m_workItems[slot]);
@@ -741,10 +747,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   const u32 pagedClusterMeta =
       m_paged ? m_pagedInputs.clusterMeta : m_dummyU32[0];
   const u32 rasterHandles[12] = {
-      m_rasterParams[slot], m_positionBuffer, m_indexBuffer, m_clusterBuffer,
-      m_instanceBuffer,     m_pairs[slot],    m_vis[slot],   m_rasterCnt[slot],
-      pagedClusterPage,     pagedPageTable,   pagedPageHeader,
-      pagedClusterMeta};
+      m_rasterParams[slot], m_positionBuffer,  m_indexBuffer,
+      m_clusterBuffer,      m_instanceBuffer,  m_pairs[slot],
+      m_vis[slot],          m_rasterCnt[slot], pagedClusterPage,
+      pagedPageTable,       pagedPageHeader,   pagedClusterMeta};
   backend.dispatchComputeIndirect(m_pipeRaster, rasterHandles, 12,
                                   m_argsRaster[slot], 0);
 
@@ -795,11 +801,18 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     b(m_argsPostRaster[slot]);
     b(m_postRasterCnt[slot]);
 
-    const u32 postRasterHandles[12] = {
-        m_postRasterParams[slot], m_positionBuffer,   m_indexBuffer,
-        m_clusterBuffer,          m_instanceBuffer,   m_postPairs[slot],
-        m_vis[slot],              m_postRasterCnt[slot], pagedClusterPage,
-        pagedPageTable,           pagedPageHeader,    pagedClusterMeta};
+    const u32 postRasterHandles[12] = {m_postRasterParams[slot],
+                                       m_positionBuffer,
+                                       m_indexBuffer,
+                                       m_clusterBuffer,
+                                       m_instanceBuffer,
+                                       m_postPairs[slot],
+                                       m_vis[slot],
+                                       m_postRasterCnt[slot],
+                                       pagedClusterPage,
+                                       pagedPageTable,
+                                       pagedPageHeader,
+                                       pagedClusterMeta};
     backend.dispatchComputeIndirect(m_pipeRasterPost, postRasterHandles, 12,
                                     m_argsPostRaster[slot], 0);
     b(m_vis[slot]);
@@ -876,18 +889,11 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     // M6.3: bindings 7/8/9/10 = the paged tables + the pending counter
     // (the same rasterCnt[4] word the SW path skips count into; v2
     // binds dummies - the VS's paged reads are params-gated).
-    const u32 hwHandles[12] = {m_hwParams[slot],
-                               m_hwPairs[slot],
-                               m_clusterBuffer,
-                               m_positionBuffer,
-                               m_indexBuffer,
-                               m_instanceBuffer,
-                               m_vis[slot],
-                               pagedClusterPage,
-                               pagedPageTable,
-                               pagedPageHeader,
-                               m_rasterCnt[slot],
-                               pagedClusterMeta};
+    const u32 hwHandles[12] = {
+        m_hwParams[slot], m_hwPairs[slot],   m_clusterBuffer,
+        m_positionBuffer, m_indexBuffer,     m_instanceBuffer,
+        m_vis[slot],      pagedClusterPage,  pagedPageTable,
+        pagedPageHeader,  m_rasterCnt[slot], pagedClusterMeta};
     // 12 handles: binding 11 (clusterMeta) is the v5 meta table - the
     // count was left at 11 when the array grew, so the binding read
     // undefined data and HW-routed clusters decoded to garbage (holes).
@@ -1140,17 +1146,35 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
                         m_hierCnt[s][0], m_hierCnt[s][1], m_hierParams[s],
                         m_persistQueue[s], m_persistState[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
-    for (const u32 h :
-         {m_planes[s],     m_cntA[s],          m_visibleList[s],
-          m_workItems[s],  m_expCnt[s],        m_cullParams[s],
-          m_cullCnt[s],    m_pairs[s],         m_rasterParams[s],
-          m_rasterCnt[s],  m_vis[s],           m_hzb[s],
-          m_hzbParams[s],  m_pendingPairs[s],  m_postPairs[s],
-          m_postParams[s], m_postRasterCnt[s], m_argsExpand[s],
-          m_argsCull[s],   m_argsRaster[s],    m_argsPostRaster[s],
-          m_hwPairs[s],    m_hwParams[s],      m_hwDrawArgs[s],
-          m_argsHzb1[s],   m_argsPostCull[s],  m_touched[s],
-          m_argsTouch[s],  m_postRasterParams[s]})
+    for (const u32 h : {m_planes[s],
+                        m_cntA[s],
+                        m_visibleList[s],
+                        m_workItems[s],
+                        m_expCnt[s],
+                        m_cullParams[s],
+                        m_cullCnt[s],
+                        m_pairs[s],
+                        m_rasterParams[s],
+                        m_rasterCnt[s],
+                        m_vis[s],
+                        m_hzb[s],
+                        m_hzbParams[s],
+                        m_pendingPairs[s],
+                        m_postPairs[s],
+                        m_postParams[s],
+                        m_postRasterCnt[s],
+                        m_argsExpand[s],
+                        m_argsCull[s],
+                        m_argsRaster[s],
+                        m_argsPostRaster[s],
+                        m_hwPairs[s],
+                        m_hwParams[s],
+                        m_hwDrawArgs[s],
+                        m_argsHzb1[s],
+                        m_argsPostCull[s],
+                        m_touched[s],
+                        m_argsTouch[s],
+                        m_postRasterParams[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
   }
   // M6.3: in paged mode the pool/table handles are CALLER-owned - only
@@ -1160,8 +1184,8 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
        {m_instanceBuffer, m_meshRangeBuffer, m_clusterBuffer, m_groupBuffer,
         m_paged ? m_dummyU32[0] : m_positionBuffer,
         m_paged ? m_dummyU32[1] : m_indexBuffer, m_dummyU32[2],
-        m_dummyPageHeader, m_cfgExpand, m_cfgCull, m_cfgRaster,
-        m_cfgPost, m_cfgHwDraw, m_cfgPostCull, m_aabbBuffer, m_hierBuffer,
+        m_dummyPageHeader, m_cfgExpand, m_cfgCull, m_cfgRaster, m_cfgPost,
+        m_cfgHwDraw, m_cfgPostCull, m_aabbBuffer, m_hierBuffer,
         m_groupRangeBuffer, m_meshHierRootBuffer, m_cfgTouch})
     if (h != kInvalid && h != 0) backend.destroyBuffer(h);
   if (m_pairCapBuffer != kInvalid && m_pairCapBuffer != 0)

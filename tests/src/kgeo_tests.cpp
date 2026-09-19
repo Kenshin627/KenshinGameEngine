@@ -1,7 +1,7 @@
 // S3.3: .kgeo roundtrip tests.
 
-#include <catch2/catch_test_macros.hpp>
 #include <algorithm>
+#include <catch2/catch_test_macros.hpp>
 #include <cstdio>
 #include <map>
 #include <string>
@@ -10,11 +10,12 @@
 #include "kenshin/assets/MeshData.h"
 #include "kenshin/geometry/ClusterDag.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
-#include "kenshin/geometry/KGeoFile.h"
 #include "kenshin/geometry/ClusterQuant.h"
+#include "kenshin/geometry/KGeoFile.h"
 #include "kenshin/geometry/PagePacker.h"
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
+#include "kenshin/renderer/VirtualGeometryScene.h"
 
 namespace {
 bool buildDag(const kenshin::assets::MeshData& mesh,
@@ -142,8 +143,8 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
       const auto level = dag.groups[dag.clusters[c].group].lodLevel;
       const auto page = pg.clusterPage[c];
       auto& r = levelPages[level];
-      r.first = std::min(r.first == 0 && r.second == 0 ? 0xFFFFFFFFu : r.first,
-                         page);
+      r.first =
+          std::min(r.first == 0 && r.second == 0 ? 0xFFFFFFFFu : r.first, page);
       r.second = std::max(r.second, page);
     }
     kenshin::u32 prevMax = 0;  // max page of the level(s) processed so far
@@ -157,8 +158,8 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
   }
 
   // v3 write + table-only read (readKGeo dispatches on the header).
-  REQUIRE(kenshin::geometry::writeKGeoPaged("out/roundtrip_v3.kgeo", dag, pg,
-                                            log));
+  REQUIRE(
+      kenshin::geometry::writeKGeoPaged("out/roundtrip_v3.kgeo", dag, pg, log));
   kenshin::geometry::ClusterDag loaded;
   REQUIRE(kenshin::geometry::readKGeo("out/roundtrip_v3.kgeo", loaded, log));
   INFO("log: " << log);
@@ -213,27 +214,24 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
     REQUIRE(reader.readPage(loaded.clusterPage[c], blob, log));
     const auto* words = reinterpret_cast<const kenshin::u32*>(blob.data());
     kenshin::geometry::ClusterQuantMeta meta;
-    std::memcpy(&meta,
-                words + m.metaBase +
-                    kenshin::usize(loaded.clusterMetaIndex[c]) * 10,
-                10 * sizeof(kenshin::u32));
-    const kenshin::u32 b[3] = {meta.widths & 0xFu,
-                               (meta.widths >> 4) & 0xFu,
+    std::memcpy(
+        &meta,
+        words + m.metaBase + kenshin::usize(loaded.clusterMetaIndex[c]) * 10,
+        10 * sizeof(kenshin::u32));
+    const kenshin::u32 b[3] = {meta.widths & 0xFu, (meta.widths >> 4) & 0xFu,
                                (meta.widths >> 8) & 0xFu};
     const kenshin::u32 nV = cl.vertexCount;
     const kenshin::u64 axisBase[3] = {
         kenshin::u64(meta.posWordOff) * 32,
         kenshin::u64(meta.posWordOff) * 32 + kenshin::u64(nV) * b[0],
-        kenshin::u64(meta.posWordOff) * 32 +
-            kenshin::u64(nV) * (b[0] + b[1])};
+        kenshin::u64(meta.posWordOff) * 32 + kenshin::u64(nV) * (b[0] + b[1])};
     const kenshin::u32* posSec = words + m.posBase;
     for (kenshin::u32 v = 0; v < nV; ++v) {
       kenshin::f32 dec[3];
       for (int a = 0; a < 3; ++a) {
         const kenshin::u32 bits = kenshin::geometry::readBits(
             posSec, axisBase[a] + kenshin::u64(v) * b[a], b[a]);
-        dec[a] =
-            kenshin::f32(kenshin::i32(bits) + meta.posStart[a]) * step;
+        dec[a] = kenshin::f32(kenshin::i32(bits) + meta.posStart[a]) * step;
       }
       const kenshin::f32* mirror =
           pg.decodedPositions.data() +
@@ -266,4 +264,18 @@ TEST_CASE("kgeo page reader rejects v2", "[geometry][kgeo][paged]") {
   kenshin::geometry::KGeoPageReader reader;
   REQUIRE_FALSE(reader.open("out/v2only.kgeo", log));
   std::remove("out/v2only.kgeo");
+}
+
+TEST_CASE("scene rejects pre-v5 paged dags", "[geometry][kgeo][paged]") {
+  // The v5 gate (M7.1 follow-up): raster/decode shaders only speak the
+  // quantized v5 page format. A v3/v4 paged dag must be rejected loudly
+  // at addMeshPaged - flowing through would build empty v5 tables, and
+  // the backend silently drops every dispatch (black viewport, zero
+  // diagnostics). The gate fires before any backend use.
+  kenshin::renderer::VirtualGeometryScene scene;
+  kenshin::geometry::ClusterDag dag;
+  dag.paged = true;
+  dag.pagesQuantized = false;
+  dag.pageCount = 4;
+  REQUIRE(scene.addMeshPaged(dag) == 0xFFFFFFFFu);
 }
