@@ -50,6 +50,11 @@ struct SoftRasterFrame {
   /// HW path culls (CW-as-viewed). False (the S4.4 differential's
   /// convention) keeps the y-up cull sign.
   bool yFlip = false;
+  /// SW-raster scheduling mode (params[11].x): 0 = the baseline walk,
+  /// 1 = the bit-identical optimized scheduling. The one-shot path is
+  /// the differential REFERENCE - tests set this to run the mirror
+  /// against both modes.
+  u32 rasterMode = 0;
 };
 
 /// Pack the params SSBO (float4[12]): [0..3] view columns,

@@ -97,11 +97,11 @@ struct CpuRaster {
                            static_cast<float>(frame.height));
         const auto rasterTri = [&](const glm::vec3& a, const glm::vec3& b,
                                    const glm::vec3& c) {
-          rasterTriangle(
-              applyMat4(frame.proj, a, wh), applyMat4(frame.proj, b, wh),
-              applyMat4(frame.proj, c, wh), applyMat4Z(frame.proj, a),
-              applyMat4Z(frame.proj, b), applyMat4Z(frame.proj, c), u32(p),
-              t, stats);
+          rasterTriangle(applyMat4(frame.proj, a, wh),
+                         applyMat4(frame.proj, b, wh),
+                         applyMat4(frame.proj, c, wh),
+                         applyMat4Z(frame.proj, a), applyMat4Z(frame.proj, b),
+                         applyMat4Z(frame.proj, c), u32(p), t, stats);
         };
         if (poly.size() == 3)
           rasterTri(poly[0], poly[1], poly[2]);
@@ -115,8 +115,7 @@ struct CpuRaster {
   }
 
   void rasterTriangle(glm::vec2 s0f, glm::vec2 s1f, glm::vec2 s2f, float z0,
-                      float z1, float z2, u32 pairIdx, u32 triIdx,
-                      u32* stats) {
+                      float z1, float z2, u32 pairIdx, u32 triIdx, u32* stats) {
     // M4.1 mirror: 16.8 subpixel fixed point + int64 edge functions +
     // the DX top-left tie rule (rasterize_sw.slang's new core).
     constexpr int SUBPIXEL = 256;
@@ -270,48 +269,55 @@ TEST_CASE("software rasterizer GPU/CPU differential", "[gpu][swraster]") {
         u32 cpuStats[4] = {};
         cpu.run(pairs, insts, scene.spans, cpuStats);
 
-        std::vector<u64> gpuVis;
-        u32 gpuStats[4] = {};
-        REQUIRE(renderer::rasterizeOnGpu(
-            *backend, shaders, frame, scene.positions, scene.indices,
-            scene.clusterData, insts, pairs, gpuVis, gpuStats));
+        // Both scheduling modes against the SAME CPU mirror: mode 1
+        // (the row-span clamp) must be indistinguishable from mode 0
+        // at the independent ground truth (the mirror walks full rows).
+        for (const u32 rasterMode : {0u, 1u}) {
+          frame.rasterMode = rasterMode;
+          std::vector<u64> gpuVis;
+          u32 gpuStats[4] = {};
+          REQUIRE(renderer::rasterizeOnGpu(
+              *backend, shaders, frame, scene.positions, scene.indices,
+              scene.clusterData, insts, pairs, gpuVis, gpuStats));
 
-        // Depth bits may differ by a few float32 ulps on generic-slope
-        // triangles: the host and the SPIR-V contract FMAs differently.
-        // The S4.4 cases were authored with constant/nice-slope depths so
-        // rounding could not diverge; the S4.5 proj fix (params[4..7] is the
-        // PROJECTION, not world->NDC - a double-view bug this differential
-        // shared on both sides) made the near-clip quad generic-slope. The
-        // payload (cluster | triangle) must still match EXACTLY - only the
-        // depth bits get the tolerance.
-        const auto tolerantEqual = [](u64 a, u64 b) {
-          if (a == b) return true;
-          if ((a & 0xFFFFFFFFull) != (b & 0xFFFFFFFFull)) return false;
-          const u64 da = a >> 32, db = b >> 32;
-          return (da > db ? da - db : db - da) <= (1ull << 12);
-        };
-        u64 mismatches = 0;
-        std::string first;
-        for (usize i = 0; i < cpu.vis.size(); ++i)
-          if (!tolerantEqual(cpu.vis[i], gpuVis[i])) {
-            if (mismatches == 0)
-              first = "pixel " + std::to_string(i % frame.width) + "," +
-                      std::to_string(i / frame.width) + " cpu " +
-                      std::to_string(cpu.vis[i]) + " gpu " +
-                      std::to_string(gpuVis[i]);
-            ++mismatches;
-          }
-        INFO("[" << name << "] cpu writes " << cpuStats[1] << " gpu writes "
-                 << gpuStats[1] << ", mismatches " << mismatches
-                 << (first.empty() ? "" : " first: " + first));
-        REQUIRE(mismatches == 0);
-        // Pixel-write counts may differ by a couple at exact w == 0 ties
-        // (host vs SPIR-V FMA decides the tie differently) - the per-pixel
-        // VisBuffer compare above is the real gate.
-        REQUIRE(std::abs(static_cast<long long>(cpuStats[1]) -
-                         static_cast<long long>(gpuStats[1])) <= 2);
-        REQUIRE(cpuStats[2] == gpuStats[2]);
-        REQUIRE(cpuStats[3] == gpuStats[3]);
+          // Depth bits may differ by a few float32 ulps on generic-slope
+          // triangles: the host and the SPIR-V contract FMAs differently.
+          // The S4.4 cases were authored with constant/nice-slope depths so
+          // rounding could not diverge; the S4.5 proj fix (params[4..7] is the
+          // PROJECTION, not world->NDC - a double-view bug this differential
+          // shared on both sides) made the near-clip quad generic-slope. The
+          // payload (cluster | triangle) must still match EXACTLY - only the
+          // depth bits get the tolerance.
+          const auto tolerantEqual = [](u64 a, u64 b) {
+            if (a == b) return true;
+            if ((a & 0xFFFFFFFFull) != (b & 0xFFFFFFFFull)) return false;
+            const u64 da = a >> 32, db = b >> 32;
+            return (da > db ? da - db : db - da) <= (1ull << 12);
+          };
+          u64 mismatches = 0;
+          std::string first;
+          for (usize i = 0; i < cpu.vis.size(); ++i)
+            if (!tolerantEqual(cpu.vis[i], gpuVis[i])) {
+              if (mismatches == 0)
+                first = "pixel " + std::to_string(i % frame.width) + "," +
+                        std::to_string(i / frame.width) + " cpu " +
+                        std::to_string(cpu.vis[i]) + " gpu " +
+                        std::to_string(gpuVis[i]);
+              ++mismatches;
+            }
+          INFO("[" << name << " mode " << rasterMode << "] cpu writes "
+                   << cpuStats[1] << " gpu writes " << gpuStats[1]
+                   << ", mismatches " << mismatches
+                   << (first.empty() ? "" : " first: " + first));
+          REQUIRE(mismatches == 0);
+          // Pixel-write counts may differ by a couple at exact w == 0 ties
+          // (host vs SPIR-V FMA decides the tie differently) - the per-pixel
+          // VisBuffer compare above is the real gate.
+          REQUIRE(std::abs(static_cast<long long>(cpuStats[1]) -
+                           static_cast<long long>(gpuStats[1])) <= 2);
+          REQUIRE(cpuStats[2] == gpuStats[2]);
+          REQUIRE(cpuStats[3] == gpuStats[3]);
+        }
       };
 
   SECTION("smoke: full-screen triangle") {
@@ -440,29 +446,35 @@ TEST_CASE("software rasterizer GPU/CPU differential - Y-FLIPPED",
     CpuRaster cpu{frame, s.positions, s.indices, {}};
     u32 cpuStats[4] = {};
     cpu.run(pairs, insts, s.spans, cpuStats);
-    std::vector<u64> gpuVis;
-    u32 gpuStats[4] = {};
-    REQUIRE(renderer::rasterizeOnGpu(*backend, shaders, frame, s.positions,
-                                     s.indices, s.clusterData, insts, pairs,
-                                     gpuVis, gpuStats));
-    const auto tolerantEqual = [](u64 a, u64 b) {
-      if (a == b) return true;
-      if ((a & 0xFFFFFFFFull) != (b & 0xFFFFFFFFull)) return false;
-      const u64 da = a >> 32, db = b >> 32;
-      return (da > db ? da - db : db - da) <= (1ull << 12);
-    };
-    u64 mismatches = 0;
-    for (usize i = 0; i < cpu.vis.size(); ++i)
-      if (!tolerantEqual(cpu.vis[i], gpuVis[i])) ++mismatches;
-    INFO("[" << name << "] cpu nz " <<
-         [&] {
-           u64 n = 0;
-           for (const u64 v : cpu.vis) n += v != 0;
-           return n;
-         }() << " mismatches "
-             << mismatches);
-    REQUIRE(mismatches == 0);
-    REQUIRE(cpuStats[2] == gpuStats[2]);
+    // Both scheduling modes against the same CPU mirror (mode 1's span
+    // clamp claims yFlip independence via post-canonicalization winding
+    // - this differential is where that claim is proven).
+    for (const u32 rasterMode : {0u, 1u}) {
+      frame.rasterMode = rasterMode;
+      std::vector<u64> gpuVis;
+      u32 gpuStats[4] = {};
+      REQUIRE(renderer::rasterizeOnGpu(*backend, shaders, frame, s.positions,
+                                       s.indices, s.clusterData, insts, pairs,
+                                       gpuVis, gpuStats));
+      const auto tolerantEqual = [](u64 a, u64 b) {
+        if (a == b) return true;
+        if ((a & 0xFFFFFFFFull) != (b & 0xFFFFFFFFull)) return false;
+        const u64 da = a >> 32, db = b >> 32;
+        return (da > db ? da - db : db - da) <= (1ull << 12);
+      };
+      u64 mismatches = 0;
+      for (usize i = 0; i < cpu.vis.size(); ++i)
+        if (!tolerantEqual(cpu.vis[i], gpuVis[i])) ++mismatches;
+      INFO("[" << name << " mode " << rasterMode << "] cpu nz " <<
+           [&] {
+             u64 n = 0;
+             for (const u64 v : cpu.vis) n += v != 0;
+             return n;
+           }() << " mismatches "
+               << mismatches);
+      REQUIRE(mismatches == 0);
+      REQUIRE(cpuStats[2] == gpuStats[2]);
+    }
   };
 
   {

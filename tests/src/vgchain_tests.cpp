@@ -6,10 +6,12 @@
 // the VisBuffers must match EXACTLY, pixel for pixel.
 
 #include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <map>
 #include <vector>
 
 #include "kenshin/backend/RenderBackend.h"
@@ -167,9 +169,21 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
   // HW depth bits are perspective-correct (a documented divergence) -
   // this differential pins chain-vs-one-shot structural equivalence.
   inputs.hwMode = 0;
+  // Per-cullMode probe histograms recorded by the mode-0 passes; the
+  // mode-1 passes must reproduce them exactly (the pin lives inside
+  // runChainMode, below the readRasterProbe read).
+  std::map<u32, std::array<u32, 8>> probeHistByCull;
 
-  const auto runChainMode = [&](u32 cullMode) {
+  const auto runChainMode = [&](u32 cullMode, u32 rasterMode) {
     inputs.cullMode = cullMode;
+    // rasterMode 1 (the optimized scheduling: exact-int64 row-span
+    // clamp + per-thread stat aggregation) must reproduce the one-shot
+    // reference BITS exactly - only which pixels get tested (never
+    // written) and how the counters accumulate change. The probe rides
+    // along on every pass; its totals cross-check the same frame's
+    // counters.
+    inputs.rasterMode = rasterMode;
+    inputs.rasterProbe = 1;
     backend::FrameBeginInfo frameInfo;
     frameInfo.width = W;
     frameInfo.height = H;
@@ -210,10 +224,41 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
     INFO("cullMode " << cullMode << ": vis pixels " << visOneShot.size()
                      << ", mismatches " << mismatches);
     REQUIRE(mismatches == 0);
+    // The probe's pixel sum must equal main + post px writes of the
+    // SAME frame (both dispatches share the histogram buffer; hwMode 0
+    // keeps raster_hw's pending[1] add out of rasterCnt[1]). Safe to
+    // read mapped: readStats' blocking readbacks drained the queue.
+    u32 ph[8] = {};
+    REQUIRE(chain.readRasterProbe(*backend, ph, /*lastCompleted=*/true));
+    INFO("cullMode " << cullMode << " rasterMode " << rasterMode
+                     << " probe: pix " << ph[6] << " tris " << ph[7]
+                     << " buckets " << ph[0] << "/" << ph[1] << "/" << ph[2]
+                     << "/" << ph[3] << "/" << ph[4] << "/" << ph[5]);
+    REQUIRE(ph[6] == stats[5] + stats[10]);
+    REQUIRE(ph[7] > 0);
+    // The buckets partition the counted triangles - a violation means
+    // the probe itself wrote garbage.
+    REQUIRE(ph[0] + ph[1] + ph[2] + ph[3] + ph[4] + ph[5] == ph[7]);
+    // Mode invariance: the histogram is a pure function of each
+    // triangle's covered pixels, so mode 1 must reproduce mode 0's
+    // buckets per cull driver exactly - a strictly stronger pin than
+    // the pixel-sum total above.
+    auto& stored = probeHistByCull[cullMode];
+    if (rasterMode == 0) {
+      for (int k = 0; k < 8; ++k) stored[k] = ph[k];
+    } else {
+      REQUIRE(stored[7] != 0);  // the mode-0 pass recorded first
+      for (int k = 0; k < 8; ++k) REQUIRE(stored[k] == ph[k]);
+    }
   };
-  runChainMode(0);  // linear: the expand+per-cluster reference shape
-  runChainMode(1);  // M5.2: the level-wise BVH8 traversal
-  runChainMode(2);  // M5.3: the persistent-threads MPMC traversal
+  runChainMode(0, 0);  // linear: the expand+per-cluster reference shape
+  runChainMode(1, 0);  // M5.2: the level-wise BVH8 traversal
+  runChainMode(2, 0);  // M5.3: the persistent-threads MPMC traversal
+  // The optimized scheduling against every cull driver (each must
+  // still match the mode-0 one-shot bits).
+  runChainMode(1, 1);
+  runChainMode(0, 1);
+  runChainMode(2, 1);
 
   chain.onShutdown(*backend);
   backend->shutdown();
@@ -417,12 +462,20 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   // configs: occ on/off VisBuffer equality is the M3.3 differential's
   // proven strong form, and cullMode 0/1/2 equality is the M5.2/M5.3
   // chain-vs-one-shot result - here they re-verify through the PAGED
-  // addressing path.
-  for (u32 config = 0; config < 6; ++config) {
-    const u32 cullMode = config % 3;  // 0 linear / 1 level / 2 persist
-    const bool occ = config < 3;
+  // addressing path. Configs 6/7 add the rasterMode-1 scheduling
+  // through the paged (v5) addressing - bit-identical to the same
+  // reference.
+  const u32 cfgTable[8][3] = {
+      // cullMode, occ, rasterMode
+      {0, 1, 0}, {1, 1, 0}, {2, 1, 0}, {0, 0, 0},
+      {1, 0, 0}, {2, 0, 0}, {1, 1, 1}, {0, 0, 1},
+  };
+  for (u32 config = 0; config < 8; ++config) {
+    const u32 cullMode = cfgTable[config][0];
+    const bool occ = cfgTable[config][1] != 0;
     inputs.cullMode = cullMode;
     inputs.occlusionEnabled = occ;
+    inputs.rasterMode = cfgTable[config][2];
     renderer::VisBufferChain chain;
     REQUIRE(chain.init(*backend, shaders, {}, {}, pagedClusterData, groupData,
                        hierarchyData, groupRanges, meshHierRoots, instances,
@@ -474,6 +527,7 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   // Restore the default inputs (Subject 1's sweep mutated them).
   inputs.cullMode = 1;
   inputs.occlusionEnabled = true;
+  inputs.rasterMode = 0;
   // ---- Subject 1b: FORCE-HW paged chain (hwMode 2). Every cluster
   // routes through raster_hw's paged v5 decode + the 12-handle
   // drawNullIndirect - the exact app-default wiring where the a13ba83

@@ -26,7 +26,12 @@
 //                          camera's own Y-FLIPPED matrix - rows then
 //                          arrive in framebuffer order),
 //                          [8] = (width, height, pairCount, nearZ),
-//                          [9].x = yFlip flag (cull-sign selector)
+//                          [9].x = yFlip flag (cull-sign selector),
+//                          [11].x = rasterMode (1 = the optimized
+//                          scheduling: exact-int64 row-span clamp +
+//                          per-thread pixel-count aggregation; the
+//                          output is bit-identical to mode 0),
+//                          [11].y = coverage-probe flag (binding 12)
 //   1: float3 positions[] - mesh-local vertex pool (world = model * local)
 //   2: uint   indices[]   - shared index pool
 //   3: GpuCluster clusters[] - 48B, mirrors packGpuCluster
@@ -43,6 +48,13 @@
 //                              = not resident; v2: dummy)
 //  10: GpuPageHeader pageHeader[] - M6.3 paged: per-page section
 //                              element bases (v2: dummy)
+//  12: uint  probeStats[8] - coverage histogram (params[11].y gated;
+//                              written by BOTH the main and post
+//                              dispatches of a frame): [0..5] triangles
+//                              whose covered-pixel count is 0 / 1 /
+//                              2-4 / 5-16 / 17-64 / >64, [6] = sum of
+//                              covered pixels, [7] = triangles that
+//                              reached rasterization.
 //
 // M6.3 paged addressing: params[9].y != 0 switches bindings 1/2 to the
 // PAGE SLOT POOL - cluster offsets are then PAGE-LOCAL and each read
@@ -132,6 +144,7 @@ static const uint kSlotU32s = 32768;
 [[vk::binding(9)]] StructuredBuffer<uint>          pageTable;
 [[vk::binding(10)]] StructuredBuffer<GpuPageHeader> pageHeader;
 [[vk::binding(11)]] StructuredBuffer<uint> clusterMeta;  // v5: per-cluster ordinal into its page's meta array
+[[vk::binding(12)]] RWStructuredBuffer<uint> probeStats;  // params[11].y-gated coverage histogram
 
 groupshared float3 sViewPos[256];
 
@@ -168,7 +181,27 @@ int64_t edgeW(int64_t ex, int64_t ey, int64_t px, int64_t py, int64_t vx, int64_
     return ex * (py - vy) - ey * (px - vx);
 }
 
-void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
+// Floor division for the exact row-span clamp (rasterMode 1),
+// restricted to a POSITIVE divisor: both branches divide only
+// NON-NEGATIVE operands, so the result is independent of whatever
+// rounding/sign convention the compiler gives signed `/` (the first
+// cut trusted C-style truncation + a remainder fixup and produced
+// off-by-one bounds - 539/3072 differential mismatches).
+// VALIDITY DOMAIN: the exactness argument (span never excludes a
+// pixel the stepping loop would accept) holds while no intermediate
+// edge value overflows int64 - guaranteed for on-screen geometry
+// (|w| < 2^47), but a near-plane grazing mega-triangle projecting to
+// ~+/-8M pixels could wrap mode 0's stepping mod 2^64 and "resurrect"
+// pixels this clamp skips. Pre-existing UB-adjacent behavior in mode
+// 0's own edgeW at that extreme; documented rather than guarded (the
+// guard would cost every row).
+int64_t floorDivPos(int64_t a, int64_t b)  // b > 0
+{
+    if (a >= 0) return a / b;
+    return -((-a + b - 1) / b);
+}
+
+uint rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
                        float z0, float z1, float z2,
                        uint2 widthHeight, uint pairIdx, uint triIdx)
 {
@@ -187,12 +220,12 @@ void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
     // area>0 - the same CW-as-viewed half the HW path's CCW-front
     // culling drops.
     const int64_t area2 = (X1 - X0) * (Y2 - Y0) - (Y1 - Y0) * (X2 - X0);
-    if (area2 == 0) return;
+    if (area2 == 0) return 0u;
     const int64_t cullSign = params[9].x > 0.5 ? 1 : -1;
     if (area2 * cullSign > 0)
     {
         InterlockedAdd(counters[2], 1);
-        return;
+        return 0u;
     }
     // Canonicalize to positive area (swap v1/v2; the payload names the
     // triangle by index, not by corner order).
@@ -228,7 +261,7 @@ void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
     y0 = max(y0, 0);
     x1 = min(x1, int(widthHeight.x) - 1);
     y1 = min(y1, int(widthHeight.y) - 1);
-    if (x0 > x1 || y0 > y1) return;
+    if (x0 > x1 || y0 > y1) return 0u;
 
     // Screen-space affine depth through the QUANTIZED corners (floats
     // in pixel units; exactly representable, same solve on the CPU).
@@ -253,6 +286,25 @@ void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
     const float2 p00 = float2(float(px0), float(py0)) * (1.0 / 256.0);
     const float z00 = z0 + ra * (p00.x - q0.x) + rb * (p00.y - q0.y);
 
+    // rasterMode 1 (params[11].x): the exact-int64 row-span clamp -
+    // Karis' scanline variant (SIGGRAPH 2021 §11.7) in integer form.
+    // Along a row the edge value is W(x) = w - ey*SUBPIXEL*(x - x0)
+    // (the loop's own step), so each edge's inside test W(x) >= t
+    // constrains x to a half-interval: ey > 0 gives an UPPER bound
+    // x0 + floor((w-t)/(ey*256)), ey < 0 a LOWER bound
+    // x0 + ceil((w-t)/(ey*256)), ey == 0 either no constraint or an
+    // empty row. Intersecting the three intervals with [x0, x1] skips
+    // only pixels that PROVABLY fail an edge test - the surviving
+    // pixels still run the exact int64 tests, so the written words are
+    // bit-identical to mode 0. Gated to rows wider than 4 pixels (the
+    // per-row three int64 divisions only pay off on wide rows; Karis'
+    // own threshold). The row-span skip also drops the dead z stepping
+    // on the right side, but the LEFT side must still walk z += ra
+    // from x0: z's depth bits depend on the exact SEQUENCE of float
+    // additions, and a closed-form jump rounds differently.
+    const bool optMode = params[11].x > 0.5;
+
+    uint pix = 0;
     for (int y = y0; y <= y1; ++y)
     {
         const int64_t dySub = int64_t(y) * SUBPIXEL + 128 - py0;
@@ -261,16 +313,68 @@ void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
         int64_t w2 = w2r0 + e2x * dySub;
         const float ry = float(dySub) * (1.0 / 256.0);
         float z = z00 + rb * ry;
-        for (int x = x0; x <= x1; ++x)
+        int xs = x0, xe = x1;
+        if (optMode && (x1 - x0) > 4)
+        {
+            // Per edge (divisor kept positive; ceil(D/-B) == -floor(D/B)):
+            //   ey > 0: upper bound x0 + floor((w-t) / (ey*256))
+            //   ey < 0: lower bound x0 - floor((w-t) / (-ey*256))
+            //   ey == 0: no constraint, or the whole row fails.
+            // Explicit ternaries instead of min/max on int64 (belt and
+            // braces - no reliance on int64 intrinsic overloads).
+            int64_t lo = int64_t(x0), hi = int64_t(x1);
+            bool empty = false;
+            if (e0y == 0) { if (w0 < t0) empty = true; }
+            else if (e0y > 0) {
+                const int64_t c = int64_t(x0) + floorDivPos(w0 - t0, e0y * SUBPIXEL);
+                hi = c < hi ? c : hi;
+            } else {
+                const int64_t c = int64_t(x0) - floorDivPos(w0 - t0, -e0y * SUBPIXEL);
+                lo = c > lo ? c : lo;
+            }
+            if (e1y == 0) { if (w1 < t1) empty = true; }
+            else if (e1y > 0) {
+                const int64_t c = int64_t(x0) + floorDivPos(w1 - t1, e1y * SUBPIXEL);
+                hi = c < hi ? c : hi;
+            } else {
+                const int64_t c = int64_t(x0) - floorDivPos(w1 - t1, -e1y * SUBPIXEL);
+                lo = c > lo ? c : lo;
+            }
+            if (e2y == 0) { if (w2 < t2) empty = true; }
+            else if (e2y > 0) {
+                const int64_t c = int64_t(x0) + floorDivPos(w2 - t2, e2y * SUBPIXEL);
+                hi = c < hi ? c : hi;
+            } else {
+                const int64_t c = int64_t(x0) - floorDivPos(w2 - t2, -e2y * SUBPIXEL);
+                lo = c > lo ? c : lo;
+            }
+            if (empty || lo > hi) continue;
+            xs = int(lo);
+            xe = int(hi);
+        }
+        // The walk keeps mode 0's stepping sequence LITERALLY: one loop
+        // from x0, the span only gates which pixels run the test/write.
+        // A jump start (advance w by exact int64 math + run z += ra in
+        // a dead pre-loop) is NOT bit-safe: Slang reassociates the pure
+        // float induction loop into a multiply, and any closed form of
+        // z(xs) rounds differently than the sequential adds (measured:
+        // 483/3072 differential mismatches). Left-skipped pixels still
+        // pay the cheap int64/f32 increments; right-skipped pixels walk
+        // nothing; empty rows skip wholesale.
+        for (int x = x0; x <= xe; ++x)
         {
             // Inside = strictly positive, or exactly zero on a
             // top/left edge (w >= t with t = 0/1 encodes both).
-            if (w0 >= t0 && w1 >= t1 && w2 >= t2)
+            if (x >= xs && w0 >= t0 && w1 >= t1 && w2 >= t2)
             {
                 const uint64_t packed = packPixel(z, pairIdx, triIdx);
                 InterlockedMax(visBuffer[uint(y) * widthHeight.x + uint(x)],
                                packed);
-                InterlockedAdd(counters[1], 1);
+                // Mode 0 keeps the historical per-pixel stat atomic
+                // (the differential baseline); mode 1 counts locally
+                // and the caller adds the thread's total once.
+                if (!optMode) InterlockedAdd(counters[1], 1);
+                ++pix;
             }
             // x advances ONE PIXEL = SUBPIXEL subpixels: the edge delta is
             // -ey * SUBPIXEL (the row step multiplies by dySub for the same
@@ -282,6 +386,7 @@ void rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
             z += ra;
         }
     }
+    return pix;
 }
 
 uint clipNear(float3 v0, float3 v1, float3 v2, float nearZ,
@@ -501,6 +606,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     const float2 wh = widthHeight;
     const uint2 whU = widthHeightU;
 
+    uint localPix = 0;
     if (polyN == 3)
     {
         // Project each view-space point inline (Slang has no capturing
@@ -508,7 +614,8 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         const float2 sa = screenOf(pa, vpC0, vpC1, vpC2, vpC3, wh);
         const float2 sb = screenOf(pb, vpC0, vpC1, vpC2, vpC3, wh);
         const float2 sc = screenOf(pc, vpC0, vpC1, vpC2, vpC3, wh);
-        rasterizeTriangle(sa, sb, sc, ndcZOf(pa, vpC0, vpC1, vpC2, vpC3),
+        localPix = rasterizeTriangle(sa, sb, sc,
+                          ndcZOf(pa, vpC0, vpC1, vpC2, vpC3),
                           ndcZOf(pb, vpC0, vpC1, vpC2, vpC3),
                           ndcZOf(pc, vpC0, vpC1, vpC2, vpC3),
                           whU, pairIdx, gtid.x);
@@ -524,7 +631,30 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         const float zb = ndcZOf(pb, vpC0, vpC1, vpC2, vpC3);
         const float zc = ndcZOf(pc, vpC0, vpC1, vpC2, vpC3);
         const float zd = ndcZOf(pd, vpC0, vpC1, vpC2, vpC3);
-        rasterizeTriangle(sa, sb, sc, za, zb, zc, whU, pairIdx, gtid.x);
-        rasterizeTriangle(sa, sc, sd, za, zc, zd, whU, pairIdx, gtid.x);
+        localPix = rasterizeTriangle(sa, sb, sc, za, zb, zc, whU, pairIdx, gtid.x)
+                 + rasterizeTriangle(sa, sc, sd, za, zc, zd, whU, pairIdx, gtid.x);
+    }
+
+    // Mode 1: one aggregated pixel-write counter add per thread instead
+    // of one global atomic per covered pixel (the same total - integer
+    // sums are order-free; the per-pixel form is the mode-0 baseline).
+    if (params[11].x > 0.5 && localPix != 0u)
+        InterlockedAdd(counters[1], localPix);
+
+    // Coverage probe (params[11].y): classify this triangle by its
+    // covered-pixel count. Threads that never reached rasterization
+    // (behind the near plane) and phase-2 overflow lanes do not write;
+    // backfaces land in bucket 0 (counters[2] separates them).
+    if (params[11].y > 0.5)
+    {
+        uint b = 0u;
+        if (localPix > 64u) b = 5u;
+        else if (localPix > 16u) b = 4u;
+        else if (localPix > 4u) b = 3u;
+        else if (localPix > 1u) b = 2u;
+        else if (localPix > 0u) b = 1u;
+        InterlockedAdd(probeStats[b], 1u);
+        InterlockedAdd(probeStats[6], localPix);
+        InterlockedAdd(probeStats[7], 1u);
     }
 }

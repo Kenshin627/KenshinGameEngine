@@ -47,6 +47,14 @@ bool FrameSync::init(const VulkanDevice& device, bool timestamps) {
       if (!KE_VK(vkCreateQueryPool(device.device, &queryInfo, nullptr,
                                    &slot.timingQueries)))
         return false;
+      const VkQueryPoolCreateInfo chainQueryInfo{
+          .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+          .queryType = VK_QUERY_TYPE_TIMESTAMP,
+          .queryCount = 7,
+      };
+      if (!KE_VK(vkCreateQueryPool(device.device, &chainQueryInfo, nullptr,
+                                   &slot.chainTimingQueries)))
+        return false;
     }
   }
 
@@ -138,6 +146,10 @@ void FrameSync::shutdown(const VulkanDevice& device) {
     if (slot.timingQueries != VK_NULL_HANDLE) {
       vkDestroyQueryPool(device.device, slot.timingQueries, nullptr);
       slot.timingQueries = VK_NULL_HANDLE;
+    }
+    if (slot.chainTimingQueries != VK_NULL_HANDLE) {
+      vkDestroyQueryPool(device.device, slot.chainTimingQueries, nullptr);
+      slot.chainTimingQueries = VK_NULL_HANDLE;
     }
   }
   if (computeTimeline != VK_NULL_HANDLE) {

@@ -128,6 +128,10 @@ struct Args {
   bool noAsync = false;         // M4.4 A/B: chain onto the graphics queue
   bool cullLinear = false;      // M5.2 A/B: force the linear expand path
   bool cullPersistent = false;  // M5.3 A/B: the persistent driver
+  bool rasterOpt = false;       // accepted alias: mode 1 IS the default since
+                                // the 2026-09-19 A/B (+82% pure-SW, bit-exact)
+  bool rasterBase = false;      // A/B: force the baseline walk (mode 0)
+  bool rasterProbe = false;     // coverage histogram probe ([rasthist])
   bool multi = false;           // S4.6 acceptance: near/mid/far instances
   bool dense = false;           // M3.4 acceptance: front-back occluders
   int grid = 0;                 // --grid N: N-instance occlusion carpet
@@ -189,6 +193,12 @@ Args parseArgs(int argc, char** argv) {
       args.cullLinear = true;
     else if (std::strcmp(argv[i], "--cull-persistent") == 0)
       args.cullPersistent = true;
+    else if (std::strcmp(argv[i], "--raster-opt") == 0)
+      args.rasterOpt = true;
+    else if (std::strcmp(argv[i], "--raster-base") == 0)
+      args.rasterBase = true;
+    else if (std::strcmp(argv[i], "--raster-probe") == 0)
+      args.rasterProbe = true;
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
@@ -637,6 +647,11 @@ int main(int argc, char** argv) {
   kenshin::renderer::VisBufferChain chain;
   bool chainReady = false;
   bool decodeReady = false;  // pipeline is lazy: needs the swapchain format
+  // Coverage histogram state (only with --raster-probe; the snapshot
+  // follows the mapped-read contract - read before execute, logged at
+  // the 60-frame cadence; values trail by two frames like [vgstats]).
+  kenshin::u32 probeHist[8] = {};
+  bool probeValid = false;
   const auto writeScreenshot =
       [&renderer](const char* what, const std::string& path, bool fullFrame) {
         std::vector<kenshin::u8> rgba;
@@ -772,6 +787,13 @@ int main(int argc, char** argv) {
         ci.cullMode = !vgDebug.hierCull || args.cullLinear
                           ? 0u
                           : (args.cullPersistent ? 2u : 1u);
+        // Mode 1 (the exact row-span clamp + stat aggregation) is the
+        // measured default since the 2026-09-19 A/B: bit-identical
+        // output (6-config differential + dual-mode CPU-mirror pins),
+        // +82% fps pure-SW / stabilized routed SW segment. --raster-base
+        // keeps the baseline walk reachable for same-binary A/B.
+        ci.rasterMode = args.rasterBase ? 0u : 1u;
+        ci.rasterProbe = args.rasterProbe ? 1u : 0u;
         // Panel stats: NON-BLOCKING mapped snapshot, taken BEFORE this
         // frame's execute. At this point the CURRENT slot's counters
         // still hold the frame-before-last's final values, and
@@ -781,6 +803,8 @@ int main(int argc, char** argv) {
         // "submitted" frame is not an "executed" frame: single-queue
         // submissions may overlap), which showed up as torn counters
         // - intermittent zero clusters, wildly varying write counts.
+        probeValid =
+            args.rasterProbe && chain.readRasterProbe(*vgBackend, probeHist);
         {
           kenshin::u32 cs[16];
           if (chainReady && chain.readStatsMapped(*vgBackend, cs)) {
@@ -863,6 +887,29 @@ int main(int argc, char** argv) {
             vgDebug.hwClusters, vgDebug.tooCoarse, vgDebug.srcTooCoarse,
             vgDebug.visitedNodes, vgDebug.prunedNodes, vgDebug.pendingSkips,
             vgDebug.missPages, vgBackend->gpuTimings().frameMs);
+      // Chain segment GPU times (execution only - scheduling/signal
+      // latency sits outside timestamps; the M5.3 lesson keeps
+      // wall-clock the cross-variant primary).
+      if (chainReady) {
+        const auto& gt = vgBackend->gpuTimings();
+        KENSHIN_INFO(
+            "[chainms] cull {:.3f} sw {:.3f} hzb1 {:.3f} post {:.3f} "
+            "hzb2 {:.3f} tail {:.3f}{}",
+            gt.chainMs[0], gt.chainMs[1], gt.chainMs[2], gt.chainMs[3],
+            gt.chainMs[4], gt.chainMs[5],
+            gt.chainValid ? "" : " (unavailable)");
+      }
+      // Coverage histogram (only with --raster-probe): triangles by
+      // covered-pixel bucket 0 / 1 / 2-4 / 5-16 / 17-64 / >64, then
+      // the pixel sum and the attempted-triangle count (main + post).
+      // Snapshot taken before this frame's execute (the mapped-read
+      // contract); values trail by two frames like [vgstats].
+      if (probeValid)
+        KENSHIN_INFO(
+            "[rasthist] b0 {} b1 {} b2_4 {} b5_16 {} b17_64 {} b64p {} "
+            "pix {} tris {}",
+            probeHist[0], probeHist[1], probeHist[2], probeHist[3],
+            probeHist[4], probeHist[5], probeHist[6], probeHist[7]);
     }
 
     if (exiting) {

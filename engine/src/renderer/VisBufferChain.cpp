@@ -356,6 +356,9 @@ bool VisBufferChain::init(
                                            nullptr, "chain-postRasterParams");
     // 6 u32: [4] = the M6.3 pending-resident skip count (SW + HW).
     m_rasterCnt[s] = makeHostBuffer(backend, 24, nullptr, "chain-rasterCnt");
+    // 8 u32 coverage histogram (memset width == buffer width, always).
+    m_rasterProbe[s] =
+        makeHostBuffer(backend, 32, nullptr, "chain-rasterProbe");
     // M3.3 post pass: pending (Main-occluded) / revived pair lists,
     // the post raster's counters, and its params (current matrices).
     m_pendingPairs[s] =
@@ -530,6 +533,9 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
               32);  // [7] too: the HW cursor
   std::memset(backend.mappedPtr(m_rasterCnt[slot]), 0, 24);
   std::memset(backend.mappedPtr(m_postRasterCnt[slot]), 0, 24);
+  // Coverage histogram: always cleared (memset width == buffer width;
+  // a stale left side would alias into the probe's next read).
+  std::memset(backend.mappedPtr(m_rasterProbe[slot]), 0, 32);
   // M6.3: clear this slot's touched-page bitmap (the pacing wait at
   // beginFrame proves the slot's previous frame drained).
   std::memset(backend.mappedPtr(m_touched[slot]), 0,
@@ -580,7 +586,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     // meta/bit/word read in the paged branch is min-clamped against
     // these; v2 gets the raw pool sizes - its float4 reads scale x4).
     p[10] = glm::vec4(f32(m_positionCount), f32(m_indexCount), 0.0f, 0.0f);
-    p[11] = glm::vec4(0.0f);
+    // [11].x = rasterMode (the bit-identical optimized scheduling),
+    // [11].y = the coverage-probe flag. The post copy below inherits
+    // both (its loop copies all 12 words).
+    p[11] = glm::vec4(f32(in.rasterMode), f32(in.rasterProbe), 0.0f, 0.0f);
     glm::vec4* pp =
         static_cast<glm::vec4*>(backend.mappedPtr(m_postRasterParams[slot]));
     for (int c = 0; c < 12; ++c) pp[c] = p[c];
@@ -599,7 +608,13 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // completion before the HW draw + decode, so frame N's chain
   // overlaps frame N-1's graphics work). Without an async queue the
   // same recording lands on the graphics buffer exactly as before.
-  const bool asyncChain = backend.beginChain();
+  backend.beginChain();
+
+  // Chain segment timing (backend-gated; a no-op without timestamp
+  // support): 0 begin / 1 post-cull / 2 post-SW-raster / 3 post-HZB#1
+  // / 4 post-post-raster / 5 post-HZB#2 / 6 chain end. The harvested
+  // deltas land in gpuTimings().chainMs ([chainms] log line).
+  backend.writeChainTimestamp(0);
 
   backend.fillBuffer(m_vis[slot], 0);
 
@@ -741,6 +756,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   backend.dispatchCompute(m_pipeConvert[2], cv3, 4, 1, 1, 1);
   b(m_argsRaster[slot]);
   b(m_rasterCnt[slot]);
+  backend.writeChainTimestamp(1);
 
   // M6.3: the paged tables at bindings 8/9/10 (dummies in v2 - the
   // shader's reads are params-gated there). Bindings 1/2 are the slot
@@ -752,13 +768,15 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       m_paged ? m_pagedInputs.pageHeader : m_dummyPageHeader;
   const u32 pagedClusterMeta =
       m_paged ? m_pagedInputs.clusterMeta : m_dummyU32[0];
-  const u32 rasterHandles[12] = {
+  const u32 rasterHandles[13] = {
       m_rasterParams[slot], m_positionBuffer,  m_indexBuffer,
       m_clusterBuffer,      m_instanceBuffer,  m_pairs[slot],
       m_vis[slot],          m_rasterCnt[slot], pagedClusterPage,
-      pagedPageTable,       pagedPageHeader,   pagedClusterMeta};
-  backend.dispatchComputeIndirect(m_pipeRaster, rasterHandles, 12,
+      pagedPageTable,       pagedPageHeader,   pagedClusterMeta,
+      m_rasterProbe[slot]};
+  backend.dispatchComputeIndirect(m_pipeRaster, rasterHandles, 13,
                                   m_argsRaster[slot], 0);
+  backend.writeChainTimestamp(2);
 
   // ---- M3.3 post half + the final HZB stay on the CHAIN side (they
   // are pure compute); the M4.2 HW draw moved AFTER the chain submit
@@ -781,6 +799,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       backend.dispatchCompute(m_pipeReduce1[l], reduceHandles, 3, groups, 1, 1);
       b(m_hzb[slot]);
     }
+    backend.writeChainTimestamp(3);
 
     // M5.2: the post cull's envelope is PENDING-sized (counters[4]) -
     // REQUIRED in hierarchy mode: argsCull is only written by the
@@ -807,7 +826,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     b(m_argsPostRaster[slot]);
     b(m_postRasterCnt[slot]);
 
-    const u32 postRasterHandles[12] = {m_postRasterParams[slot],
+    const u32 postRasterHandles[13] = {m_postRasterParams[slot],
                                        m_positionBuffer,
                                        m_indexBuffer,
                                        m_clusterBuffer,
@@ -818,10 +837,17 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
                                        pagedClusterPage,
                                        pagedPageTable,
                                        pagedPageHeader,
-                                       pagedClusterMeta};
-    backend.dispatchComputeIndirect(m_pipeRasterPost, postRasterHandles, 12,
+                                       pagedClusterMeta,
+                                       m_rasterProbe[slot]};
+    backend.dispatchComputeIndirect(m_pipeRasterPost, postRasterHandles, 13,
                                     m_argsPostRaster[slot], 0);
     b(m_vis[slot]);
+    backend.writeChainTimestamp(4);
+  } else {
+    // Stamps 3/4 bracket the (skipped) HZB#1 + post section so the
+    // segment deltas read ~0 instead of folding into a neighbor.
+    backend.writeChainTimestamp(3);
+    backend.writeChainTimestamp(4);
   }
 
   // Order EVERY prior write of the vis (the main SW raster - and, on
@@ -846,6 +872,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       b(m_hzb[slot]);
     }
   }
+  backend.writeChainTimestamp(5);
 
   // Compute write -> fragment read (the decode pass consumes the vis).
   // On the async path this in-cb barrier is advisory only - the real
@@ -878,7 +905,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   // Submit the chain (no-op on the graphics fallback path) BEFORE
   // recording the graphics-side HW draw.
-  backend.submitChain();
+  backend.writeChainTimestamp(6);
   backend.submitChain();
 
   // ---- M4.2 hardware raster (graphics queue): the routed clusters
@@ -906,7 +933,6 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     backend.drawNullIndirect(m_pipeHwRaster, hwHandles, 12, m_hwDrawArgs[slot],
                              0, in.width, in.height);
   }
-  (void)asyncChain;
 
   // This frame's matrices become the slot's stored prev: the final
   // HZB just built from this slot's VisBuffer was rendered with
@@ -1053,6 +1079,23 @@ bool VisBufferChain::readStatsMapped(backend::IRenderBackend& backend,
   return cc != nullptr;
 }
 
+bool VisBufferChain::readRasterProbe(backend::IRenderBackend& backend,
+                                     u32 out[8], bool lastCompleted) const {
+  // Default: the readStatsMapped contract (current slot, BEFORE this
+  // frame's execute - the pacing wait proved its previous use
+  // complete). lastCompleted: the ended frame's slot, valid in tests
+  // after a blocking readback has drained the queue.
+  const u32 slot = lastCompleted ? backend.lastCompletedFrameSlot()
+                                 : backend.currentFrameSlot();
+  if (slot == 0xFFFFFFFFu) return false;
+  if (m_rasterProbe[slot] == kInvalid || m_rasterProbe[slot] == 0) return false;
+  const u32* ps =
+      static_cast<const u32*>(backend.mappedPtr(m_rasterProbe[slot]));
+  if (!ps) return false;
+  for (int i = 0; i < 8; ++i) out[i] = ps[i];
+  return true;
+}
+
 bool VisBufferChain::readTouchedPages(backend::IRenderBackend& backend,
                                       std::vector<u32>& out) const {
   // The readStatsMapped contract: call between endFrame and the NEXT
@@ -1152,35 +1195,21 @@ void VisBufferChain::onShutdown(backend::IRenderBackend& backend) {
                         m_hierCnt[s][0], m_hierCnt[s][1], m_hierParams[s],
                         m_persistQueue[s], m_persistState[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
-    for (const u32 h : {m_planes[s],
-                        m_cntA[s],
-                        m_visibleList[s],
-                        m_workItems[s],
-                        m_expCnt[s],
-                        m_cullParams[s],
-                        m_cullCnt[s],
-                        m_pairs[s],
-                        m_rasterParams[s],
-                        m_rasterCnt[s],
-                        m_vis[s],
-                        m_hzb[s],
-                        m_hzbParams[s],
-                        m_pendingPairs[s],
-                        m_postPairs[s],
-                        m_postParams[s],
-                        m_postRasterCnt[s],
-                        m_argsExpand[s],
-                        m_argsCull[s],
-                        m_argsRaster[s],
-                        m_argsPostRaster[s],
-                        m_hwPairs[s],
-                        m_hwParams[s],
-                        m_hwDrawArgs[s],
-                        m_argsHzb1[s],
-                        m_argsPostCull[s],
-                        m_touched[s],
-                        m_argsTouch[s],
-                        m_postRasterParams[s]})
+    for (const u32 h : {m_planes[s],       m_cntA[s],
+                        m_visibleList[s],  m_workItems[s],
+                        m_expCnt[s],       m_cullParams[s],
+                        m_cullCnt[s],      m_pairs[s],
+                        m_rasterParams[s], m_rasterCnt[s],
+                        m_rasterProbe[s],  m_vis[s],
+                        m_hzb[s],          m_hzbParams[s],
+                        m_pendingPairs[s], m_postPairs[s],
+                        m_postParams[s],   m_postRasterCnt[s],
+                        m_argsExpand[s],   m_argsCull[s],
+                        m_argsRaster[s],   m_argsPostRaster[s],
+                        m_hwPairs[s],      m_hwParams[s],
+                        m_hwDrawArgs[s],   m_argsHzb1[s],
+                        m_argsPostCull[s], m_touched[s],
+                        m_argsTouch[s],    m_postRasterParams[s]})
       if (h != kInvalid && h != 0) backend.destroyBuffer(h);
   }
   // M6.3: in paged mode the pool/table handles are CALLER-owned - only

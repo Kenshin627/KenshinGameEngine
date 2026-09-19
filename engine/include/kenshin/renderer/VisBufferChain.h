@@ -60,6 +60,18 @@ struct ChainInputs {
   /// in the v1 measurements; the M5.5 worker redesign decides the
   /// final default). Forced to 0 at init without hierarchy data.
   u32 cullMode = 1;
+  /// SW-raster scheduling mode (the nanite.md-verified optimizations):
+  /// 0 = the original per-pair walk (permanent differential baseline),
+  /// 1 = exact-int64 row-span clamp + per-thread pixel-count
+  /// aggregation. Both modes produce BIT-IDENTICAL VisBuffers and
+  /// counter totals; 1 only changes which pixels get tested and how
+  /// the stats are accumulated.
+  u32 rasterMode = 0;
+  /// Coverage histogram probe (params[11].y): classify each rasterized
+  /// triangle by covered-pixel count into probeStats buckets. Debug
+  /// tooling - adds two atomics per triangle; leave off for
+  /// benchmarks.
+  u32 rasterProbe = 0;
 };
 
 /// M6.3 paged geometry: the buffer handles the raster/decode passes
@@ -158,6 +170,17 @@ class VisBufferChain {
   bool readIndirectArgs(backend::IRenderBackend& backend, u32 expandX[3],
                         u32 cullX[1], u32 rasterX[1]) const;
 
+  /// NON-BLOCKING coverage-histogram snapshot (the readStatsMapped
+  /// contract: current slot, before this frame's execute). out[8]:
+  /// [0..5] = triangles covering 0 / 1 / 2-4 / 5-16 / 17-64 / >64
+  /// pixels, [6] = covered pixels summed, [7] = triangles that reached
+  /// rasterization (main + post dispatches share the buffer). Only
+  /// meaningful with ChainInputs::rasterProbe = 1. `lastCompleted`
+  /// reads the most recently ENDED frame's slot instead (tests, after
+  /// a blocking readback has proven the frame drained).
+  bool readRasterProbe(backend::IRenderBackend& backend, u32 out[8],
+                       bool lastCompleted = false) const;
+
   /// Test/debug: read back the most recently ENDED frame's visiblePairs
   /// (count from readStats[2]) - the M5.2 hierarchy-vs-selectLodCut set
   /// equality assertions read this.
@@ -208,6 +231,9 @@ class VisBufferChain {
   u32 m_workItems[kSlots]{}, m_expCnt[kSlots]{};
   u32 m_cullParams[kSlots]{}, m_cullCnt[kSlots]{}, m_pairs[kSlots]{};
   u32 m_rasterParams[kSlots]{}, m_rasterCnt[kSlots]{}, m_vis[kSlots]{};
+  // Coverage histogram (rasterMode tooling): 8 u32, written by the
+  // raster passes when ChainInputs::rasterProbe is set.
+  u32 m_rasterProbe[kSlots]{};
   // The post raster's payload listSel (=2) needs its own params copy -
   // one host buffer cannot hold two values for the same frame's two
   // dispatches.
@@ -319,7 +345,7 @@ class VisBufferChain {
   // the per-slot touched bitmap, and the HW-list dispatch args convert.
   u32 m_pipeTouchPairs = ~0u, m_pipeTouchHw = ~0u;
   u32 m_pipeConvertTouch = ~0u;  // cull counters[7] -> touch dispatch args
-  u32 m_touched[kSlots]{};  // host-visible bitmap, pageCount/32 words
+  u32 m_touched[kSlots]{};       // host-visible bitmap, pageCount/32 words
   u32 m_argsTouch[kSlots]{};
   u32 m_cfgTouch = ~0u;  // {0, 0, 7, 0}: groupsX = cull counters[7]
   u32 m_pageBitmapWords = 0;

@@ -27,6 +27,10 @@ std::vector<u8> packRasterParams(const SoftRasterFrame& frame, u32 pairCount) {
   const glm::vec4 flags(frame.yFlip ? 1.0f : 0.0f, 0.0f, 0.0f,
                         static_cast<f32>(pairCount));
   std::memcpy(data.data() + 9 * sizeof(glm::vec4), &flags, sizeof(glm::vec4));
+  // [11].x = the scheduling mode (the vector is zero-initialized, so
+  // this is an explicit no-op at the default - kept for the reader).
+  const glm::vec4 mode(f32(frame.rasterMode), 0.0f, 0.0f, 0.0f);
+  std::memcpy(data.data() + 11 * sizeof(glm::vec4), &mode, sizeof(glm::vec4));
   return data;
 }
 

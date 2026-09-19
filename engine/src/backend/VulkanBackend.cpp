@@ -125,6 +125,18 @@ struct VulkanBackend::Impl {
 
   // GPU timestamps + graphics pipelines (PipelineStore: table + disk cache)
   bool gpuTimestamps = false;
+  // Chain segment timestamps: valid on the async compute family (the
+  // chain's normal home) and armed-once-per-slot reset tracking.
+  bool chainTimestampsCompute = false;
+  bool chainQueriesArmed[kMaxFramesInFlight] = {};
+  // Per-slot "this pool was reset at least once by a chain write" -
+  // unlike the frame pool (written unconditionally every frame), a
+  // slot's chain pool only ever sees a reset when the chain actually
+  // executes on it; harvesting a never-reset pool is a validation
+  // error. Chain-idle frames (window not drawable) still leave STALE
+  // (complete) stamps in an armed pool - documented telemetry caveat,
+  // not corrected for.
+  bool chainPoolEverWritten[kMaxFramesInFlight] = {};
   f32 timestampPeriodNs = 0.0f;
   PipelineStore pipelines;
 };
@@ -241,14 +253,22 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
     m_impl->gpuTimestamps =
         familyCount > m_impl->context.graphicsFamily &&
         families[m_impl->context.graphicsFamily].timestampValidBits > 0;
+    m_impl->chainTimestampsCompute =
+        m_impl->context.asyncComputeFamily != 0xFFFFFFFFu &&
+        familyCount > m_impl->context.asyncComputeFamily &&
+        families[m_impl->context.asyncComputeFamily].timestampValidBits > 0;
     m_impl->timestampPeriodNs = m_impl->context.props.limits.timestampPeriod;
   }
 
   if (!m_impl->pipelines.init(m_impl->device.device)) return false;
 
   // Frame resources (command pools etc.) are device-level and needed by
-  // windowless compute paths too.
-  if (!m_impl->frameSync.init(m_impl->device, m_impl->gpuTimestamps)) {
+  // windowless compute paths too. Timing pools are created when EITHER
+  // the graphics or the async compute family reports timestamp bits
+  // (the chain stamps ride whichever queue family runs the chain).
+  if (!m_impl->frameSync.init(
+          m_impl->device,
+          m_impl->gpuTimestamps || m_impl->chainTimestampsCompute)) {
     KENSHIN_ERROR("[vulkan] frame resources init failed");
     return false;
   }
@@ -398,6 +418,33 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
           f32(f64(q[1] - q[0]) * impl.timestampPeriodNs / 1e6);
     }
   }
+
+  // Harvest this slot's CHAIN segment stamps under the same completion
+  // proof (the frame's fence covers the chain: the graphics submission
+  // waits the chain's timeline value before the HW draw + decode).
+  // Segments: 0 cull, 1 SW raster, 2 HZB#1, 3 post, 4 HZB#2, 5 tail.
+  m_gpuTimings.chainValid = false;
+  for (u32 k = 0; k < 6; ++k) m_gpuTimings.chainMs[k] = 0.0f;
+  if (impl.chainPoolEverWritten[impl.frameSync.frameIndex] &&
+      slot.chainTimingQueries != VK_NULL_HANDLE &&
+      impl.frameSync.timelineValue >= kMaxFramesInFlight) {
+    u64 cq[7] = {};
+    if (vkGetQueryPoolResults(impl.device.device, slot.chainTimingQueries, 0, 7,
+                              sizeof(cq), cq, sizeof(u64),
+                              VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+      bool allWritten = cq[0] != 0;
+      for (u32 k = 1; k < 7; ++k) allWritten = allWritten && cq[k] != 0;
+      if (allWritten) {
+        for (u32 k = 0; k < 6; ++k)
+          m_gpuTimings.chainMs[k] =
+              f32(f64(cq[k + 1] - cq[k]) * impl.timestampPeriodNs / 1e6);
+        m_gpuTimings.chainValid = true;
+      }
+    }
+  }
+  // The chain re-arms (resets) its pool on the first write of the new
+  // frame - vkCmdResetQueryPool must not race in-flight reads.
+  impl.chainQueriesArmed[impl.frameSync.frameIndex] = false;
 
   // (Re)create per-frame offscreen targets on size/format change.
   const VkFormat targetFormat =
@@ -1231,6 +1278,26 @@ bool VulkanBackend::chainOnComputeQueue() const {
   return m_impl->asyncActive && m_impl->chainValueB != 0;
 }
 
+void VulkanBackend::writeChainTimestamp(u32 index) {
+  Impl& impl = *m_impl;
+  if (index >= 7) return;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (slot.chainTimingQueries == VK_NULL_HANDLE) return;
+  // The chain records onto the async compute buffer while a chain is
+  // open; without one (async disabled) the same recording lands on the
+  // graphics frame buffer. Timestamp validity is per queue FAMILY.
+  const bool onCompute = impl.computeOverride != VK_NULL_HANDLE;
+  if (onCompute ? !impl.chainTimestampsCompute : !impl.gpuTimestamps) return;
+  const VkCommandBuffer cb = onCompute ? impl.computeOverride : impl.cmd.cmd();
+  if (!impl.chainQueriesArmed[impl.frameSync.frameIndex]) {
+    vkCmdResetQueryPool(cb, slot.chainTimingQueries, 0, 7);
+    impl.chainQueriesArmed[impl.frameSync.frameIndex] = true;
+    impl.chainPoolEverWritten[impl.frameSync.frameIndex] = true;
+  }
+  vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       slot.chainTimingQueries, index);
+}
+
 void VulkanBackend::setAsyncChainEnabled(bool enabled) {
   // Takes effect from the NEXT beginChain; an in-flight chain's
   // waits stay armed on the frame submission regardless.
@@ -1290,9 +1357,8 @@ bool VulkanBackend::initPageStreaming() {
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
       .pNext = &timelineType,
   };
-  if (!KE_VK(
-          vkCreateSemaphore(device.device, &timelineInfo, nullptr,
-                            &page.timeline)))
+  if (!KE_VK(vkCreateSemaphore(device.device, &timelineInfo, nullptr,
+                               &page.timeline)))
     return false;
 
   // Staging arena: copies are submitted from the transfer OR graphics
@@ -1303,8 +1369,8 @@ bool VulkanBackend::initPageStreaming() {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = static_cast<VkDeviceSize>(page.kArenaBytes),
       .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-      .sharingMode = sameFamily ? VK_SHARING_MODE_EXCLUSIVE
-                                : VK_SHARING_MODE_CONCURRENT,
+      .sharingMode =
+          sameFamily ? VK_SHARING_MODE_EXCLUSIVE : VK_SHARING_MODE_CONCURRENT,
       .queueFamilyIndexCount = sameFamily ? 0u : 2u,
       .pQueueFamilyIndices = arenaFamilies,
   };
@@ -1317,23 +1383,22 @@ bool VulkanBackend::initPageStreaming() {
   };
   VmaAllocationInfo out{};
   if (vmaCreateBuffer(device.allocator, &arenaInfo, &arenaAlloc,
-                      &page.arenaBuffer, &page.arenaAlloc, &out) !=
-          VK_SUCCESS ||
+                      &page.arenaBuffer, &page.arenaAlloc,
+                      &out) != VK_SUCCESS ||
       out.pMappedData == nullptr)
     return false;
   page.arenaMapped = out.pMappedData;
 
-  KENSHIN_INFO(
-      "[vulkan] page uploads: {} ({}B staging arena)",
-      pageUploadsOnTransferQueue() ? "dedicated transfer queue" : "graphics queue",
-      page.kArenaBytes);
+  KENSHIN_INFO("[vulkan] page uploads: {} ({}B staging arena)",
+               pageUploadsOnTransferQueue() ? "dedicated transfer queue"
+                                            : "graphics queue",
+               page.kArenaBytes);
   return true;
 }
 
 u32 VulkanBackend::createPageSlotPool(u32 slotCount, u32 slotBytes) {
   Impl& impl = *m_impl;
-  if (slotCount == 0 || slotBytes == 0)
-    return kInvalidBufferHandle;
+  if (slotCount == 0 || slotBytes == 0) return kInvalidBufferHandle;
   // CONCURRENT over every family that touches slots: graphics (frame
   // reads), async compute (the chain) and transfer (the uploads).
   // TRANSFER_SRC: readbackBuffer copies OUT of the pool (the M6.2

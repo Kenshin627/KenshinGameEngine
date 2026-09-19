@@ -275,6 +275,15 @@ class IRenderBackend {
   /// queue exactly as before (the chain's fallback).
   virtual bool beginChain() = 0;
   virtual void submitChain() = 0;
+  /// Write timestamp `index` (0..6) of this frame slot's CHAIN query
+  /// pool onto the command buffer currently recording the chain (the
+  /// async compute buffer, or the graphics frame buffer on the
+  /// fallback path). The first call of a frame resets the pool. A
+  /// no-op when the recording queue's family reports no timestamp
+  /// bits. Segment 0..6 bracket cull / SW raster / HZB#1 / post /
+  /// HZB#2 / tail; the harvested deltas surface in
+  /// gpuTimings().chainMs (0.0 when unsupported).
+  virtual void writeChainTimestamp(u32 index) = 0;
   /// True when the last submitChain ran on the compute queue (the
   /// frame submission then waits the chain's completion).
   virtual bool chainOnComputeQueue() const = 0;
@@ -380,6 +389,15 @@ class IRenderBackend {
   struct GpuTimings {
     f32 frameMs = 0.0f;   // whole submission (first to last timestamp)
     f32 opaqueMs = 0.0f;  // first timestamp to viewport scope close
+    /// Chain segment times (GPU execution only - async-engine
+    /// scheduling/signal latency sits OUTSIDE timestamps; wall-clock
+    /// stays the primary cross-variant metric, cf. the M5.3 lesson):
+    /// [0] cull, [1] SW main raster, [2] HZB#1, [3] post cull+raster,
+    /// [4] HZB#2, [5] tail (barriers + page touch). Zeroed (and
+    /// chainValid = false) without timestamp support or before the
+    /// first harvest.
+    f32 chainMs[6] = {};
+    bool chainValid = false;
   };
   virtual GpuTimings gpuTimings() const = 0;
 };

@@ -52,6 +52,7 @@ class VulkanBackend final : public IRenderBackend {
   void barrierGraphicsToCompute(u32 buffer) override;
   bool beginChain() override;
   void submitChain() override;
+  void writeChainTimestamp(u32 index) override;
   bool chainOnComputeQueue() const override;
   void setAsyncChainEnabled(bool enabled) override;
   u32 createPageSlotPool(u32 slotCount, u32 slotBytes) override;

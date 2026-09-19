@@ -42,6 +42,9 @@ struct FrameSlot {
   // 1 = viewport scope close, 2 = submission end. VK_NULL_HANDLE when
   // the queue family lacks timestamp support.
   VkQueryPool timingQueries = VK_NULL_HANDLE;
+  // Chain segment timestamps (7 stamps/frame; written on the chain's
+  // command buffer - async compute or the graphics fallback).
+  VkQueryPool chainTimingQueries = VK_NULL_HANDLE;
 
   // M4.3 async compute: this slot's chain command buffers on the
   // compute queue. cbA = the cull chain (cull -> expand -> cluster

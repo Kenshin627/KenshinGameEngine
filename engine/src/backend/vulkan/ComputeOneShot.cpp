@@ -1,20 +1,20 @@
 #include "ComputeOneShot.h"
 
+#include <cstring>
+
 #include "Vk.h"
 #include "VulkanDevice.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/manager/ShaderManager.h"
 
-#include <cstring>
-
 KENSHIN_NS_BEGIN
 
 namespace backend {
 
-bool runComputeOneshotJob(const VulkanDevice& device_,
-                          VkCommandPool commandPool,
-                          const IRenderBackend::Job& job,
-                          std::vector<u8> outputs[IRenderBackend::IRenderBackend::Job::kMaxBuffers]) {
+bool runComputeOneshotJob(
+    const VulkanDevice& device_, VkCommandPool commandPool,
+    const IRenderBackend::Job& job,
+    std::vector<u8> outputs[IRenderBackend::IRenderBackend::Job::kMaxBuffers]) {
   VkDevice device = device_.device;
   VmaAllocator allocator = device_.allocator;
   if (!device || !job.spirv || job.spirvBytes == 0) return false;
@@ -64,6 +64,28 @@ bool runComputeOneshotJob(const VulkanDevice& device_,
       });
     }
   } else {
+    // Params-gated callers (e.g. rasterize_sw's paged/probe bindings)
+    // legitimately provide fewer buffers than the SPIR-V declares - the
+    // undeclared bindings are never dereferenced. That contract is
+    // silent, so say it once: a caller that DOES touch a left-off
+    // binding would run on an undeclared descriptor (undefined).
+    static const bool warnedOnce = [&reflected, bufferCount] {
+      const u32 reflectedCount = [&] {
+        u32 n = 0;
+        for (const auto& r : reflected)
+          if (r.type == manager::ReflectedBinding::Type::StorageBuffer &&
+              r.set == 0)
+            ++n;
+        return n;
+      }();
+      KENSHIN_WARN(
+          "[oneshot] shader reflects {} storage bindings, job provides "
+          "{}; falling back to the job's sequential layout (safe only "
+          "for params-gated bindings)",
+          reflectedCount, bufferCount);
+      return true;
+    }();
+    (void)warnedOnce;
     for (u32 i = 0; i < bufferCount; ++i) {
       layoutBindings.push_back(VkDescriptorSetLayoutBinding{
           .binding = i,
@@ -79,7 +101,8 @@ bool runComputeOneshotJob(const VulkanDevice& device_,
       .pBindings = layoutBindings.data(),
   };
   VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
-  KE_VK(vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout));
+  KE_VK(
+      vkCreateDescriptorSetLayout(device, &setLayoutInfo, nullptr, &setLayout));
 
   const VkPipelineLayoutCreateInfo pipelineLayoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -87,7 +110,8 @@ bool runComputeOneshotJob(const VulkanDevice& device_,
       .pSetLayouts = &setLayout,
   };
   VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-  KE_VK(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout));
+  KE_VK(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr,
+                               &pipelineLayout));
 
   const VkComputePipelineCreateInfo pipelineInfo{
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -102,7 +126,7 @@ bool runComputeOneshotJob(const VulkanDevice& device_,
   };
   VkPipeline pipeline = VK_NULL_HANDLE;
   if (!KE_VK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
-                               nullptr, &pipeline))) {
+                                      nullptr, &pipeline))) {
     KENSHIN_ERROR("[compute] pipeline creation failed");
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
@@ -130,9 +154,8 @@ bool runComputeOneshotJob(const VulkanDevice& device_,
                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
     };
     VmaAllocationInfo allocInfoOut{};
-    if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo,
-                        &buffers[i], &allocations[i],
-                        &allocInfoOut) != VK_SUCCESS) {
+    if (vmaCreateBuffer(allocator, &bufferInfo, &allocInfo, &buffers[i],
+                        &allocations[i], &allocInfoOut) != VK_SUCCESS) {
       KENSHIN_ERROR("[compute] buffer creation failed (slot {})", i);
       ok = false;
       break;
