@@ -46,13 +46,16 @@ struct ChainInputs {
   u32 height = 0;
   glm::vec4 planes[6]{};
   bool occlusionEnabled = true;  // A/B + first-run safety toggle
-  u32 hwMode = 1;                // M4.2: 0 = all SW, 1 = route by
-                                 // threshold, 2 = force all HW
-  f32 hwThresholdPx = 1.0f;      // SW/HW routing edge threshold (UE's
-                                 // r.NaniteMinPixelsPerEdgeHW twin; 18 was
-                                 // the UE-old-branch value - measured on
-                                 // RTX 5060 Ti, 1px wins +38% at heavy
-                                 // load, never loses elsewhere)
+  u32 hwMode = 0;                // M4.2: 0 = all SW (the default since
+                                 // the 2026-09-19 threshold sweep - the
+                                 // mode-1 rasterizer beat every routing
+                                 // config on all tested scene shapes),
+                                 // 1 = route by threshold, 2 = force HW
+  f32 hwThresholdPx = 1.0f;      // SW/HW routing edge threshold (mode 1
+                                 // only; UE's r.NaniteMinPixelsPerEdgeHW
+                                 // twin - our LOD keeps triangle edges far
+                                 // below the HW crossover, so routing lost
+                                 // its workload)
   /// M5.2/M5.3: 0 = linear expand+per-cluster cull (differential
   /// reference), 1 = BVH8 level-wise dispatch (the default), 2 = the
   /// M5.3 persistent-threads traversal (single dispatch + MPMC ticket

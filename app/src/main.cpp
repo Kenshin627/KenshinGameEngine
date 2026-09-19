@@ -123,8 +123,12 @@ struct Args {
                                 // render path retired (--virtual twin)
   bool checker = false;         // UV checkerboard debug view (decode path)
   bool noOcclusion = false;     // A/B: disable the occlusion cull chain
-  bool noHw = false;            // M6.3 A/B: pure-SW raster (hwMode 0)
-  bool forceHw = false;         // M6.3 A/B: all clusters HW (hwMode 2)
+  bool noHw = false;            // accepted no-op since the 2026-09-19
+                                // threshold sweep: pure SW IS the default
+                                // (mode-1 SW beat every routing config on
+                                // all five scene shapes)
+  bool routeHw = false;         // A/B: route clusters to HW (hwMode 1)
+  bool forceHw = false;         // A/B: all clusters HW (hwMode 2)
   bool noAsync = false;         // M4.4 A/B: chain onto the graphics queue
   bool cullLinear = false;      // M5.2 A/B: force the linear expand path
   bool cullPersistent = false;  // M5.3 A/B: the persistent driver
@@ -161,6 +165,8 @@ Args parseArgs(int argc, char** argv) {
       args.streamBudgetMb = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--no-hw") == 0)
       args.noHw = true;
+    else if (std::strcmp(argv[i], "--route-hw") == 0)
+      args.routeHw = true;
     else if (std::strcmp(argv[i], "--force-hw") == 0)
       args.forceHw = true;
     else if (std::strcmp(argv[i], "--hw-threshold") == 0 && i + 1 < argc)
@@ -780,9 +786,17 @@ int main(int argc, char** argv) {
         kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
                                                 ci.planes);
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
-        // M6.3 A/B: --no-hw forces the pure-SW path (the paged HW route
-        // differential is exercised by --force-hw).
-        ci.hwMode = args.noHw ? 0 : (args.forceHw ? 2 : 1);
+        // Pure SW is the default since the 2026-09-19 threshold sweep:
+        // mode-1 SW beat every routing configuration on all five scene
+        // shapes (micro-heavy carpet 147 vs 102 fps, coarse-LOD 144 vs
+        // 129, close-up zoom 357 vs 326, occlusion-on 155 vs 95) - the
+        // LOD bounds triangle screen sizes well below the point where
+        // fixed-function raster pays, and the near-plane guard keeps the
+        // genuinely huge triangles in SW anyway. --route-hw / --force-hw
+        // keep the HW path reachable for A/B; --no-hw is the default's
+        // no-op alias.
+        ci.hwMode = args.forceHw ? 2u : (args.routeHw ? 1u : 0u);
+        (void)args.noHw;
         ci.hwThresholdPx = vgDebug.hwThresholdPx;  // CLI seeds, panel drives
         ci.cullMode = !vgDebug.hierCull || args.cullLinear
                           ? 0u
