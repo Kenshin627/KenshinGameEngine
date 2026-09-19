@@ -364,8 +364,14 @@ bool VisBufferChain::init(
         makeDeviceBuffer(backend, pairBytes, nullptr, "chain-postPairs");
     m_postParams[s] = makeHostBuffer(backend, 8 * sizeof(glm::vec4), nullptr,
                                      "chain-postParams");
+    // 24 B: the post raster reuses rasterize_sw.slang, whose counters
+    // struct addresses up to [4] (pending-skip word). 16 B was ALSO a
+    // host overflow: the per-frame memset has cleared 24 B since M6.3a
+    // (d7cdc63), zeroing 8 mapped bytes of the NEXT VMA suballocation
+    // every frame - the 2026-09-12 "level-wise startup flake" signature
+    // (per-process-fixed, cross-launch-variable VMA neighbor damage).
     m_postRasterCnt[s] =
-        makeHostBuffer(backend, 16, nullptr, "chain-postRasterCnt");
+        makeHostBuffer(backend, 24, nullptr, "chain-postRasterCnt");
     m_hwPairs[s] =
         makeDeviceBuffer(backend, pairBytes, nullptr, "chain-hwPairs");
     m_hwParams[s] = makeHostBuffer(backend, 8 * sizeof(glm::vec4), nullptr,

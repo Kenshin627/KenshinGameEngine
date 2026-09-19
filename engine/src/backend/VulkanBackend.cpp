@@ -717,8 +717,15 @@ void VulkanBackend::endFrame() {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
         .semaphore = impl.frameSync.computeTimeline,
         .value = impl.chainValueA,
+        // COMPUTE_SHADER: count_to_draw (the convert that fills
+        // hwDrawArgs from the chain-written cullCnt[7]) runs as a
+        // compute dispatch on this submission - without the stage it
+        // read ungated per spec (NVIDIA's submit-level blocking made
+        // it work in practice; a theory-race that surfacing under
+        // driver-marginal states would zero every HW draw).
         .stageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
-                     VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                     VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
     };
     waits[waitCount++] = VkSemaphoreSubmitInfo{
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,

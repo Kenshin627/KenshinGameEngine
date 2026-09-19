@@ -342,4 +342,9 @@ void psMain(HwVsOut i) {
   const uint depthBits = uint((1.0 - z) * 4294967295.0);
   const uint64_t packed = (uint64_t(depthBits) << 32) | uint64_t(i.payload);
   InterlockedMax(visBuffer[uint64_t(pixel.y) * W + pixel.x], packed);
+  // Count the passing pixel like rasterize_sw's counters[1] (the panel's
+  // pxWrites = main + post + HW; without this an all-HW-routed cut
+  // reports "writes 0" and reads as a dead draw - a diagnosis trap that
+  // cost an hour on 2026-09-19).
+  InterlockedAdd(pending[1], 1);
 }

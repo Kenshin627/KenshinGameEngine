@@ -857,12 +857,12 @@ int main(int argc, char** argv) {
         KENSHIN_INFO(
             "[vgstats] work {} clusters {} tris {} writes {} occ {} "
             "revived {} hw {} tooCoarse {} srcTooCoarse {} visited {} "
-            "pruned {} gpuMs {}",
+            "pruned {} pend {} miss {} gpuMs {}",
             vgDebug.workItems, vgDebug.visibleClusters, vgDebug.cutTris,
             vgDebug.pxWrites, vgDebug.occCulled, vgDebug.revived,
             vgDebug.hwClusters, vgDebug.tooCoarse, vgDebug.srcTooCoarse,
-            vgDebug.visitedNodes, vgDebug.prunedNodes,
-            vgBackend->gpuTimings().frameMs);
+            vgDebug.visitedNodes, vgDebug.prunedNodes, vgDebug.pendingSkips,
+            vgDebug.missPages, vgBackend->gpuTimings().frameMs);
     }
 
     if (exiting) {
