@@ -107,7 +107,7 @@ struct GpuClusterQuant  // 10 u32, mirrors ClusterQuantMeta
     uint widths;      // bx | by<<4 | bz<<8
     uint posWordOff;  // u32 words into posBits
     float uvMinX; float uvMinY; float uvRangeX; float uvRangeY;
-    uint reserved;
+    uint idxBits;     // M7.2: baseBits | offsetBits<<4 | bitBase<<8
 };
 
 // v5 decode helpers (M7.1; CPU mirror = ClusterQuant.cpp, op-for-op -
@@ -484,7 +484,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         qm.widths = positions[mb + 3u]; qm.posWordOff = positions[mb + 4u];
         qm.uvMinX = asfloat(positions[mb + 5u]); qm.uvMinY = asfloat(positions[mb + 6u]);
         qm.uvRangeX = asfloat(positions[mb + 7u]); qm.uvRangeY = asfloat(positions[mb + 8u]);
-        qm.reserved = positions[mb + 9u];
+        qm.idxBits = positions[mb + 9u];
     }
 
     const float4 viewC0 = params[0];
@@ -554,31 +554,38 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     uint i0, i1, i2;
     if (uint(params[9].y) != 0u)
     {
-        // v5: flat u8 lanes at the cluster's index BYTE offset. w1 can
-        // address one word past the idx section's last word - clamp both
-        // against the pool's u32 capacity ([10].y; the last word of the
-        // last page would otherwise read past the slot pool).
+        // v6: packed indices - the meta word carries
+        // [baseBits | offsetBits<<4 | bitBase<<8]; triangle t lives at
+        // bitBase + t*W (W = baseBits + 2*offsetBits) as the cyclic
+        // min-first rotation [base | +off1 | +off2] (D5 mirror =
+        // decodeQuantCluster). The whole <=22-bit field spans at most
+        // the two loaded words; every word read clamps against the
+        // pool capacity ([10].y) per the addressing discipline.
         const uint idxTotal = max(uint(params[10].y), 1u);
-        const uint byteOff = cluster.indexOffset + gtid.x * 3u;
-        const uint lane = byteOff & 3u;
-        const uint w0 = indices[min(idxBase + byteOff / 4u, idxTotal - 1u)];
-        const uint w1 = indices[min(idxBase + byteOff / 4u + 1u, idxTotal - 1u)];
-        // Three consecutive lanes starting at `lane` (quant_probe's
-        // audited shape; the old ternary form misread i2 at lane==1).
-        i0 = (w0 >> (8u * lane)) & 0xFFu;
-        if (lane == 0u) {
-            i1 = (w0 >> 8u) & 0xFFu;
-            i2 = (w0 >> 16u) & 0xFFu;
-        } else if (lane == 1u) {
-            i1 = (w0 >> 16u) & 0xFFu;
-            i2 = (w0 >> 24u) & 0xFFu;
-        } else if (lane == 2u) {
-            i1 = (w0 >> 24u) & 0xFFu;
-            i2 = w1 & 0xFFu;
-        } else {
-            i1 = w1 & 0xFFu;
-            i2 = (w1 >> 8u) & 0xFFu;
-        }
+        const uint baseBits = qm.idxBits & 0xFu;
+        const uint offsetBits = (qm.idxBits >> 4) & 0xFu;
+        const uint bitIdx = (qm.idxBits >> 8) + gtid.x * (baseBits + 2u * offsetBits);
+        // Per-subfield word loads: a subfield may cross into the word
+        // after the triangle's first word, so each field addresses ITS
+        // own (w0,w1) pair (masking the global bit into the first
+        // word's window is the classic off-by-32 bug).
+        const uint wi0 = idxBase + (bitIdx >> 5);
+        const uint base = loadBits2(indices[min(wi0, idxTotal - 1u)],
+                                    indices[min(wi0 + 1u, idxTotal - 1u)],
+                                    bitIdx & 31u, baseBits);
+        const uint at1 = bitIdx + baseBits;
+        const uint wi1 = idxBase + (at1 >> 5);
+        const uint o1 = loadBits2(indices[min(wi1, idxTotal - 1u)],
+                                  indices[min(wi1 + 1u, idxTotal - 1u)],
+                                  at1 & 31u, offsetBits);
+        const uint at2 = at1 + offsetBits;
+        const uint wi2 = idxBase + (at2 >> 5);
+        const uint o2 = loadBits2(indices[min(wi2, idxTotal - 1u)],
+                                  indices[min(wi2 + 1u, idxTotal - 1u)],
+                                  at2 & 31u, offsetBits);
+        i0 = base;
+        i1 = base + o1;
+        i2 = base + o2;
     }
     else
     {

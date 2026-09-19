@@ -270,7 +270,7 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   using namespace kenshin;
   Built built;
   REQUIRE(
-      build(geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f), built));
+      build(geometry::TorusKnotGeometry::create(2, 3, 256, 64, 1.0f), built));
   auto& dag = built.dag;  // packPages pads the cull bounds in place
 
   geometry::PackedGeometry pg;

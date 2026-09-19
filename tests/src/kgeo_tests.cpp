@@ -105,9 +105,11 @@ TEST_CASE("kgeo rejects corrupt magic", "[geometry][kgeo]") {
 // ── M6.1: paged v3 ────────────────────────────────────────────────
 
 TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
-  // Multi-page asset: 128x32 knot packs into ~195 pages.
+  // Multi-page asset: 256x64 knot packs into multiple pages (v6's
+  // packed indices shrank the payload enough that the old 128x32 knot
+  // now fits a single page).
   const auto mesh =
-      kenshin::geometry::TorusKnotGeometry::create(2, 3, 128, 32, 1.0f);
+      kenshin::geometry::TorusKnotGeometry::create(2, 3, 256, 64, 1.0f);
   kenshin::geometry::ClusterDag dag;
   std::string log;
   REQUIRE(buildDag(mesh, dag, log));
@@ -120,19 +122,24 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
 
   // Conservation: page section totals equal the cluster sums, every
   // blob fits its slot (verifyPacking covers the slice equality).
+  // v6: pageMeta.indexCount is the idx SECTION's byte size (packed bit
+  // stream), so the index-total equality no longer holds - the vertex
+  // total and the per-cluster decode checks (below + verifyPacking)
+  // carry the conservation.
   kenshin::usize totalVerts = 0, totalIdx = 0;
   for (const auto& cl : dag.clusters) {
     totalVerts += cl.vertexCount;
     totalIdx += cl.indexCount;
   }
-  kenshin::usize metaVerts = 0, metaIdx = 0;
+  kenshin::usize metaVerts = 0, idxSectionBytes = 0;
   for (kenshin::u32 p = 0; p < pg.pageCount; ++p) {
     metaVerts += pg.pageMeta[p].vertexCount;
-    metaIdx += pg.pageMeta[p].indexCount;
+    idxSectionBytes += pg.pageMeta[p].indexCount;
     REQUIRE(pg.pages[p].size() <= kenshin::geometry::kPageSlotSize);
   }
   REQUIRE(metaVerts == totalVerts);
-  REQUIRE(metaIdx == totalIdx);
+  REQUIRE(idxSectionBytes > 0);
+  REQUIRE(idxSectionBytes < totalIdx);  // packed < u8-flat, always
 
   // Coarsest-first (D14.3 safety net): a cluster at a coarser lodLevel
   // never lands on a higher page index than a finer one.
@@ -245,10 +252,39 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
       for (int a = 0; a < 3; ++a)
         REQUIRE(std::fabs(raw[a] - dec[a]) <= step * 0.5f + 1e-7f);
     }
-    const auto* idxBytes = blob.data() + kenshin::usize(m.idxBase) * 4;
-    for (kenshin::u32 i = 0; i < cl.indexCount; ++i)
-      REQUIRE(kenshin::u32(idxBytes[cl.indexOffset + i]) ==
-              dag.indices[dag.clusters[c].indexOffset + i]);
+    // Indices (M7.2 v6): decode the packed triple from the page blob
+    // via the stored meta (bit base + widths) and compare CYCLICALLY -
+    // the encode rotates each triangle min-first (winding-preserving).
+    // readBits addresses ABSOLUTE bits (each subfield may live in the
+    // word after the triangle's first); the sentinel word covers the
+    // two-word combine.
+    {
+      const kenshin::u32 baseBits = meta.idxBits & 0xFu;
+      const kenshin::u32 offsetBits = (meta.idxBits >> 4) & 0xFu;
+      const kenshin::u32 triW = baseBits + 2 * offsetBits;
+      const kenshin::u64 bitBase = kenshin::u64(meta.idxBits >> 8);
+      const kenshin::u32* idxSec = words + m.idxBase;
+      const kenshin::u32 triCount = cl.indexCount / 3;
+      for (kenshin::u32 t = 0; t < triCount; ++t) {
+        const kenshin::u64 bit = bitBase + kenshin::u64(t) * triW;
+        const kenshin::u32 base =
+            kenshin::geometry::readBits(idxSec, bit, baseBits);
+        const kenshin::u32 o1 =
+            kenshin::geometry::readBits(idxSec, bit + baseBits, offsetBits);
+        const kenshin::u32 o2 = kenshin::geometry::readBits(
+            idxSec, bit + baseBits + offsetBits, offsetBits);
+        const kenshin::u32 got[3] = {base, base + o1, base + o2};
+        const kenshin::u32 triBase = dag.clusters[c].indexOffset + t * 3;
+        const kenshin::u32 ref[3] = {dag.indices[triBase],
+                                     dag.indices[triBase + 1],
+                                     dag.indices[triBase + 2]};
+        const bool cyclic =
+            (got[0] == ref[0] && got[1] == ref[1] && got[2] == ref[2]) ||
+            (got[0] == ref[1] && got[1] == ref[2] && got[2] == ref[0]) ||
+            (got[0] == ref[2] && got[1] == ref[0] && got[2] == ref[1]);
+        REQUIRE(cyclic);
+      }
+    }
   }
   reader.close();
   std::remove("out/roundtrip_v3.kgeo");
@@ -268,7 +304,7 @@ TEST_CASE("kgeo page reader rejects v2", "[geometry][kgeo][paged]") {
 
 TEST_CASE("scene rejects pre-v5 paged dags", "[geometry][kgeo][paged]") {
   // The v5 gate (M7.1 follow-up): raster/decode shaders only speak the
-  // quantized v5 page format. A v3/v4 paged dag must be rejected loudly
+  // quantized page format. A v3/v4 paged dag must be rejected loudly
   // at addMeshPaged - flowing through would build empty v5 tables, and
   // the backend silently drops every dispatch (black viewport, zero
   // diagnostics). The gate fires before any backend use.
@@ -277,5 +313,12 @@ TEST_CASE("scene rejects pre-v5 paged dags", "[geometry][kgeo][paged]") {
   dag.paged = true;
   dag.pagesQuantized = false;
   dag.pageCount = 4;
+  REQUIRE(scene.addMeshPaged(dag) == 0xFFFFFFFFu);
+
+  // The v6 gate (M7.2): the shaders' index decode only speaks the
+  // PACKED bit stream; a v5 page (quantized but u8-flat idx) would
+  // decode garbage - the same silent-black-screen class.
+  dag.pagesQuantized = true;
+  dag.pageIdxPacked = false;
   REQUIRE(scene.addMeshPaged(dag) == 0xFFFFFFFFu);
 }

@@ -1,12 +1,13 @@
 #pragma once
 
-// ── PagePacker — M6.1/M7.1: pack a ClusterDag into fixed-size pages ──
+// ── PagePacker — M6.1/M7.1/M7.2: pack a ClusterDag into fixed pages ─
 // nanite.md D14 + §17/D9: fixed 128 KB slots, cluster-granularity
 // packing, coarsest-first page order (D14.3's root-page safety net).
 // M7.1 v5: the page payload is QUANTIZED (see ClusterQuant) -
 //
 //   [clusterMeta 10 u32/cluster][posBits u32 words][nrmOct 2 B/vertex]
-//   [uvQ 2 B/vertex][idxU8 1 B/index, section 4B-padded]
+//   [uvQ 2 B/vertex][idxBits: M7.2 packed index bit stream, words
+//    4B-padded + 1 zero sentinel word]
 //
 // all section bases in uniform u32 units. Positions live on the mesh's
 // GLOBAL 2^-P integer grid with per-cluster integer anchors (D9.2's
@@ -39,7 +40,9 @@ struct PackedGeometry {
   bool hasUvs = false;
   std::vector<u32> clusterPage;        // per cluster -> page index
   std::vector<u32> localVertexOffset;  // page vertex ordinal (nrm/uv)
-  std::vector<u32> localIndexOffset;   // page index BYTE offset (v5)
+  std::vector<u32> localIndexOffset;   // page idx-section BIT base
+                                       // (v6; the shaders read the bit
+                                       // base from the meta word)
   std::vector<ClusterDag::DagPageMetaV5> pageMeta;
   std::vector<std::vector<u8>> pages;  // GPU-layout blobs
 
@@ -58,15 +61,16 @@ struct PackedGeometry {
 /// Pack + quantize `dag`. The dag is MUTATED: cull bounds (cluster and
 /// group spheres, hierarchy AABBs) padded by one grid step so they
 /// provably cover the decoded geometry; positions/indices untouched.
-/// Page-local offsets land in `out` (indexOffset semantics: BYTES into
-/// the page's idx section).
+/// Page-local offsets land in `out` (indexOffset semantics: BIT base
+/// into the page's packed idx section).
 bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log);
 
-/// Dequantize-aware verification (tests + the v5 load path): every
+/// Dequantize-aware verification (tests + the load path): every
 /// cluster's payload, re-decoded from its PAGE BLOB, must match the
 /// decoded mirror bit-for-bit and the dag pools within the quantizer's
 /// error bounds (position <= step/2, normal <= 1.5 deg, uv <=
-/// range/508, indices exact) - plus conservation and watertight checks.
+/// range/508, indices exact under the winding-preserving cyclic
+/// rotation) - plus conservation and watertight checks.
 bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
                    std::string& log);
 

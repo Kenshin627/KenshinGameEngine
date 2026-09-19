@@ -177,7 +177,7 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   // PAGE-LOCAL (nothing to rebase - pages are the pool), and the page
   // machinery appends into the shared page tables.
   // v5 gate (M7.1): the raster/decode shaders only speak the quantized
-  // v5 page format. A v3/v4 paged asset would flow through with EMPTY
+  // page format. A v3/v4 paged asset would flow through with EMPTY
   // pageMetaV5/clusterMetaIndex tables -> 0-byte buffers -> silently
   // dropped dispatches (a black viewport with zero diagnostics).
   if (!dag.pagesQuantized) {
@@ -185,6 +185,16 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
         "[vgscene] paged asset is pre-v5 (no quantized pages); rebuild it "
         "with the current kgeo_builder - the shaders only decode v5");
     return 0xFFFFFFFFu;  // the app checks and exits loudly
+  }
+  // v6 gate (M7.2): the shaders' index decode only speaks the packed
+  // bit stream; a v5 page (u8-flat idx) would decode garbage. Same
+  // silent-black-screen class the v5 gate closes.
+  if (!dag.pageIdxPacked) {
+    KENSHIN_ERROR(
+        "[vgscene] paged asset is v5 (flat u8 indices); rebuild it with "
+        "the current kgeo_builder - the shaders only decode v6 packed "
+        "indices");
+    return 0xFFFFFFFFu;
   }
   m_paged = true;
   VgMeshRange range;

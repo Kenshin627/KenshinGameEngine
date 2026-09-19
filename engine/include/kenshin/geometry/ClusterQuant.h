@@ -5,20 +5,29 @@
 // grid per mesh (step = 2^-P; NEVER bounds-normalized - D9.2's crack
 // discipline), per-cluster integer anchors + per-axis bit widths,
 // bit-packed cluster-local positions, octahedral 2x8 normals, per-
-// cluster-range 8-bit UVs, flat u8 indices (cluster vertexCount <= 128
-// by the builder's config). Decode contract (D5): the CPU mirror and
-// the shader perform the SAME f32 ops in the SAME order, so a decoded
-// vertex is bit-identical on both sides - the GPU differential tests
-// keep their mismatches==0 assertions.
+// cluster-range 8-bit UVs, and M7.2's packed triangle indices
+// (Nanite's runtime-memory scheme with PER-CLUSTER declared widths):
+// each triangle is rotated so its minimal index comes first (a CYCLIC
+// rotation - winding-preserving) and stored as [base: baseBits |
+// +off1: offsetBits | +off2: offsetBits] at the fixed bit offset
+// idxBitBase + t*W. Decode contract (D5): the CPU mirror and the
+// shader perform the SAME ops, so a decoded index triple is identical
+// on both sides - the GPU differential tests keep their mismatches==0
+// assertions. Measured on knot/bigknot (2026-09-19): first-use vertex
+// ordering (what the builder already produces) + per-cluster widths
+// average ~17-18.3 bit/tri vs the old u8-flat 24; Morton/alternative
+// orderings measured WORSE (meshlet triangle order is already
+// spatially optimal).
 //
 //   pos = float3(int3(localBits) + posStart) * step   (exact ints, one
 //        f32 multiply by a power of two)
 //   nrm = octDecode(i8 pair)  (z = 127 - |x| - |y| fixup + normalize)
 //   uv  = uvMin + float2(q) * (uvRange / 255)
-//   idx = u8 lane
+//   idx = (base, base+off1, base+off2)  (cyclic min-first rotation;
+//        the decoded triple is the ROTATED original - render-invariant,
+//        tests compare cyclically)
 
 #include <glm/glm.hpp>
-
 #include <string>
 #include <vector>
 
@@ -44,14 +53,18 @@ struct ClusterQuantMeta {
                                 // page's posBits section
   f32 uvMin[2] = {0.0f, 0.0f};
   f32 uvRange[2] = {0.0f, 0.0f};
-  u32 reserved = 0;
+  /// M7.2 packed indices: [3:0] baseBits (bit_width(vertexCount-1),
+  /// 0..8) | [7:4] offsetBits (bit_width(cluster max tri span), 0..7)
+  /// | [31:8] idxBitBase (cluster's bit offset into the page's idx
+  /// section - packPages fills it like posWordOff).
+  u32 idxBits = 0;
 };
 
 /// One cluster's packed payload (page-section slices) plus the D5-exact
 /// decoded mirror (fills after decodeQuantCluster).
 struct QuantCluster {
   u32 vertexCount = 0;
-  u32 indexCount = 0;
+  u32 indexCount = 0;  // index count (triangles = /3)
   ClusterQuantMeta meta;
 
   // posBits: SOA axis blocks [x: nV*bx | y: nV*by | z: nV*bz] bits,
@@ -62,9 +75,16 @@ struct QuantCluster {
   std::vector<u32> posWords;
   std::vector<u8> nrmOct;  // 2 bytes/vertex
   std::vector<u8> uvQ;     // 2 bytes/vertex
-  std::vector<u8> idx;     // 1 byte/index
+  // idxBits (M7.2): per-triangle [base|off1|off2] at t*W,
+  // W = baseBits + 2*offsetBits; LSB-first from bit 0 (the page
+  // concatenates clusters at BIT granularity; idxBitCount is the
+  // stream's bit length).
+  std::vector<u32> idxWords;
+  u32 idxBitCount = 0;
 
   // D5-exact decoded mirror (3/vertex, 3/vertex, 2/vertex, raw u32).
+  // decIdx holds the CYCLICALLY ROTATED triples (min index first) -
+  // render-identical to the dag order; tests compare cyclically.
   std::vector<f32> decPos;
   std::vector<f32> decNrm;
   std::vector<f32> decUv;
@@ -80,13 +100,15 @@ QuantMeshGrid chooseQuantGrid(const ClusterDag& dag);
 /// call decodeQuantCluster to fill the decoded mirror (kept separate so
 /// the roundtrip test decodes from packed bits alone).
 bool quantizeCluster(const ClusterDag& dag, u32 cluster,
-                     const QuantMeshGrid& grid, bool hasNormals,
-                     bool hasUvs, QuantCluster& out, std::string& log);
+                     const QuantMeshGrid& grid, bool hasNormals, bool hasUvs,
+                     QuantCluster& out, std::string& log);
 
 /// The D5-exact inverse - the CPU mirror of the shader decode. `step`
 /// is the mesh grid's 2^-P (carried by the page header, not the
-/// per-cluster record).
-void decodeQuantCluster(QuantCluster& q, f32 step);
+/// per-cluster record). `idxBitBase` shifts the index stream reads
+/// (0 for the standalone per-cluster roundtrip; the page's cluster
+/// bit base when decoding straight out of a packed page blob).
+void decodeQuantCluster(QuantCluster& q, f32 step, u64 idxBitBase = 0);
 
 // ---- bit-stream primitives (LSB-first u32 words) --------------------
 
@@ -95,7 +117,10 @@ void decodeQuantCluster(QuantCluster& q, f32 step);
 struct BitWriter {
   std::vector<u32>& words;
   u64 bit = 0;
-  explicit BitWriter(std::vector<u32>& w) : words(w) {}
+  /// startBit: continue an existing stream (the page packer
+  /// concatenates per-cluster streams at bit granularity).
+  explicit BitWriter(std::vector<u32>& w, u64 startBit = 0)
+      : words(w), bit(startBit) {}
   void write(u32 value, u32 bits) {
     if (bits == 0) return;
     const u64 end = bit + bits;

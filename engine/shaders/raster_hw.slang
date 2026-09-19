@@ -88,7 +88,7 @@ struct GpuClusterQuant  // 10 u32, mirrors ClusterQuantMeta
   float uvMinY;
   float uvRangeX;
   float uvRangeY;
-  uint reserved;
+  uint idxBits;     // M7.2: baseBits | offsetBits<<4 | bitBase<<8
 };
 
 // v5 decode helpers (CPU mirror = ClusterQuant.cpp, op-for-op - the D5
@@ -98,6 +98,33 @@ uint loadBits2(uint w0, uint w1, uint bitIdx, uint bits) {
   const uint mask = (1u << bits) - 1u;  // bits <= 24
   if (shift + bits <= 32u) return (w0 >> shift) & mask;
   return ((w0 >> shift) | (w1 << (32u - shift))) & mask;
+}
+
+// v6 (M7.2): triangle tri's packed index triple - the cyclic
+// min-first rotation [base | +off1 | +off2] at bitBase + tri*W
+// (D5 mirror = ClusterQuant.cpp decodeQuantCluster). The whole
+// <=22-bit field spans at most the two loaded words. u32 math only -
+// the driver's Slang vertex-stage emit chokes on u64 locals.
+uint3 packedTriOf(uint tri, uint bitBase, uint baseBits, uint offsetBits,
+                  uint idxBaseW, uint idxTotal) {
+  const uint bitIdx = bitBase + tri * (baseBits + 2u * offsetBits);
+  // Per-subfield word loads (a subfield may cross into the next word
+  // - masking the global bit into the triangle window is off by 32).
+  const uint wi0 = idxBaseW + (bitIdx >> 5);
+  const uint base = loadBits2(indices[min(wi0, idxTotal - 1u)],
+                              indices[min(wi0 + 1u, idxTotal - 1u)],
+                              bitIdx & 31u, baseBits);
+  const uint at1 = bitIdx + baseBits;
+  const uint wi1 = idxBaseW + (at1 >> 5);
+  const uint o1 = loadBits2(indices[min(wi1, idxTotal - 1u)],
+                            indices[min(wi1 + 1u, idxTotal - 1u)],
+                            at1 & 31u, offsetBits);
+  const uint at2 = at1 + offsetBits;
+  const uint wi2 = idxBaseW + (at2 >> 5);
+  const uint o2 = loadBits2(indices[min(wi2, idxTotal - 1u)],
+                            indices[min(wi2 + 1u, idxTotal - 1u)],
+                            at2 & 31u, offsetBits);
+  return uint3(base, base + o1, base + o2);
 }
 
 struct GpuCluster {
@@ -209,7 +236,7 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
     qm.uvMinY = asfloat(positions[mb + 6u]);
     qm.uvRangeX = asfloat(positions[mb + 7u]);
     qm.uvRangeY = asfloat(positions[mb + 8u]);
-    qm.reserved = positions[mb + 9u];
+    qm.idxBits = positions[mb + 9u];
   }
 
   if (tri < min(cluster.indexCount, 3u * kMaxTrisPerCluster) / 3u) {
@@ -223,17 +250,12 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
     for (uint k = 0; k < 3u; ++k) {
       float3 lp;
       if (uint(params[5].y) != 0u) {
-        // v5: u8 index lane at the cluster's index BYTE offset (u32
-        // math only - this driver's Slang vertex-stage emit chokes on
-        // u64 locals).
-        const uint byteOff = cluster.indexOffset + tri * 3u + k;
-        const uint lane = byteOff & 3u;
-        const uint w0 = indices[min(idxBase + byteOff / 4u, indexCount - 1u)];
-        uint vi8;
-        if (lane == 0u) vi8 = w0 & 0xFFu;
-        else if (lane == 1u) vi8 = (w0 >> 8u) & 0xFFu;
-        else if (lane == 2u) vi8 = (w0 >> 16u) & 0xFFu;
-        else vi8 = (w0 >> 24u) & 0xFFu;
+        // v6: the packed triple decoded per corner (u32 math only -
+        // this driver's Slang vertex-stage emit chokes on u64 locals).
+        const uint3 tri3 = packedTriOf(tri, qm.idxBits >> 8, qm.idxBits & 0xFu,
+                                       (qm.idxBits >> 4) & 0xFu, idxBase,
+                                       max(indexCount, 1u));
+        const uint vi8 = k == 0u ? tri3.x : (k == 1u ? tri3.y : tri3.z);
         // v5: three SOA bit fields on the mesh's integer grid (page
         // offsets fit 32 bits: < 128 KB -> < 2^21 bits).
         const uint b0 = qm.widths & 0xFu;

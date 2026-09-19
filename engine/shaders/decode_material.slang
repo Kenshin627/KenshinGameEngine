@@ -71,7 +71,7 @@ struct GpuClusterQuant  // 10 u32, mirrors ClusterQuantMeta
     uint widths;      // bx | by<<4 | bz<<8
     uint posWordOff;  // u32 words into posBits
     float uvMinX; float uvMinY; float uvRangeX; float uvRangeY;
-    uint reserved;
+    uint idxBits;     // M7.2: baseBits | offsetBits<<4 | bitBase<<8
 };
 
 // v5 decode helpers (CPU mirror = ClusterQuant.cpp, op-for-op - the D5
@@ -148,14 +148,6 @@ float2 v5Uv(uint vi, uint uvBase, uint poolTotal, uint vertexOffset,
     const uint qy = (word >> (8u * (lane + 1u))) & 0xFFu;
     return float2(qm.uvMinX + float(qx) * (qm.uvRangeX / 255.0),
                   qm.uvMinY + float(qy) * (qm.uvRangeY / 255.0));
-}
-
-// Flat u8 index lanes at an arbitrary byte offset (indices are 3 B/tri,
-// so lanes wrap words): i in 0..5 spans the two words.
-uint byteAt2(uint w0, uint w1, uint i)
-{
-    return i < 4u ? (w0 >> (8u * i)) & 0xFFu
-                  : (w1 >> (8u * (i - 4u))) & 0xFFu;
 }
 
 struct DecodePush
@@ -318,7 +310,7 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         qm.uvMinY = asfloat(positions[min(mb + 6u, metaEnd)]);
         qm.uvRangeX = asfloat(positions[min(mb + 7u, metaEnd)]);
         qm.uvRangeY = asfloat(positions[min(mb + 8u, metaEnd)]);
-        qm.reserved = positions[min(mb + 9u, metaEnd)];
+        qm.idxBits = positions[min(mb + 9u, metaEnd)];
     }
 
 
@@ -384,13 +376,33 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     uint i0, i1, i2;
     if (paged)
     {
-        const uint byteOff = cluster.indexOffset + tri3;
-        const uint lane = byteOff & 3u;
-        const uint w0 = indices[min(idxBase + byteOff / 4u, idxTotal - 1u)];
-        const uint w1 = indices[min(idxBase + byteOff / 4u + 1u, idxTotal - 1u)];
-        i0 = min(byteAt2(w0, w1, lane), cluster.vertexCount - 1u);
-        i1 = min(byteAt2(w0, w1, lane + 1u), cluster.vertexCount - 1u);
-        i2 = min(byteAt2(w0, w1, lane + 2u), cluster.vertexCount - 1u);
+        // v6 packed triple (the cyclic min-first rotation; D5 mirror
+        // = decodeQuantCluster) - per-pixel random access stays O(1):
+        // the <=22-bit field spans at most the two loaded words.
+        const uint tri = tri3 / 3u;
+        const uint baseBits = qm.idxBits & 0xFu;
+        const uint offsetBits = (qm.idxBits >> 4) & 0xFu;
+        const uint bitIdx = (qm.idxBits >> 8) + tri * (baseBits + 2u * offsetBits);
+        // Per-subfield word loads (a subfield may cross into the next
+        // word - masking the global bit into the triangle window is
+        // off by 32).
+        const uint wi0 = idxBase + (bitIdx >> 5);
+        const uint base = loadBits2(indices[min(wi0, idxTotal - 1u)],
+                                    indices[min(wi0 + 1u, idxTotal - 1u)],
+                                    bitIdx & 31u, baseBits);
+        const uint at1 = bitIdx + baseBits;
+        const uint wi1 = idxBase + (at1 >> 5);
+        const uint o1 = loadBits2(indices[min(wi1, idxTotal - 1u)],
+                                  indices[min(wi1 + 1u, idxTotal - 1u)],
+                                  at1 & 31u, offsetBits);
+        const uint at2 = at1 + offsetBits;
+        const uint wi2 = idxBase + (at2 >> 5);
+        const uint o2 = loadBits2(indices[min(wi2, idxTotal - 1u)],
+                                  indices[min(wi2 + 1u, idxTotal - 1u)],
+                                  at2 & 31u, offsetBits);
+        i0 = min(base, cluster.vertexCount - 1u);
+        i1 = min(base + o1, cluster.vertexCount - 1u);
+        i2 = min(base + o2, cluster.vertexCount - 1u);
     }
     else
     {

@@ -61,8 +61,7 @@ bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log) {
   // 1) Quantize every cluster once (exact sizes for page assignment).
   std::vector<QuantCluster> quant(clusterCount);
   for (u32 c = 0; c < clusterCount; ++c) {
-    if (!quantizeCluster(dag, c, out.grid, hasNormals, hasUvs, quant[c],
-                         log))
+    if (!quantizeCluster(dag, c, out.grid, hasNormals, hasUvs, quant[c], log))
       return false;
     decodeQuantCluster(quant[c], out.grid.step);
   }
@@ -76,14 +75,22 @@ bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log) {
            dag.groups[dag.clusters[b].group].lodLevel;
   });
 
-  // Running page sections.
+  // Running page sections. The idx section is a BIT stream (M7.2
+  // packed indices): per-cluster [base|off1|off2] triples concatenated
+  // at bit granularity; +1 zero sentinel word at close for the
+  // two-word combine read at the tail.
   std::vector<u32> metaWords;
   std::vector<u32> posWords;
-  std::vector<u8> nrmBytes, uvBytes, idxBytes;
+  std::vector<u8> nrmBytes, uvBytes;
+  std::vector<u32> idxWords;
+  u64 idxBits = 0;
   u32 pageVerts = 0;
+  const auto idxSectionBytes = [&]() {
+    return (usize((idxBits + 31) / 32) + 1) * sizeof(u32);
+  };
   auto sectionBytes = [&]() {
     return (metaWords.size() + posWords.size()) * sizeof(u32) +
-           nrmBytes.size() + uvBytes.size() + idxBytes.size();
+           nrmBytes.size() + uvBytes.size() + idxSectionBytes();
   };
   bool pageFail = false;
   auto closePage = [&]() {
@@ -98,9 +105,11 @@ bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log) {
     m.uvBase = m.nrmBase + nrmU32;
     const u32 uvU32 = u32((uvBytes.size() + 3) / 4);
     m.idxBase = m.uvBase + uvU32;
-    const u32 idxU32 = u32((idxBytes.size() + 3) / 4);
+    const u32 idxU32 = u32(idxSectionBytes() / sizeof(u32));
     m.vertexCount = pageVerts;
-    m.indexCount = u32(idxBytes.size());
+    // v6 semantics: the idx section's PADDED byte size (was the u8
+    // index count in v5).
+    m.indexCount = u32(idxSectionBytes());
     m.clusterCount = u32(metaWords.size() / kMetaU32);
     m.posStep = out.grid.step;
 
@@ -115,7 +124,13 @@ bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log) {
     usize o = blob.size();
     o += appendPadded(blob, nrmBytes.data(), nrmBytes.size());
     o += appendPadded(blob, uvBytes.data(), uvBytes.size());
-    o += appendPadded(blob, idxBytes.data(), idxBytes.size());
+    // The idx bit stream's words + the zero sentinel word (BitWriter
+    // may have sized one extra headroom word - trim to the exact
+    // section size so the blob layout matches the bases).
+    idxWords.resize(idxU32, 0);
+    blob.insert(
+        blob.end(), reinterpret_cast<const u8*>(idxWords.data()),
+        reinterpret_cast<const u8*>(idxWords.data()) + idxU32 * sizeof(u32));
     if (blob.size() != usize(m.idxBase + idxU32) * sizeof(u32) ||
         blob.size() > kPageSlotSize) {
       log = "page assembly size mismatch";
@@ -128,13 +143,14 @@ bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log) {
 
   for (const u32 c : order) {
     QuantCluster& q = quant[c];
+    const usize clusterIdxBytes =
+        (usize((q.idxBitCount + 31) / 32) + 1) * sizeof(u32);
     const usize addBytes = usize(kMetaU32) * 4 + q.posWords.size() * 4 +
-                           q.nrmOct.size() + q.uvQ.size() + q.idx.size();
-    if (!metaWords.empty() &&
-        sectionBytes() + addBytes + 16 > kPageSlotSize) {
+                           q.nrmOct.size() + q.uvQ.size() + clusterIdxBytes;
+    if (!metaWords.empty() && sectionBytes() + addBytes + 16 > kPageSlotSize) {
       closePage();
-      metaWords.clear(), posWords.clear(), nrmBytes.clear(),
-          uvBytes.clear(), idxBytes.clear(), pageVerts = 0;
+      metaWords.clear(), posWords.clear(), nrmBytes.clear(), uvBytes.clear(),
+          idxWords.clear(), idxBits = 0, pageVerts = 0;
     }
     if (addBytes > kPageSlotSize) {
       log = "cluster " + std::to_string(c) +
@@ -144,15 +160,29 @@ bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log) {
 
     out.clusterPage[c] = u32(out.pageMeta.size());
     out.localVertexOffset[c] = pageVerts;
-    out.localIndexOffset[c] = u32(idxBytes.size());
+    // v6: the per-cluster table entry carries the cluster's BIT base
+    // into its page's idx section (diagnostic - the shaders read the
+    // bit base from the meta word, which packPages fills below).
+    out.localIndexOffset[c] = u32(idxBits);
     out.clusterMetaIndex[c] = u32(metaWords.size() / kMetaU32);
 
     q.meta.posWordOff = u32(posWords.size());
+    q.meta.idxBits |= u32(idxBits) << 8;
     storeMeta(metaWords, q.meta);
     posWords.insert(posWords.end(), q.posWords.begin(), q.posWords.end());
     nrmBytes.insert(nrmBytes.end(), q.nrmOct.begin(), q.nrmOct.end());
     uvBytes.insert(uvBytes.end(), q.uvQ.begin(), q.uvQ.end());
-    idxBytes.insert(idxBytes.end(), q.idx.begin(), q.idx.end());
+    // Bit-concatenate the cluster's index stream (24-bit chunks -
+    // readBits' max, exact for any alignment).
+    {
+      BitWriter w(idxWords, idxBits);
+      for (u64 off = 0; off < q.idxBitCount;) {
+        const u32 chunk = u32(std::min<u64>(24, q.idxBitCount - off));
+        w.write(readBits(q.idxWords.data(), off, chunk), chunk);
+        off += chunk;
+      }
+      idxBits += q.idxBitCount;
+    }
     pageVerts += q.vertexCount;
   }
   closePage();
@@ -183,14 +213,24 @@ bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log) {
   }
 
   {
-    usize used = 0;
+    usize used = 0, metaB = 0, posB = 0, nrmB = 0, uvB = 0, idxB = 0;
     for (const auto& p : out.pages) used += p.size();
+    for (const auto& m : out.pageMeta) {
+      metaB += usize(m.posBase) * 4;  // the meta section is always [0,
+                                      // posBase)
+      posB += usize(m.nrmBase - m.posBase) * 4;
+      nrmB += usize(m.uvBase - m.nrmBase) * 4;
+      uvB += usize(m.idxBase - m.uvBase) * 4;
+      idxB += m.indexCount;  // v6: the idx section's padded byte size
+    }
     KENSHIN_INFO(
         "[pages] {} clusters -> {} pages ({} B slots, {:.1f}% fill, {:.2f} "
-        "MB; quant grid 2^-{}={:.6f})",
+        "MB; sections meta {} + pos {} + nrm {} + uv {} + idx {} B; quant "
+        "grid 2^-{}={:.6f})",
         clusterCount, out.pageCount, kPageSlotSize,
         100.0 * double(used) / (double(out.pageCount) * kPageSlotSize),
-        double(used) / (1024.0 * 1024.0), out.grid.P, out.grid.step);
+        double(used) / (1024.0 * 1024.0), metaB, posB, nrmB, uvB, idxB,
+        out.grid.P, out.grid.step);
   }
   return verifyPacking(dag, out, log);
 }
@@ -235,10 +275,9 @@ bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
     const u32 b[3] = {meta.widths & 0xFu, (meta.widths >> 4) & 0xFu,
                       (meta.widths >> 8) & 0xFu};
     const u32 nV = cl.vertexCount;
-    const u64 axisBase[3] = {u64(meta.posWordOff) * 32,
-                             u64(meta.posWordOff) * 32 + u64(nV) * b[0],
-                             u64(meta.posWordOff) * 32 +
-                                 u64(nV) * (b[0] + b[1])};
+    const u64 axisBase[3] = {
+        u64(meta.posWordOff) * 32, u64(meta.posWordOff) * 32 + u64(nV) * b[0],
+        u64(meta.posWordOff) * 32 + u64(nV) * (b[0] + b[1])};
     const u32* posSec = words + m.posBase;
 
     for (u32 v = 0; v < nV; ++v) {
@@ -269,9 +308,8 @@ bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
       }
       // Watertight bookkeeping.
       char key[64];
-      std::snprintf(key, sizeof key, "%08x%08x%08x",
-                    *(const u32*)&src[0], *(const u32*)&src[1],
-                    *(const u32*)&src[2]);
+      std::snprintf(key, sizeof key, "%08x%08x%08x", *(const u32*)&src[0],
+                    *(const u32*)&src[1], *(const u32*)&src[2]);
       const std::array<f32, 3> dst = {dec[0], dec[1], dec[2]};
       auto it = decodedOf.find(key);
       if (it == decodedOf.end())
@@ -283,27 +321,23 @@ bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
 
       if (hasNormals) {
         // Oct decode from the page bytes; angle bound vs the raw.
-        const u8* pair =
-            blob.data() + usize(m.nrmBase) * 4 + usize(pg.localVertexOffset[c] + v) * 2;
+        const u8* pair = blob.data() + usize(m.nrmBase) * 4 +
+                         usize(pg.localVertexOffset[c] + v) * 2;
         u8 q2[2] = {pair[0], pair[1]};
         const glm::vec3 n = octDecode(q2);
-        const f32* raw =
-            dag.normals.data() + usize(cl.vertexOffset + v) * 3;
-        const f32 angle =
-            std::acos(std::clamp(glm::dot(
-                                       glm::normalize(glm::vec3(
-                                           raw[0], raw[1], raw[2])),
-                                       n),
-                                   -1.0f, 1.0f));
+        const f32* raw = dag.normals.data() + usize(cl.vertexOffset + v) * 3;
+        const f32 angle = std::acos(std::clamp(
+            glm::dot(glm::normalize(glm::vec3(raw[0], raw[1], raw[2])), n),
+            -1.0f, 1.0f));
         maxAngle = std::max(maxAngle, angle);
       }
       if (hasUvs) {
-        const u8* qp =
-            blob.data() + usize(m.uvBase) * 4 + usize(pg.localVertexOffset[c] + v) * 2;
-        const f32* src =
-            dag.uvs.data() + usize(cl.vertexOffset + v) * 2;
+        const u8* qp = blob.data() + usize(m.uvBase) * 4 +
+                       usize(pg.localVertexOffset[c] + v) * 2;
+        const f32* src = dag.uvs.data() + usize(cl.vertexOffset + v) * 2;
         for (int a = 0; a < 2; ++a) {
-          const f32 got = meta.uvMin[a] + f32(qp[a]) * (meta.uvRange[a] / 255.0f);
+          const f32 got =
+              meta.uvMin[a] + f32(qp[a]) * (meta.uvRange[a] / 255.0f);
           const f32 err = std::fabs(src[a] - got);
           maxUvErr = std::max(maxUvErr, err);
           if (err > meta.uvRange[a] / 508.0f + 1e-7f) {
@@ -313,13 +347,38 @@ bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
         }
       }
     }
-    // Indices: exact u8 roundtrip from the page bytes.
-    const u8* idxSec = blob.data() + usize(m.idxBase) * 4;
-    for (u32 i = 0; i < cl.indexCount; ++i) {
-      const u8 got = idxSec[pg.localIndexOffset[c] + i];
-      if (u32(got) != dag.indices[usize(cl.indexOffset) + i]) {
-        log = "packing: cluster " + std::to_string(c) + " index mismatch";
-        return false;
+    // Indices (M7.2): decode the packed triples straight from the
+    // page blob (the stored meta carries the bit base) and compare
+    // CYCLICALLY - the encode rotates each triangle so its minimal
+    // index leads (winding-preserving, render-invariant).
+    {
+      const u32 baseBits = meta.idxBits & 0xFu;
+      const u32 offsetBits = (meta.idxBits >> 4) & 0xFu;
+      const u32 triW = baseBits + 2 * offsetBits;
+      const u64 bitBase = u64(meta.idxBits >> 8);
+      const u32* idxSec = words + m.idxBase;
+      // The section's +1 sentinel word covers readBits' two-word
+      // combine at the tail; readBits addresses ABSOLUTE bits (each
+      // subfield may live in the word after the triangle's first).
+      const u32 triCount = cl.indexCount / 3;
+      for (u32 t = 0; t < triCount; ++t) {
+        const u64 bit = bitBase + u64(t) * triW;
+        const u32 base = readBits(idxSec, bit, baseBits);
+        const u32 o1 = readBits(idxSec, bit + baseBits, offsetBits);
+        const u32 o2 =
+            readBits(idxSec, bit + baseBits + offsetBits, offsetBits);
+        const u32 got[3] = {base, base + o1, base + o2};
+        const u32 ref[3] = {dag.indices[usize(cl.indexOffset) + t * 3 + 0],
+                            dag.indices[usize(cl.indexOffset) + t * 3 + 1],
+                            dag.indices[usize(cl.indexOffset) + t * 3 + 2]};
+        const bool cyclic =
+            (got[0] == ref[0] && got[1] == ref[1] && got[2] == ref[2]) ||
+            (got[0] == ref[1] && got[1] == ref[2] && got[2] == ref[0]) ||
+            (got[0] == ref[2] && got[1] == ref[0] && got[2] == ref[1]);
+        if (!cyclic || got[0] >= nV || got[1] >= nV || got[2] >= nV) {
+          log = "packing: cluster " + std::to_string(c) + " index mismatch";
+          return false;
+        }
       }
     }
     totalVerts += nV;
@@ -328,6 +387,9 @@ bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
   usize metaVerts = 0, metaIdx = 0;
   for (u32 p = 0; p < pg.pageCount; ++p) {
     metaVerts += pg.pageMeta[p].vertexCount;
+    // v6: indexCount is the idx SECTION's padded byte size; the
+    // per-cluster conservation is the vertex slice + the per-triangle
+    // decode bounds checked above (and the shader's pool clamps).
     metaIdx += pg.pageMeta[p].indexCount;
     blobBytes += pg.pages[p].size();
     if (pg.pages[p].size() > kPageSlotSize) {
@@ -339,10 +401,11 @@ bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
       return false;
     }
   }
-  if (metaVerts != totalVerts || metaIdx != totalIdx) {
+  if (metaVerts != totalVerts) {
     log = "packing: page totals disagree with the cluster sum";
     return false;
   }
+  (void)metaIdx;
   KENSHIN_INFO(
       "[pages] verify: maxPosErr={:.7f} maxUvErr={:.7f} maxAngle={:.2f} deg "
       "({} blobs, {:.2f} MB)",

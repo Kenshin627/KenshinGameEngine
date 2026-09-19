@@ -91,27 +91,27 @@ void main()
     out[5] = positions[posBase + bitA / 32u];
     out[6] = positions[mb];
     out[7] = uint(ph.posStep);
-    // Triangle audit: params[1] = triIdx; decode the 3 indices via the
-    // raster's byteAt path and store them in out[4..6].
-    // GpuCluster layout (u32): bounds(4) error(1) parentError(1)
-    // vertexOffset(6) vertexCount(7) indexOffset(8) indexCount(9).
+    // Triangle audit (M7.2 v6): params[1].x = triIdx; decode the
+    // packed triple from the meta word's idxBits (baseBits |
+    // offsetBits<<4 | bitBase<<8) exactly like rasterize_sw, store in
+    // out[4..6] (the rotated order - the CPU mirror's decIdx matches).
     const uint triIdx2 = params[1].x;
-    // GpuCluster 12 u32: bounds(0..3) err(4,5) vertexOffset(6)
-    // vertexCount(7) indexOffset(8) indexCount(9) group/refined(10,11).
-    // slot 8 lives in the THIRD vec4's .x.
-    const uint4 cc2 = clusterTable[clusterIdx * 3u + 2u];
-    const uint indexOffset = cc2.x;
+    const uint idxBits = positions[mb + 9u];
+    const uint baseBits = idxBits & 0xFu;
+    const uint offsetBits = (idxBits >> 4) & 0xFu;
+    const uint bitIdx = (idxBits >> 8) + triIdx2 * (baseBits + 2u * offsetBits);
     const uint idxBase2 = pool + ph.idxBase;
-    const uint byteOff = indexOffset + triIdx2 * 3u;
-    const uint lane = byteOff & 3u;
-    const uint w0 = indices[idxBase2 + byteOff / 4u];
-    const uint w1 = indices[idxBase2 + byteOff / 4u + 1u];
-    uint ii0, ii1, ii2;
-    ii0 = (w0 >> (8u * lane)) & 0xFFu;
-    if (lane == 0u) { ii1 = (w0 >> 8u) & 0xFFu; ii2 = (w0 >> 16u) & 0xFFu; }
-    else if (lane == 1u) { ii1 = (w0 >> 16u) & 0xFFu; ii2 = (w0 >> 24u) & 0xFFu; }
-    else if (lane == 2u) { ii1 = (w0 >> 24u) & 0xFFu; ii2 = w1 & 0xFFu; }
-    else { ii1 = w1 & 0xFFu; ii2 = (w1 >> 8u) & 0xFFu; }
-    out[4] = ii0; out[5] = ii1; out[6] = ii2;
-    out[3] = indexOffset;  // reuse: audit
+    const uint wi0 = idxBase2 + (bitIdx >> 5);
+    const uint vBase = loadBits2(indices[wi0], indices[wi0 + 1u],
+                                 bitIdx & 31u, baseBits);
+    const uint at1 = bitIdx + baseBits;
+    const uint wi1 = idxBase2 + (at1 >> 5);
+    const uint off1 = loadBits2(indices[wi1], indices[wi1 + 1u],
+                                at1 & 31u, offsetBits);
+    const uint at2 = at1 + offsetBits;
+    const uint wi2 = idxBase2 + (at2 >> 5);
+    const uint off2 = loadBits2(indices[wi2], indices[wi2 + 1u],
+                                at2 & 31u, offsetBits);
+    out[4] = vBase; out[5] = vBase + off1; out[6] = vBase + off2;
+    out[3] = idxBits;  // reuse: audit
 }

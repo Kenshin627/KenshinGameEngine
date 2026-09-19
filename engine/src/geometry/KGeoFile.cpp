@@ -2,9 +2,8 @@
 
 #include <cstdio>
 #include <cstring>
-#include <vector>
-
 #include <glm/glm.hpp>
+#include <vector>
 
 #include "kenshin/core/Log.h"
 
@@ -16,9 +15,12 @@ namespace {
 constexpr u32 kMagic = 0x324F474B;  // "KGO2"
 constexpr u32 kVersion = 2;
 constexpr u32 kMagicV3 = 0x334F474B;  // "KGO3" (M6.1 paged)
-constexpr u32 kVersion3 = 3;   // paged, no maxEdge table
-constexpr u32 kVersion4 = 4;   // paged + per-cluster maxEdge table
-constexpr u32 kVersion5 = 5;   // M7.1: quantized pages + clusterMetaIndex + 12-u32 page meta
+constexpr u32 kVersion3 = 3;          // paged, no maxEdge table
+constexpr u32 kVersion4 = 4;          // paged + per-cluster maxEdge table
+constexpr u32 kVersion5 =
+    5;  // M7.1: quantized pages + clusterMetaIndex + 12-u32 page meta
+constexpr u32 kVersion6 =
+    6;  // M7.2: packed triangle indices (same table layout as v5; the idx section becomes a bit stream and the meta's 10th word carries the widths/bit base). Old assets are loadable for TABLE reads but the RUNTIME paged path requires v6 (pageIdxPacked).
 
 #pragma pack(push, 4)
 struct FileHeader {
@@ -117,8 +119,8 @@ bool readVector(std::FILE* file, std::vector<T>& data, usize count) {
 bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
                          ClusterDag& dag, std::string& log);
 bool rehydrateTables(std::FILE* file, u32 groupCount, u32 clusterCount,
-                    u32 childEdgeCount, u32 rootCount, u32 hierarchyCount,
-                    ClusterDag& dag, std::string& log);
+                     u32 childEdgeCount, u32 rootCount, u32 hierarchyCount,
+                     ClusterDag& dag, std::string& log);
 
 bool writeKGeo(const std::string& path, const ClusterDag& dag,
                std::string& log) {
@@ -207,9 +209,8 @@ bool writeKGeo(const std::string& path, const ClusterDag& dag,
 }
 
 bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
-                     const PackedGeometry& pg, std::string& log) {
-  if (pg.pageCount != pg.pageMeta.size() ||
-      pg.pageCount != pg.pages.size() ||
+                    const PackedGeometry& pg, std::string& log) {
+  if (pg.pageCount != pg.pageMeta.size() || pg.pageCount != pg.pages.size() ||
       pg.clusterPage.size() != dag.clusters.size()) {
     log = "paged write: packing table size mismatch";
     return false;
@@ -272,15 +273,15 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
     pageVerts += m.vertexCount;
     pageIdx += m.indexCount;
     const u32 stepBits = *reinterpret_cast<const u32*>(&m.posStep);
-    pageMetaFlat.insert(pageMetaFlat.end(),
-                        {m.posBase, m.nrmBase, m.uvBase, m.idxBase,
-                         m.metaBase, m.vertexCount, m.indexCount,
-                         m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
+    pageMetaFlat.insert(
+        pageMetaFlat.end(),
+        {m.posBase, m.nrmBase, m.uvBase, m.idxBase, m.metaBase, m.vertexCount,
+         m.indexCount, m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
   }
 
   const FileHeaderV3 header{
       .magic = kMagicV3,
-      .version = kVersion5,
+      .version = kVersion6,
       .groupCount = static_cast<u32>(dag.groups.size()),
       .clusterCount = static_cast<u32>(dag.clusters.size()),
       .childEdgeCount = static_cast<u32>(childIndices.size()),
@@ -308,17 +309,24 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
     const u32* idx = pg.decodedIndices.data();
     f32 e = 0.0f;
     for (u32 t = 0; t + 2 < cl.indexCount; t += 3) {
-      const glm::vec3 a(pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t)]) * 3],
-                        pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t)]) * 3 + 1],
-                        pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t)]) * 3 + 2]);
-      const glm::vec3 b(pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 1)]) * 3],
-                        pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 1)]) * 3 + 1],
-                        pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 1)]) * 3 + 2]);
-      const glm::vec3 c3(pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 2)]) * 3],
-                         pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 2)]) * 3 + 1],
-                         pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 2)]) * 3 + 2]);
-      e = std::max({e, glm::length(b - a), glm::length(c3 - b),
-                    glm::length(a - c3)});
+      const glm::vec3 a(
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t)]) * 3],
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t)]) * 3 + 1],
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t)]) * 3 + 2]);
+      const glm::vec3 b(
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 1)]) * 3],
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 1)]) * 3 +
+              1],
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 1)]) * 3 +
+              2]);
+      const glm::vec3 c3(
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 2)]) * 3],
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 2)]) * 3 +
+              1],
+          pos[usize(cl.vertexOffset + idx[usize(cl.indexOffset + t + 2)]) * 3 +
+              2]);
+      e = std::max(
+          {e, glm::length(b - a), glm::length(c3 - b), glm::length(a - c3)});
     }
     maxEdge[c] = e;
   }
@@ -326,7 +334,8 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   bool ok = std::fwrite(&header, sizeof(header), 1, file) == 1 &&
             writeVector(file, groups) && writeVector(file, clusters) &&
             writeVector(file, childIndices) &&
-            writeVector(file, memberIndices) && writeVector(file, parentIndices) &&
+            writeVector(file, memberIndices) &&
+            writeVector(file, parentIndices) &&
             writeVector(file, dag.hierarchyNodes) &&
             writeVector(file, dag.roots) && writeVector(file, pg.clusterPage) &&
             writeVector(file, pg.clusterMetaIndex) &&
@@ -343,8 +352,7 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
     if (!ok) break;
     const usize pos = static_cast<usize>(rawPos);
     const usize pad = (16 - (pos % 16)) % 16;
-    for (usize b = 0; b < pad && ok; ++b)
-      ok = std::fputc(0, file) != EOF;
+    for (usize b = 0; b < pad && ok; ++b) ok = std::fputc(0, file) != EOF;
     const long long dataPos = ok ? _ftelli64(file) : -1;
     ok = ok && dataPos >= 0;
     if (!ok) break;
@@ -373,10 +381,9 @@ bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log) {
     // v3? Read the v3 header over the same leading 14 u32 + 2 more.
     FileHeaderV3 h3{};
     std::rewind(file);
-    if (std::fread(&h3, sizeof(h3), 1, file) != 1 ||
-        h3.magic != kMagicV3 ||
+    if (std::fread(&h3, sizeof(h3), 1, file) != 1 || h3.magic != kMagicV3 ||
         (h3.version != kVersion3 && h3.version != kVersion4 &&
-         h3.version != kVersion5)) {
+         h3.version != kVersion5 && h3.version != kVersion6)) {
       log = "bad magic/version";
       std::fclose(file);
       return false;
@@ -473,7 +480,6 @@ bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log) {
   return verifyDagInvariants(dag, log);
 }
 
-
 // Shared v2/v3 table rehydration (everything except the pools). The
 // file must be positioned right after the header.
 bool rehydrateTables(std::FILE* file, u32 groupCount, u32 clusterCount,
@@ -532,14 +538,15 @@ bool rehydrateTables(std::FILE* file, u32 groupCount, u32 clusterCount,
         childIndices.begin() + src.childOffset,
         childIndices.begin() + src.childOffset + src.childCount);
     dst.isRoot = src.isRoot != 0;
-    dst.refinedGroup =
-        src.refinedGroup == 0xFFFFFFFFu ? -1 : static_cast<i32>(src.refinedGroup);
+    dst.refinedGroup = src.refinedGroup == 0xFFFFFFFFu
+                           ? -1
+                           : static_cast<i32>(src.refinedGroup);
   }
   return true;
 }
 
 bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
-                          ClusterDag& dag, std::string& log) {
+                         ClusterDag& dag, std::string& log) {
   std::FILE* file = nullptr;
   if (fopen_s(&file, path.c_str(), "rb") != 0 || !file) {
     log = "cannot open for read: " + path;
@@ -553,20 +560,22 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     std::fclose(file);
     return false;
   }
-  if (h3.version == kVersion5 &&
+  if ((h3.version == kVersion5 || h3.version == kVersion6) &&
       !readVector(file, dag.clusterMetaIndex, h3.clusterCount)) {
     log = "truncated (clusterMetaIndex)";
     std::fclose(file);
     return false;
   }
-  const u32 metaWordsPerPage = h3.version == kVersion5 ? 12u : 6u;
+  const u32 metaWordsPerPage =
+      (h3.version == kVersion5 || h3.version == kVersion6) ? 12u : 6u;
   std::vector<u32> metaFlat;
   if (!readVector(file, metaFlat, usize(h3.pageCount) * metaWordsPerPage)) {
     log = "truncated (page metadata)";
     std::fclose(file);
     return false;
   }
-  if ((h3.version == kVersion4 || h3.version == kVersion5) &&
+  if ((h3.version == kVersion4 || h3.version == kVersion5 ||
+       h3.version == kVersion6) &&
       !readVector(file, dag.clusterMaxEdge, h3.clusterCount)) {
     log = "truncated (maxEdge table)";
     std::fclose(file);
@@ -574,27 +583,32 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
   }
   dag.pageMeta.resize(h3.pageCount);
   dag.pageMetaV5.clear();
-  if (h3.version == kVersion5) {
+  if (h3.version == kVersion5 || h3.version == kVersion6) {
     dag.pageMetaV5.resize(h3.pageCount);
     dag.pagesQuantized = true;
+    // M7.2: only v6 pages carry the PACKED index bit stream - the
+    // runtime paged gate requires this (v5 pages' idx is u8-flat).
+    dag.pageIdxPacked = h3.version == kVersion6;
     for (u32 p = 0; p < h3.pageCount; ++p) {
       const u32* m = metaFlat.data() + usize(p) * 12;
       dag.pageMetaV5[p] = ClusterDag::DagPageMetaV5{
-          m[0], m[1], m[2], m[3], m[4],  m[5],
-          m[6], m[7], *reinterpret_cast<const f32*>(&m[8]), m[9], m[10], m[11]};
+          m[0], m[1],  m[2],
+          m[3], m[4],  m[5],
+          m[6], m[7],  *reinterpret_cast<const f32*>(&m[8]),
+          m[9], m[10], m[11]};
     }
   }
   for (u32 p = 0; p < h3.pageCount; ++p) {
-    if (h3.version == kVersion5) {
-      // v5: the old 6-field view keeps only the CONSERVATION fields
+    if (h3.version == kVersion5 || h3.version == kVersion6) {
+      // v5/v6: the old 6-field view keeps only the CONSERVATION fields
       // (vertex/index totals; the base fields' semantics changed to u32
       // units and live in pageMetaV5).
       const u32* m = metaFlat.data() + usize(p) * 12;
-      dag.pageMeta[p] =
-          ClusterDag::DagPageMeta{0u, 0u, 0u, 0u, m[5], m[6]};
+      dag.pageMeta[p] = ClusterDag::DagPageMeta{0u, 0u, 0u, 0u, m[5], m[6]};
     } else {
       const u32* m = metaFlat.data() + usize(p) * 6;
-      dag.pageMeta[p] = ClusterDag::DagPageMeta{m[0], m[1], m[2], m[3], m[4], m[5]};
+      dag.pageMeta[p] =
+          ClusterDag::DagPageMeta{m[0], m[1], m[2], m[3], m[4], m[5]};
     }
   }
   dag.sourceVertexCount = h3.sourceVertexCount;
@@ -618,8 +632,15 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     const auto& m = dag.pageMeta[dag.clusterPage[c]];
     // v5: indexOffset/indexCount are BYTE counts against the page's
     // idx-section byte total (raw - the 4B section padding is extra).
-    if (usize(cl.vertexOffset) + cl.vertexCount > m.vertexCount ||
-        usize(cl.indexOffset) + cl.indexCount > m.indexCount) {
+    // v6: indexOffset is the cluster's BIT base into the packed idx
+    // bit stream and m.indexCount the section's padded byte size -
+    // bound the bit base by the section's bits (exact per-cluster idx
+    // conservation lives in verifyPacking + the shader pool clamps).
+    const bool idxOk =
+        dag.pageIdxPacked
+            ? usize(cl.indexOffset) <= usize(m.indexCount) * 8u
+            : usize(cl.indexOffset) + cl.indexCount <= m.indexCount;
+    if (usize(cl.vertexOffset) + cl.vertexCount > m.vertexCount || !idxOk) {
       log = "paged: cluster " + std::to_string(c) + " slice exceeds page";
       std::fclose(file);
       return false;
@@ -639,15 +660,16 @@ bool KGeoPageReader::open(const std::string& path, std::string& log) {
   FileHeaderV3 h3{};
   if (std::fread(&h3, sizeof(h3), 1, file) != 1 || h3.magic != kMagicV3 ||
       h3.version != kVersion3 && h3.version != kVersion4 &&
-      h3.version != kVersion5) {
+          h3.version != kVersion5 && h3.version != kVersion6) {
     log = "not a v3 paged file: " + path;
     std::fclose(file);
     return false;
   }
   // The page directory is the file's tail: pageCount * 8 bytes.
-  if (_fseeki64(file, -static_cast<long long>(usize(h3.pageCount) *
-                                                sizeof(PageDirEntry)),
-                SEEK_END) != 0) {
+  if (_fseeki64(
+          file,
+          -static_cast<long long>(usize(h3.pageCount) * sizeof(PageDirEntry)),
+          SEEK_END) != 0) {
     log = "cannot seek to the page directory";
     std::fclose(file);
     return false;
@@ -675,7 +697,7 @@ bool KGeoPageReader::open(const std::string& path, std::string& log) {
 }
 
 bool KGeoPageReader::readPage(u32 page, std::vector<u8>& out,
-                               std::string& log) {
+                              std::string& log) {
   if (page >= m_pageCount) {
     log = "page out of range";
     return false;

@@ -117,12 +117,12 @@ struct ClusterDag {
   u32 pageSlotSize = 0;
   bool pagesHaveNormals = false;
   bool pagesHaveUvs = false;
-  std::vector<u32> clusterPage;      // per cluster -> page index
+  std::vector<u32> clusterPage;  // per cluster -> page index
   struct DagPageMeta {
-    u32 posBase = 0;   // float4 elements
-    u32 nrmBase = 0;   // float4 elements
-    u32 uvBase = 0;    // float2 elements
-    u32 idxBase = 0;   // u32 elements
+    u32 posBase = 0;  // float4 elements
+    u32 nrmBase = 0;  // float4 elements
+    u32 uvBase = 0;   // float2 elements
+    u32 idxBase = 0;  // u32 elements
     u32 vertexCount = 0;
     u32 indexCount = 0;
   };
@@ -138,6 +138,11 @@ struct ClusterDag {
   /// v5: true when the paged blobs are quantized (the runtime gate);
   /// v3/v4 assets (false) are rejected by the scene loader.
   bool pagesQuantized = false;
+  /// v6 (M7.2): true when the idx sections are PACKED index bit
+  /// streams (per-cluster widths in the meta word 10). v5 pages are
+  /// quantized but carry u8-flat indices - the paged RUNTIME requires
+  /// this flag; the shaders only decode the packed format.
+  bool pageIdxPacked = false;
   /// v5: per-cluster ordinal into its page's clusterMeta array.
   std::vector<u32> clusterMetaIndex;
 

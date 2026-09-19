@@ -60,15 +60,15 @@ inline u32 axisWidth(i64 extent) {
 }  // namespace
 
 bool quantizeCluster(const ClusterDag& dag, u32 cluster,
-                     const QuantMeshGrid& grid, bool hasNormals,
-                     bool hasUvs, QuantCluster& out, std::string& log) {
+                     const QuantMeshGrid& grid, bool hasNormals, bool hasUvs,
+                     QuantCluster& out, std::string& log) {
   const DagCluster& cl = dag.clusters[cluster];
   out = {};
   out.vertexCount = cl.vertexCount;
   out.indexCount = cl.indexCount;
   if (cl.vertexCount > 255) {
     log = "cluster " + std::to_string(cluster) +
-          " has more than 255 vertices (u8 indices)";
+          " has more than 255 vertices (packed-index baseBits limit)";
     return false;
   }
   const u32 nV = cl.vertexCount;
@@ -120,7 +120,8 @@ bool quantizeCluster(const ClusterDag& dag, u32 cluster,
   }
 
   // 3) Pack: positions SOA per axis (LSB-first bit stream), oct
-  // normals, uv lanes, flat u8 indices.
+  // normals, uv lanes, M7.2 packed indices (cyclic min-first rotation
+  // + per-cluster declared widths - see the header comment).
   BitWriter w(out.posWords);
   for (int a = 0; a < 3; ++a)
     for (u32 v = 0; v < nV; ++v)
@@ -140,28 +141,58 @@ bool quantizeCluster(const ClusterDag& dag, u32 cluster,
     out.meta.uvRange[a] = range;
     const f32 inv = range > 0.0f ? 255.0f / range : 0.0f;
     for (u32 v = 0; v < nV; ++v) {
-      const f32 t = hasUvs
-                        ? dag.uvs[usize(cl.vertexOffset + v) * 2 + a]
-                        : 0.0f;
+      const f32 t = hasUvs ? dag.uvs[usize(cl.vertexOffset + v) * 2 + a] : 0.0f;
       const i32 q = i32((t - uvMn[a]) * inv + 0.5f);
       out.uvQ[usize(v) * 2 + a] = u8(std::clamp(q, 0, 255));
     }
   }
 
-  out.idx.resize(cl.indexCount);
-  for (u32 i = 0; i < cl.indexCount; ++i) {
-    const u32 index = dag.indices[usize(cl.indexOffset) + i];
-    if (index >= cl.vertexCount) {
-      log = "cluster " + std::to_string(cluster) + " index " +
-            std::to_string(index) + " out of vertex range";
+  // Indices: rotate each triangle so its minimal index (first
+  // occurrence) leads - a CYCLIC rotation preserves winding - then
+  // store [base | off1 | off2] with per-cluster widths. The worst
+  // triangle's span bounds the offsets; the builder's first-use vertex
+  // ordering (measured 2026-09-19) keeps most clusters at
+  // offsetBits 5-6 (Morton/triangle-reorder variants were worse).
+  const u32 baseBits = nV <= 1 ? 0u : u32(std::bit_width(u64(nV - 1)));
+  if (baseBits > 8) {
+    log = "cluster " + std::to_string(cluster) +
+          " vertexCount needs baseBits > 8";
+    return false;
+  }
+  u32 maxSpan = 0;
+  const u32 triCount = cl.indexCount / 3;
+  for (u32 t = 0; t < triCount; ++t) {
+    const u32 i0 = dag.indices[usize(cl.indexOffset) + t * 3 + 0];
+    const u32 i1 = dag.indices[usize(cl.indexOffset) + t * 3 + 1];
+    const u32 i2 = dag.indices[usize(cl.indexOffset) + t * 3 + 2];
+    if (i0 >= nV || i1 >= nV || i2 >= nV) {
+      log = "cluster " + std::to_string(cluster) + " index out of range";
       return false;
     }
-    out.idx[i] = u8(index);
+    maxSpan =
+        std::max({maxSpan, std::max({i0, i1, i2}) - std::min({i0, i1, i2})});
   }
+  const u32 offsetBits = maxSpan == 0 ? 0u : u32(std::bit_width(u64(maxSpan)));
+  out.meta.idxBits = baseBits | (offsetBits << 4);
+  const u32 triW = baseBits + 2 * offsetBits;
+  BitWriter iw(out.idxWords);
+  for (u32 t = 0; t < triCount; ++t) {
+    const u32 src[3] = {dag.indices[usize(cl.indexOffset) + t * 3 + 0],
+                        dag.indices[usize(cl.indexOffset) + t * 3 + 1],
+                        dag.indices[usize(cl.indexOffset) + t * 3 + 2]};
+    const u32 r = (src[0] <= src[1] && src[0] <= src[2])
+                      ? 0u
+                      : (src[1] <= src[2] ? 1u : 2u);
+    const u32 base = src[r];
+    iw.write(base, baseBits);
+    iw.write(src[(r + 1) % 3] - base, offsetBits);
+    iw.write(src[(r + 2) % 3] - base, offsetBits);
+  }
+  out.idxBitCount = triCount * triW;
   return true;
 }
 
-void decodeQuantCluster(QuantCluster& q, f32 step) {
+void decodeQuantCluster(QuantCluster& q, f32 step, u64 idxBitBase) {
   // D5 mirror - the shader runs these exact f32 ops in this order.
   const u32 nV = q.vertexCount;
   const u32 b[3] = {q.meta.widths & 0xFu, (q.meta.widths >> 4) & 0xFu,
@@ -171,8 +202,8 @@ void decodeQuantCluster(QuantCluster& q, f32 step) {
   q.decPos.assign(usize(nV) * 3, 0.0f);
   for (int a = 0; a < 3; ++a)
     for (u32 v = 0; v < nV; ++v) {
-      const u32 bits = readBits(q.posWords.data(), axisBase[a] + u64(v) * b[a],
-                                b[a]);
+      const u32 bits =
+          readBits(q.posWords.data(), axisBase[a] + u64(v) * b[a], b[a]);
       const i32 coord = i32(bits) + q.meta.posStart[a];
       q.decPos[usize(v) * 3 + a] = f32(coord) * step;
     }
@@ -194,8 +225,24 @@ void decodeQuantCluster(QuantCluster& q, f32 step) {
           q.meta.uvMin[a] + f32(q.uvQ[usize(v) * 2 + a]) * rangeOver255;
   }
 
+  // M7.2 mirror: the shader reads the SAME fields in the SAME order
+  // (triangle t at meta-absolute bit idxBitBase + t*W; the per-cluster
+  // stream here starts at bit 0 - packPages concatenates bit-exactly).
+  const u32 baseBits = q.meta.idxBits & 0xFu;
+  const u32 offsetBits = (q.meta.idxBits >> 4) & 0xFu;
+  const u32 triW = baseBits + 2 * offsetBits;
+  const u32 triCount = q.indexCount / 3;
   q.decIdx.resize(q.indexCount);
-  for (u32 i = 0; i < q.indexCount; ++i) q.decIdx[i] = q.idx[i];
+  for (u32 t = 0; t < triCount; ++t) {
+    const u64 bit = idxBitBase + u64(t) * triW;
+    const u32 base = readBits(q.idxWords.data(), bit, baseBits);
+    const u32 o1 = readBits(q.idxWords.data(), bit + baseBits, offsetBits);
+    const u32 o2 =
+        readBits(q.idxWords.data(), bit + baseBits + offsetBits, offsetBits);
+    q.decIdx[t * 3 + 0] = base;
+    q.decIdx[t * 3 + 1] = base + o1;
+    q.decIdx[t * 3 + 2] = base + o2;
+  }
 }
 
 void octEncode(f32 nx, f32 ny, f32 nz, u8 out[2]) {
@@ -204,8 +251,10 @@ void octEncode(f32 nx, f32 ny, f32 nz, u8 out[2]) {
   const f32 ns = nl == 0.0f ? 0.0f : 1.0f / nl;
   nx *= ns;
   ny *= ns;
-  const f32 u = (nz >= 0.0f) ? nx : (1.0f - std::fabs(ny)) * (nx >= 0.0f ? 1.0f : -1.0f);
-  const f32 v = (nz >= 0.0f) ? ny : (1.0f - std::fabs(nx)) * (ny >= 0.0f ? 1.0f : -1.0f);
+  const f32 u =
+      (nz >= 0.0f) ? nx : (1.0f - std::fabs(ny)) * (nx >= 0.0f ? 1.0f : -1.0f);
+  const f32 v =
+      (nz >= 0.0f) ? ny : (1.0f - std::fabs(nx)) * (ny >= 0.0f ? 1.0f : -1.0f);
   const int fu = meshopt_quantizeSnorm(u, 8);
   const int fv = meshopt_quantizeSnorm(v, 8);
   out[0] = u8(fu);
