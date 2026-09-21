@@ -53,7 +53,7 @@ struct DecodePagedInputs {
   u32 clusterPage = 0xFFFFFFFFu;
   u32 pageTable = 0xFFFFFFFFu;
   u32 pageHeader = 0xFFFFFFFFu;
-  u32 slotU32Total = 0;  // M7.1 v5: one u32 capacity for the pool
+  u32 slotU32Total = 0;           // M7.1 v5: one u32 capacity for the pool
   u32 clusterMeta = 0xFFFFFFFFu;  // v5 per-cluster meta ordinals
 };
 
@@ -85,13 +85,30 @@ class MaterialDecodePass {
                  const DecodePagedInputs& paged, u32 pairs, u32 hwPairs,
                  u32 postPairs, u32 pairCapacity);
 
+  /// M8.1 GBuffer variants: the SAME decode chain writing the per-slot
+  /// GBuffer targets (fsGBuffer) instead of the final color - the
+  /// deferred pair's producer half. Follow with LightingPass::draw.
+  void drawGBuffer(backend::IRenderBackend& backend, const glm::mat4& viewProj,
+                   const VirtualGeometryScene& scene,
+                   const DecodeParams& params, u32 width, u32 height,
+                   u32 visHandle, u32 pairs, u32 hwPairs, u32 postPairs,
+                   u32 pairCapacity);
+  void drawGBufferPaged(backend::IRenderBackend& backend,
+                        const glm::mat4& viewProj,
+                        const VirtualGeometryScene& scene,
+                        const DecodeParams& params, u32 width, u32 height,
+                        u32 visHandle, const DecodePagedInputs& paged,
+                        u32 pairs, u32 hwPairs, u32 postPairs,
+                        u32 pairCapacity);
+
   void onShutdown(backend::IRenderBackend& backend);
 
  private:
   u32 m_pipeline = ~0u;
+  u32 m_gbufferPipeline = ~0u;  // M8.1: the fsGBuffer MRT variant
   u32 m_decodeParams = ~0u;  // 32B host-visible: [0] mode flags, [1].x pair cap
-  u32 m_dummyU32[2] = {~0u, ~0u};  // v2 stand-ins (bindings 8/9)
-  u32 m_dummyPageHeader = ~0u;     // v2 stand-in (binding 10)
+  u32 m_dummyU32[2] = {~0u, ~0u};    // v2 stand-ins (bindings 8/9)
+  u32 m_dummyPageHeader = ~0u;       // v2 stand-in (binding 10)
   u32 m_dummyPairs[2] = {~0u, ~0u};  // decode-only tests' stand-ins (12/13)
 };
 

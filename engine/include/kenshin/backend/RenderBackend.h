@@ -238,6 +238,29 @@ class IRenderBackend {
     bool conservativeRaster = false;
   };
   virtual u32 createFullscreenPipeline(const FullscreenPipelineInfo& info) = 0;
+  /// M8.1 deferred shading - the GBuffer decode pass: VS+FS with TWO
+  /// color attachments (A = RGBA16F normal + euclidean distance, B =
+  /// RGBA8 base color) and no depth. The FS entry writes SV_Target0/1.
+  virtual u32 createGBufferPipeline(const FullscreenPipelineInfo& info) = 0;
+  /// Draw into THIS frame slot's GBuffer targets: barriers them into
+  /// color-attachment layout, opens the 2-attachment scope (cleared to
+  /// zero - the lighting pass reads alpha==0 as background), binds the
+  /// pipeline's SSBO set (buffers[i] -> binding i) and draws the
+  /// fullscreen triangle. Self-contained: closes its scope and barriers
+  /// the targets to shader-read for the lighting pass.
+  virtual void drawGBuffer(u32 pipeline, const u32* bufferHandles,
+                           u32 bufferCount, const void* push, usize pushBytes,
+                           u32 width, u32 height) = 0;
+  /// M8.1 deferred shading - the lighting pass: fullscreen VS+FS whose
+  /// set layout is MIXED - reflected Sampler2D bindings (in ascending
+  /// binding order) are bound to this frame slot's GBuffer views (A
+  /// first, then B); the reflected StorageBuffer bindings take
+  /// `bufferHandles` in ascending order (the light table). Renders
+  /// into the frame's color target via the viewport scope.
+  virtual u32 createLightingPipeline(const FullscreenPipelineInfo& info) = 0;
+  virtual void drawLighting(u32 pipeline, const u32* bufferHandles,
+                            u32 bufferCount, const void* push, usize pushBytes,
+                            u32 width, u32 height) = 0;
   /// M4.2 hardware raster path: VS+FS with ZERO attachments (the PS
   /// writes the VisBuffer SSBO atomically). Same info shape as the
   /// fullscreen pipeline (vsMain/psMain from one .slang file).

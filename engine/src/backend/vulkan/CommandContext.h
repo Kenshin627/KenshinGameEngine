@@ -34,6 +34,12 @@ class CommandContext {
   /// M4.2 hardware raster: a rendering scope with NO attachments (the
   /// only output is the VisBuffer SSBO atomic written by the PS).
   void beginNullPass(u32 width, u32 height);
+  /// M8.1 deferred shading: the decode pass's GBuffer scope - TWO color
+  /// attachments (A = normal+distance, B = base color), no depth (the
+  /// VisBuffer already resolved visibility), CLEAR to zero (the
+  /// lighting pass reads alpha==0 as "background").
+  void beginGBufferPass(VkImageView colorA, VkImageView colorB, u32 width,
+                        u32 height);
   /// Close the viewport scope (no-op when it never opened).
   void endPass();
   bool passOpen() const { return m_passOpen; }

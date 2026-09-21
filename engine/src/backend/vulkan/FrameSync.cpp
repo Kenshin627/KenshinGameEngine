@@ -130,6 +130,7 @@ void FrameSync::shutdown(const VulkanDevice& device) {
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
     FrameSlot& slot = slots[i];
     slot.offscreen.destroy(device.allocator, device.device);
+    for (auto& g : slot.gbuffer) g.destroy(device.allocator, device.device);
     if (slot.imageAvailable != VK_NULL_HANDLE) {
       vkDestroySemaphore(device.device, slot.imageAvailable, nullptr);
       slot.imageAvailable = VK_NULL_HANDLE;
@@ -207,6 +208,37 @@ bool FrameSync::ensureOffscreens(const VulkanDevice& device, u32 width,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
       KENSHIN_ERROR("[vulkan] offscreen target creation failed (slot {})", i);
       return false;
+    }
+  }
+  return true;
+}
+
+bool FrameSync::ensureGBuffer(const VulkanDevice& device, u32 width,
+                              u32 height) {
+  static const VkFormat kFormats[2] = {VK_FORMAT_R16G16B16A16_SFLOAT,
+                                       VK_FORMAT_R8G8B8A8_UNORM};
+  bool anyStale = false;
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i)
+    for (u32 g = 0; g < 2; ++g)
+      if (!slots[i].gbuffer[g].matches(width, height, kFormats[g]))
+        anyStale = true;
+  if (!anyStale) return true;
+  // The images transition UNDEFINED -> COLOR_ATTACHMENT on the frame's
+  // first GBuffer pass and COLOR_ATTACHMENT -> SHADER_READ_ONLY after
+  // it; creation leaves them UNDEFINED (no initial barrier needed).
+  const VkImageUsageFlags usage =
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
+    FrameSlot& slot = slots[i];
+    for (u32 g = 0; g < 2; ++g) {
+      if (slot.gbuffer[g].matches(width, height, kFormats[g])) continue;
+      retired.push_back({slot.gbuffer[g], frameCounter});
+      if (!slot.gbuffer[g].create(device.allocator, device.device, width,
+                                  height, kFormats[g], usage,
+                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+        KENSHIN_ERROR("[vulkan] gbuffer target creation failed (slot {})", i);
+        return false;
+      }
     }
   }
   return true;

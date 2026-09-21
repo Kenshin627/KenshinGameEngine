@@ -575,3 +575,206 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         return float4(0.5, 0.0, 0.5, 1.0);
     return float4(color, 1.0);
 }
+
+// ── M8.1: the GBuffer variant ──────────────────────────────────────
+// Same decode chain as fsMain's mode-0 path (kept as a deliberate
+// MIRROR - the repo's D5-style duplication discipline: the legacy
+// entry is battle-tested against driver quirks; do not refactor one
+// without the other). Differences: no UV (no textures yet), the
+// normal is transformed to WORLD space (the legacy path's object-space
+// normal was a latent bug only hidden by translation-only demos), and
+// the outputs are the deferred GBuffer:
+//   SV_Target0 (RGBA16F): rgb = world normal, a = euclidean distance
+//                         to the camera (exact worldPos roundtrip:
+//                         camPos + normalize(ray) * dist)
+//   SV_Target1 (RGBA8):   rgb = base color (global kd until M8.2's
+//                         material table), a = reserved (material id)
+// Background: discarded -> the pass's zero clear; the lighting pass
+// reads alpha==0 as background.
+struct GBufferOut
+{
+    float4 a : SV_Target0;
+    float4 b : SV_Target1;
+};
+
+[shader("fragment")]
+GBufferOut fsGBuffer(float4 frag : SV_Position)
+{
+    GBufferOut o;
+    o.a = float4(0, 0, 0, 0);
+    o.b = float4(0, 0, 0, 0);
+
+    const float2 wh = push.viewport.xy;
+    const uint2 pixel = uint2(frag.xy);
+    const uint visLo = vis[(pixel.y * uint(wh.x) + pixel.x) * 2u];
+    if (visLo == 0u)
+        discard;
+
+    const uint triIdx = visLo & 0x7Fu;
+    const uint listSel = (visLo >> 7) & 3u;
+    const uint pairIdx = min((visLo >> 9) & 0x7FFFFFu,
+                             max(uint(decodeParams[1].x), 1u) - 1u);
+    const uint2 pair = listSel == 1u   ? hwPairs[pairIdx]
+                       : listSel == 2u ? postPairs[pairIdx]
+                                       : pairs[pairIdx];
+    const uint instanceIdx = min(pair.x, uint(push.lightDir.w) - 1u);
+    const uint clusterIdx = min(pair.y, uint(push.viewport.z) - 1u);
+    const GpuCluster cluster = clusters[clusterIdx];
+
+    uint posBase = 0, nrmBase = 0, uvBase = 0, idxBase = 0;
+    uint posTotal = 0xFFFFFFFFu, idxTotal = 0xFFFFFFFFu;
+    GpuClusterQuant qm;
+    float posStep = 1.0;
+    const bool paged = uint(decodeParams[0].x) != 0u;
+    if (paged)
+    {
+        const uint page = clusterPage[clusterIdx];
+        const GpuPageHeader ph = pageHeader[page];
+        const uint slot = pageTable[page];
+        const uint pool = slot * kSlotU32s;
+        posTotal = max(uint(decodeParams[0].y), 1u);
+        idxTotal = posTotal;
+        posBase = min(pool + ph.posBase, posTotal - 1u);
+        nrmBase = min(pool + ph.nrmBase, posTotal - 1u);
+        idxBase = min(pool + ph.idxBase, posTotal - 1u);
+        posStep = ph.posStep;
+        const uint ord = min(clusterMeta[clusterIdx], ph.clusterCount - 1u);
+        const uint metaEnd = posTotal - 10u;
+        const uint mb = min(pool + ph.metaBase + ord * 10u, metaEnd);
+        qm.posStartX = int(positions[min(mb, metaEnd)]);
+        qm.posStartY = int(positions[min(mb + 1u, metaEnd)]);
+        qm.posStartZ = int(positions[min(mb + 2u, metaEnd)]);
+        qm.widths = positions[min(mb + 3u, metaEnd)];
+        qm.posWordOff = positions[min(mb + 4u, metaEnd)];
+        qm.idxBits = positions[min(mb + 9u, metaEnd)];
+    }
+
+    const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);
+    uint i0, i1, i2;
+    if (paged)
+    {
+        const uint tri = tri3 / 3u;
+        const uint baseBits = qm.idxBits & 0xFu;
+        const uint offsetBits = (qm.idxBits >> 4) & 0xFu;
+        const uint bitIdx = (qm.idxBits >> 8) + tri * (baseBits + 2u * offsetBits);
+        const uint wi0 = idxBase + (bitIdx >> 5);
+        const uint base = loadBits2(indices[min(wi0, idxTotal - 1u)],
+                                    indices[min(wi0 + 1u, idxTotal - 1u)],
+                                    bitIdx & 31u, baseBits);
+        const uint at1 = bitIdx + baseBits;
+        const uint wi1 = idxBase + (at1 >> 5);
+        const uint o1 = loadBits2(indices[min(wi1, idxTotal - 1u)],
+                                  indices[min(wi1 + 1u, idxTotal - 1u)],
+                                  at1 & 31u, offsetBits);
+        const uint at2 = at1 + offsetBits;
+        const uint wi2 = idxBase + (at2 >> 5);
+        const uint o2 = loadBits2(indices[min(wi2, idxTotal - 1u)],
+                                  indices[min(wi2 + 1u, idxTotal - 1u)],
+                                  at2 & 31u, offsetBits);
+        i0 = min(base, cluster.vertexCount - 1u);
+        i1 = min(base + o1, cluster.vertexCount - 1u);
+        i2 = min(base + o2, cluster.vertexCount - 1u);
+    }
+    else
+    {
+        i0 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 0u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+        i1 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 1u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+        i2 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 2u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+    }
+    float3 lp0, lp1, lp2;
+    if (paged)
+    {
+        lp0 = v5Pos(i0, qm, posBase, posTotal, cluster.vertexCount, posStep);
+        lp1 = v5Pos(i1, qm, posBase, posTotal, cluster.vertexCount, posStep);
+        lp2 = v5Pos(i2, qm, posBase, posTotal, cluster.vertexCount, posStep);
+    }
+    else
+    {
+        const uint p0 = min((posBase + cluster.vertexOffset + i0) * 4u, posTotal - 2u);
+        const uint p1 = min((posBase + cluster.vertexOffset + i1) * 4u, posTotal - 2u);
+        const uint p2 = min((posBase + cluster.vertexOffset + i2) * 4u, posTotal - 2u);
+        lp0 = float3(asfloat(positions[p0]), asfloat(positions[p0 + 1u]),
+                     asfloat(positions[p0 + 2u]));
+        lp1 = float3(asfloat(positions[p1]), asfloat(positions[p1 + 1u]),
+                     asfloat(positions[p1 + 2u]));
+        lp2 = float3(asfloat(positions[p2]), asfloat(positions[p2 + 1u]),
+                     asfloat(positions[p2 + 2u]));
+    }
+    const float3 w0 = applyModel(lp0, instanceIdx);
+    const float3 w1 = applyModel(lp1, instanceIdx);
+    const float3 w2 = applyModel(lp2, instanceIdx);
+
+    const float2 pr = float2(pixel.x + 0.5, pixel.y + 0.5);
+    const float2 s0 = worldToScreen(w0);
+    const float2 s1 = worldToScreen(w1);
+    const float2 s2 = worldToScreen(w2);
+    const float2 e1 = s1 - s0;
+    const float2 e2 = s2 - s0;
+    const float det = e1.x * e2.y - e1.y * e2.x;
+    if (abs(det) < 1e-12) discard;
+    const float2 dp = pr - s0;
+    const float u = (dp.x * e2.y - dp.y * e2.x) / det;
+    const float v = (e1.x * dp.y - e1.y * dp.x) / det;
+    const float b0 = 1.0 - u - v;
+    const float cw0 = max(clipW(w0), 0.001);
+    const float cw1 = max(clipW(w1), 0.001);
+    const float cw2 = max(clipW(w2), 0.001);
+    const float p0 = b0 / cw0, p1 = u / cw1, p2 = v / cw2;
+    const float pSum = p0 + p1 + p2;
+    const float pSumSafe = abs(pSum) < 1e-9f ? (pSum < 0.0 ? -1e-9f : 1e-9f) : pSum;
+    const float pSumInv = 1.0 / pSumSafe;
+
+    float3 n0, n1, n2;
+    if (paged)
+    {
+        n0 = v5Nrm(i0, nrmBase, posTotal, cluster.vertexOffset);
+        n1 = v5Nrm(i1, nrmBase, posTotal, cluster.vertexOffset);
+        n2 = v5Nrm(i2, nrmBase, posTotal, cluster.vertexOffset);
+    }
+    else
+    {
+        const uint n0a = min((nrmBase + cluster.vertexOffset + i0) * 4u, posTotal - 2u);
+        const uint n1a = min((nrmBase + cluster.vertexOffset + i1) * 4u, posTotal - 2u);
+        const uint n2a = min((nrmBase + cluster.vertexOffset + i2) * 4u, posTotal - 2u);
+        n0 = float3(asfloat(normals[n0a]), asfloat(normals[n0a + 1u]), asfloat(normals[n0a + 2u]));
+        n1 = float3(asfloat(normals[n1a]), asfloat(normals[n1a + 1u]), asfloat(normals[n1a + 2u]));
+        n2 = float3(asfloat(normals[n2a]), asfloat(normals[n2a + 1u]), asfloat(normals[n2a + 2u]));
+    }
+    const float3 nrmObj = n0 * p0 + n1 * p1 + n2 * p2;
+    // Object -> world: the instance model's inverse-transpose 3x3,
+    // written as the standard cross-product form (Slang has no inverse()
+    // intrinsic; for M with columns c0..c2, M^{-T}*n = (cross(c1,c2)*n.x
+    // + cross(c2,c0)*n.y + cross(c0,c1)*n.z)/det - translation-only
+    // models leave it identity, so the pure-translation demos are
+    // bit-identical with the legacy object-space normal; rotated/scaled
+    // instances now light correctly).
+    const float4x4 model = instances[instanceIdx].model;
+    const float3 c0 = model[0].xyz, c1 = model[1].xyz, c2 = model[2].xyz;
+    const float3 cross0 = cross(c1, c2);
+    const float detM = dot(c0, cross0);
+    const float invDet =
+        abs(detM) < 1e-20 ? (detM < 0.0 ? -1e20 : 1e20) : 1.0 / detM;
+    const float3 nrm = normalize(
+        (cross0 * nrmObj.x + cross(c2, c0) * nrmObj.y +
+         cross(c0, c1) * nrmObj.z) * invDet);
+
+    const float3 worldPos = (w0 * p0 + w1 * p1 + w2 * p2) * pSumInv;
+    const float dist = length(worldPos - push.camFlags.xyz);
+
+    o.a = float4(nrm, dist);
+    o.b = float4(push.kdScale.rgb, 0.0);
+    // NaN scrub (crossing-triangle garbage paths) - the lighting pass
+    // must never read non-finite GBuffer data.
+    if (!(nrm.x >= -1.0 && nrm.x <= 1.0) || !(dist >= 0.0) ||
+        !(o.b.x >= 0.0))
+    {
+        o.a = float4(0, 0, 0, 0);  // reads as background
+    }
+    return o;
+}

@@ -45,6 +45,23 @@ class DescriptorCache {
   static VkDescriptorPool createStoragePool(VkDevice device,
                                             VkDescriptorSetLayout layout,
                                             u32 bindingCount, u32 setCount);
+  /// M8.1 lighting pass: a MIXED layout - reflected StorageBuffer
+  /// bindings become STORAGE_BUFFER, reflected SampledImage bindings
+  /// (Slang Sampler2D reflects as combined) become
+  /// COMBINED_IMAGE_SAMPLER. `typesOut` (capacity >= bindingCount)
+  /// receives the per-binding type so the draw path knows which writes
+  /// take image infos. Dense 0..maxBinding like createStorageLayout.
+  static constexpr u32 kMaxMixedBindings = 16;
+  static VkDescriptorSetLayout createMixedLayout(VkDevice device,
+                                                 const u32* spirv,
+                                                 usize spirvWords,
+                                                 VkDescriptorType* typesOut,
+                                                 u32* bindingCountOut);
+  /// Pool sized for the mixed type mix; destroy via
+  /// destroyTransientPool.
+  static VkDescriptorPool createMixedPool(VkDevice device,
+                                          const VkDescriptorType* types,
+                                          u32 bindingCount, u32 setCount);
   /// Allocate `count` sets (per-frame-slot rotation: a set is re-written
   /// only when its slot's prior frame has provably completed).
   static bool allocateSets(VkDevice device, VkDescriptorPool pool,

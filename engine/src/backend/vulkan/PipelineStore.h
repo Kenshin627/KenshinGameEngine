@@ -49,6 +49,12 @@ class PipelineStore {
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkDescriptorSet sets[kMaxFramesInFlight] = {};
     bool valid = false;
+    /// M8.1 lighting pipelines: the per-binding descriptor type (dense
+    /// 0..bindingCount-1, STORAGE_BUFFER or COMBINED_IMAGE_SAMPLER) so
+    /// the draw path knows which writes take image infos. Unused (all
+    /// STORAGE_BUFFER) for the classic SSBO pipelines.
+    VkDescriptorType bindingTypes[16] = {};
+    u32 bindingCount = 0;
   };
 
   /// Create the VkPipelineCache, loading prior data from disk.
@@ -72,6 +78,17 @@ class PipelineStore {
   /// the SW rasterizer's convention under the Y-flipped projection.
   u32 createNullRaster(VkDevice device,
                        const IRenderBackend::FullscreenPipelineInfo& info);
+  /// M8.1 GBuffer decode pass: TWO color attachments (RGBA16F normal+
+  /// distance, RGBA8 base color) and NO depth - the VisBuffer already
+  /// resolved visibility, the lighting pass does everything else.
+  u32 createGBuffer(VkDevice device,
+                    const IRenderBackend::FullscreenPipelineInfo& info);
+  /// M8.1 lighting pass: renders into the frame color target (the
+  /// swapchain format like createFullscreen) but its set layout is
+  /// MIXED - reflected Sampler2D bindings become combined image
+  /// samplers bound to this frame slot's GBuffer views.
+  u32 createLighting(VkDevice device, VkFormat colorFormat,
+                     const IRenderBackend::FullscreenPipelineInfo& info);
   /// Persistent compute pipeline (in-frame chain passes).
   u32 createCompute(VkDevice device,
                     const IRenderBackend::ComputePipelineInfo& info);
@@ -95,6 +112,15 @@ class PipelineStore {
   VkPipelineLayout layout(u32 handle) const;
 
  private:
+  /// Shared skeleton for the M8.1 fullscreen variants (GBuffer decode +
+  /// lighting): createFullscreen's state with parameterized color
+  /// formats / optional depth / optional mixed (SSBO + combined image
+  /// sampler) descriptor layout.
+  u32 createFullscreenVariant(
+      VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info,
+      const VkFormat* colorFormats, u32 colorCount, VkFormat depthFormat,
+      bool mixedLayout);
+
   std::vector<Pipeline> m_slots;
   std::vector<Fullscreen> m_fullscreen;
   std::vector<Fullscreen> m_nullRaster;

@@ -46,6 +46,7 @@
 #include "kenshin/manager/MeshPool.h"
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/renderer/ClusterCullPass.h"
+#include "kenshin/renderer/LightingPass.h"
 #include "kenshin/renderer/MaterialDecodePass.h"
 #include "kenshin/renderer/Renderer.h"
 #include "kenshin/renderer/SoftRasterPass.h"
@@ -239,6 +240,15 @@ constexpr kenshin::f32 kClearColor[4] = {14.0f / 255.0f, 16.0f / 255.0f,
 /// state, passed to the renderer as pure data each frame.
 constexpr kenshin::f32 kStudioLight[3] = {0.35f, 0.8f, 0.45f};
 
+// M8.1: the static point-light accents (deterministic - the render
+// regression depends on frame-to-frame stability). Bracketing the
+// --multi rig's mid instance (x=7, the regression camera's subject);
+// the far instance (x=59) stays directional-only by design.
+constexpr glm::vec3 kPointLights[2] = {{3.0f, 2.0f, 2.5f}, {6.5f, 1.5f, 2.5f}};
+constexpr glm::vec3 kPointColors[2] = {{0.9f, 0.35f, 0.2f},
+                                       {0.25f, 0.5f, 0.95f}};
+constexpr kenshin::f32 kPointRange = 8.0f;
+
 /// Locate engine/shaders: relative to the exe (build/<preset>/app/<cfg>),
 /// falling back to the working directory.
 std::string findShaderRoot() {
@@ -270,6 +280,15 @@ struct VgDebugState {
   kenshin::u32 missPages = 0;     // M6.3 touched-absent pages
   bool occlusion = true;
   bool hierCull = true;  // M5.2: BVH8 traversal (off = linear A/B)
+  // M8.1 lighting rig (panel-adjustable; the light TABLE stays
+  // deterministic - static positions, no time animation, keeping the
+  // render regression byte-comparable).
+  glm::vec3 lightDir{0.35f, 0.8f, 0.45f};
+  glm::vec3 lightColor{1.0f, 0.97f, 0.92f};
+  kenshin::f32 lightIntensity = 4.0f;
+  kenshin::f32 pointIntensity = 24.0f;
+  kenshin::f32 ambient = 0.15f;
+  kenshin::f32 exposure = 2.2f;
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
                                        // (moved off KgeoPreview at the
@@ -364,6 +383,8 @@ int main(int argc, char** argv) {
   std::vector<kenshin::renderer::CullGpuInstance> chainInstances;
   std::vector<kenshin::renderer::GpuMeshRangePair> chainMeshRanges;
   kenshin::renderer::MaterialDecodePass decodePass;
+  kenshin::renderer::LightingPass lightingPass;  // M8.1 deferred pair
+  bool lightingReady = false;
   kenshin::renderer::DecodeParams decodeParams;
   // M6.3: page-streaming driver (v3 assets; null otherwise).
   std::unique_ptr<kenshin::renderer::StreamingManager> streamer;
@@ -560,6 +581,21 @@ int main(int argc, char** argv) {
                              32.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
           ImGui::SliderFloat("HW route >=", &vgDebug.hwThresholdPx, 1.0f,
                              128.0f, "%.0f px", ImGuiSliderFlags_Logarithmic);
+          if (vgDebug.viewMode == 0) {
+            // M8.1 lighting rig (only meaningful in the deferred final
+            // view). Static table - deterministic for the regression.
+            ImGui::Separator();
+            ImGui::Text("lighting (deferred)");
+            ImGui::SliderFloat3("dir light", &vgDebug.lightDir.x, -1.0f, 1.0f,
+                                "%.2f");
+            ImGui::SliderFloat("intensity", &vgDebug.lightIntensity, 0.0f,
+                               10.0f, "%.2f");
+            ImGui::SliderFloat("points", &vgDebug.pointIntensity, 0.0f, 30.0f,
+                               "%.2f");
+            ImGui::SliderFloat("ambient", &vgDebug.ambient, 0.0f, 0.5f, "%.3f");
+            ImGui::SliderFloat("exposure", &vgDebug.exposure, 0.1f, 4.0f,
+                               "%.2f");
+          }
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
                            int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
                            1200.0f, ImVec2(240, 40));
@@ -769,6 +805,8 @@ int main(int argc, char** argv) {
                        pagedPtr ? " (paged)" : "");
       }
       if (!decodeReady) decodeReady = decodePass.init(*vgBackend, shaders);
+      if (!lightingReady)
+        lightingReady = lightingPass.init(*vgBackend, shaders);
       if (chainReady && decodeReady) {
         // Same camera, same frame: the chain's inputs and the decode's
         // matrices cannot disagree anymore.
@@ -847,6 +885,11 @@ int main(int argc, char** argv) {
         decodeParams.camPos = camera.position();
         decodeParams.view =
             static_cast<kenshin::renderer::DecodeView>(vgDebug.viewMode);
+        // M8.1: view mode 0 (Final) runs the deferred pair - the decode
+        // writes the GBuffer, the lighting pass shades it (multi-light
+        // GGX) into the frame color target. Debug modes (1..6) keep the
+        // legacy direct decode (no GBuffer involvement).
+        const bool finalView = vgDebug.viewMode == 0;
         if (vgScene->paged()) {
           kenshin::renderer::DecodePagedInputs pd;
           pd.slotPool = vgScene->pageSlotPool();
@@ -856,17 +899,58 @@ int main(int argc, char** argv) {
           pd.slotU32Total =
               vgScene->pageSlotCount() * (kenshin::geometry::kPageSlotSize / 4);
           pd.clusterMeta = vgScene->clusterMetaBuffer();
-          decodePass.drawPaged(
-              *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
-              ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
-              chain.pairsCurrent(*vgBackend), chain.hwPairsCurrent(*vgBackend),
-              chain.postPairsCurrent(*vgBackend), chain.maxPairs());
+          if (finalView) {
+            decodePass.drawGBufferPaged(
+                *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+                ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
+                chain.pairsCurrent(*vgBackend),
+                chain.hwPairsCurrent(*vgBackend),
+                chain.postPairsCurrent(*vgBackend), chain.maxPairs());
+          } else {
+            decodePass.drawPaged(
+                *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+                ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
+                chain.pairsCurrent(*vgBackend),
+                chain.hwPairsCurrent(*vgBackend),
+                chain.postPairsCurrent(*vgBackend), chain.maxPairs());
+          }
         } else {
-          decodePass.draw(
-              *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
-              ci.width, ci.height, chain.visBufferCurrent(*vgBackend),
-              chain.pairsCurrent(*vgBackend), chain.hwPairsCurrent(*vgBackend),
-              chain.postPairsCurrent(*vgBackend), chain.maxPairs());
+          if (finalView) {
+            decodePass.drawGBuffer(
+                *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+                ci.width, ci.height, chain.visBufferCurrent(*vgBackend),
+                chain.pairsCurrent(*vgBackend),
+                chain.hwPairsCurrent(*vgBackend),
+                chain.postPairsCurrent(*vgBackend), chain.maxPairs());
+          } else {
+            decodePass.draw(
+                *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+                ci.width, ci.height, chain.visBufferCurrent(*vgBackend),
+                chain.pairsCurrent(*vgBackend),
+                chain.hwPairsCurrent(*vgBackend),
+                chain.postPairsCurrent(*vgBackend), chain.maxPairs());
+          }
+        }
+        if (finalView && lightingReady) {
+          // The deterministic demo light rig: one directional (the
+          // studio light, panel-adjustable) + two static point accents.
+          std::vector<kenshin::renderer::GpuLightC> lights;
+          kenshin::renderer::GpuLightC dir;
+          dir.a = glm::vec4(glm::normalize(vgDebug.lightDir), 0.0f);
+          dir.b = glm::vec4(vgDebug.lightColor * vgDebug.lightIntensity, 0.0f);
+          lights.push_back(dir);
+          for (int p = 0; p < 2; ++p) {
+            kenshin::renderer::GpuLightC pt;
+            pt.a = glm::vec4(kPointLights[p], 1.0f);
+            pt.b = glm::vec4(kPointColors[p] * vgDebug.pointIntensity,
+                             kPointRange);
+            lights.push_back(pt);
+          }
+          lightingPass.draw(
+              *vgBackend, glm::inverse(camera.viewProjMatrix()),
+              camera.position(), lights,
+              glm::vec4(kClearColor[0], kClearColor[1], kClearColor[2], 1.0f),
+              vgDebug.ambient, vgDebug.exposure, ci.width, ci.height);
         }
       }
     }
@@ -944,6 +1028,7 @@ int main(int argc, char** argv) {
   if (streamer) streamer->shutdown();
   if (virtualPath) {
     decodePass.onShutdown(*vgBackend);
+    if (lightingReady) lightingPass.onShutdown(*vgBackend);
     if (chainReady) chain.onShutdown(*vgBackend);
   }
   // Reverse registration order: overlay context, mesh pool (all GPU

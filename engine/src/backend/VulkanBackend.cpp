@@ -123,6 +123,10 @@ struct VulkanBackend::Impl {
   VkImageView depthView = VK_NULL_HANDLE;
   u32 depthWidth = 0, depthHeight = 0;
 
+  // M8.1: the one engine sampler (linear, clamp-to-edge) for the
+  // lighting pass's GBuffer reads (and future texture sampling).
+  VkSampler linearSampler = VK_NULL_HANDLE;
+
   // GPU timestamps + graphics pipelines (PipelineStore: table + disk cache)
   bool gpuTimestamps = false;
   // Chain segment timestamps: valid on the async compute family (the
@@ -262,6 +266,45 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
 
   if (!m_impl->pipelines.init(m_impl->device.device)) return false;
 
+  // M8.1: the shared linear/clamp sampler (GBuffer reads + future
+  // material textures).
+  {
+    const VkSamplerCreateInfo samplerInfo{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .maxLod = VK_LOD_CLAMP_NONE,
+    };
+    if (!KE_VK(vkCreateSampler(m_impl->device.device, &samplerInfo, nullptr,
+                               &m_impl->linearSampler)))
+      return false;
+  }
+  // M8.1 format gate: the deferred GBuffer needs RGBA16F/RGBA8 as
+  // color attachment + sampled (the engine never queried format
+  // support before - report instead of trusting the driver blind).
+  {
+    const VkFormat formats[2] = {VK_FORMAT_R16G16B16A16_SFLOAT,
+                                 VK_FORMAT_R8G8B8A8_UNORM};
+    for (const VkFormat f : formats) {
+      VkFormatProperties props{};
+      vkGetPhysicalDeviceFormatProperties(m_impl->context.physicalDevice, f,
+                                          &props);
+      const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+      if ((props.optimalTilingFeatures & need) != need) {
+        KENSHIN_ERROR(
+            "[vulkan] format {} lacks color-attachment+sampled support - "
+            "the deferred GBuffer cannot run",
+            int(f));
+        return false;
+      }
+    }
+    KENSHIN_INFO("[vulkan] GBuffer formats RGBA16F/RGBA8: supported");
+  }
+
   // Frame resources (command pools etc.) are device-level and needed by
   // windowless compute paths too. Timing pools are created when EITHER
   // the graphics or the async compute family reports timestamp bits
@@ -326,6 +369,10 @@ void VulkanBackend::shutdown() {
   // mesh/depth objects below (validation: objects stay "in use" until
   // the referencing command buffer is freed with its pool).
   m_impl->frameSync.shutdown(m_impl->device);
+  if (m_impl->linearSampler != VK_NULL_HANDLE) {
+    vkDestroySampler(m_impl->device.device, m_impl->linearSampler, nullptr);
+    m_impl->linearSampler = VK_NULL_HANDLE;
+  }
   m_impl->buffers.destroyAll(m_impl->device.allocator);
   // M6.2 page streaming (device idled above; the slot POOL buffer rode
   // buffers.destroyAll, these are the batch-side resources).
@@ -453,6 +500,10 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
           impl.device, info.width, info.height, targetFormat,
           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
+    return false;
+  // M8.1: the per-slot GBuffer pair rides the same retire discipline
+  // (format support was gated once at initialize).
+  if (!impl.frameSync.ensureGBuffer(impl.device, info.width, info.height))
     return false;
   ensureViewportTextures();
   impl.frameSync.drainRetired(impl.device);
@@ -1122,6 +1173,169 @@ void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
   vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
                          nullptr);
 
+  vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          fs.layout, 0, 1, &set, 0, nullptr);
+  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    fs.pipeline);
+  vkCmdPushConstants(impl.cmd.cmd(), fs.layout,
+                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                     0, static_cast<u32>(pushBytes), push);
+  vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+}
+
+// ── M8.1 deferred shading: GBuffer decode + lighting ────────────
+
+u32 VulkanBackend::createGBufferPipeline(const FullscreenPipelineInfo& info) {
+  return m_impl->pipelines.createGBuffer(m_impl->device.device, info);
+}
+
+void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
+                                u32 bufferCount, const void* push,
+                                usize pushBytes, u32 width, u32 height) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.fullscreenCount())
+    return;
+  const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
+  if (!fs.valid) return;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (slot.gbuffer[0].view == VK_NULL_HANDLE) return;
+
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+
+  // The GBuffer targets cycle UNDEFINED/COLOR_ATTACHMENT (this pass) ->
+  // SHADER_READ_ONLY (after it) -> COLOR_ATTACHMENT (next frame).
+  // DONT_CARE-style: discard last frame's contents on the way in.
+  impl.cmd.endPass();
+  for (u32 g = 0; g < 2; ++g)
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(), CommandContext::imageBarrier(
+                            slot.gbuffer[g].image, VK_IMAGE_LAYOUT_UNDEFINED,
+                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+  {
+    const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "gbuffer-decode"};
+    impl.cmd.beginGBufferPass(slot.gbuffer[0].view, slot.gbuffer[1].view, width,
+                              height);
+    const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+    std::vector<VkWriteDescriptorSet> writes(bufferCount);
+    for (u32 i = 0; i < bufferCount; ++i)
+      writes[i] = VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = set,
+          .dstBinding = i,
+          .descriptorCount = 1,
+          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+          .pBufferInfo = &infos[i],
+      };
+    vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
+                           nullptr);
+    vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            fs.layout, 0, 1, &set, 0, nullptr);
+    vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      fs.pipeline);
+    vkCmdPushConstants(
+        impl.cmd.cmd(), fs.layout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        static_cast<u32>(pushBytes), push);
+    vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+    impl.cmd.endPass();
+  }
+  for (u32 g = 0; g < 2; ++g)
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(),
+        CommandContext::imageBarrier(slot.gbuffer[g].image,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
+}
+
+u32 VulkanBackend::createLightingPipeline(const FullscreenPipelineInfo& info) {
+  // Same format source as createFullscreenPipeline (headless frames
+  // never create these pipelines - see the recon note).
+  return m_impl->pipelines.createLighting(m_impl->device.device,
+                                          m_impl->swapchain.format, info);
+}
+
+void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
+                                 u32 bufferCount, const void* push,
+                                 usize pushBytes, u32 width, u32 height) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.fullscreenCount())
+    return;
+  const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
+  if (!fs.valid || fs.bindingCount == 0) return;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (slot.gbuffer[0].view == VK_NULL_HANDLE ||
+      slot.gbuffer[1].view == VK_NULL_HANDLE)
+    return;
+
+  // Buffer infos for the StorageBuffer bindings (consumed in ascending
+  // binding order after the image bindings).
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+
+  const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "lighting"};
+  if (!impl.cmd.passOpen())
+    impl.cmd.beginViewportPass(slot.offscreen.view, impl.depthView,
+                               slot.offscreen.width, slot.offscreen.height);
+
+  const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+  // Image infos: the reflected Sampler2D bindings (ascending) get this
+  // slot's GBuffer views in order (A, then B).
+  VkDescriptorImageInfo imageInfos[2] = {
+      VkDescriptorImageInfo{
+          .sampler = impl.linearSampler,
+          .imageView = slot.gbuffer[0].view,
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      },
+      VkDescriptorImageInfo{
+          .sampler = impl.linearSampler,
+          .imageView = slot.gbuffer[1].view,
+          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      },
+  };
+  std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
+  u32 nextImage = 0, nextBuffer = 0;
+  for (u32 b = 0; b < fs.bindingCount; ++b) {
+    writes[b] = VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set,
+        .dstBinding = b,
+        .descriptorCount = 1,
+        .descriptorType = fs.bindingTypes[b],
+    };
+    if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+      // Only the first two image bindings map to the GBuffer pair;
+      // extra sampler bindings would need explicit views (none exist
+      // today - the lighting shader declares exactly two).
+      if (nextImage >= 2) return;
+      writes[b].pImageInfo = &imageInfos[nextImage++];
+    } else {
+      if (nextBuffer >= bufferCount) return;
+      writes[b].pBufferInfo = &infos[nextBuffer++];
+    }
+  }
+  vkUpdateDescriptorSets(impl.device.device, fs.bindingCount, writes.data(), 0,
+                         nullptr);
   vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                           fs.layout, 0, 1, &set, 0, nullptr);
   vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,

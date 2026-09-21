@@ -30,6 +30,11 @@ struct FrameSlot {
   VkSemaphore imageAvailable =
       VK_NULL_HANDLE;  // signaled by acquire, consumed by submit
   GpuImage offscreen;
+  // M8.1 deferred shading: the two GBuffer color targets this slot's
+  // decode pass writes and the lighting pass samples (A = RGBA16F
+  // normal + euclidean distance, B = RGBA8 base color + reserved).
+  // Same retire discipline as `offscreen`.
+  GpuImage gbuffer[2];
   // Deferred destroys queued while this slot was recording run when the
   // slot is reused (the timeline wait proves the frame completed by then).
   DeletionQueue deletionQueue;
@@ -115,6 +120,11 @@ struct FrameSync {
   /// not match. Old targets are retired (see RetiredTarget).
   bool ensureOffscreens(const VulkanDevice& device, u32 width, u32 height,
                         VkFormat format, VkImageUsageFlags usage);
+
+  /// M8.1: (re)create the per-slot GBuffer pair (A = RGBA16F, B =
+  /// RGBA8_UNORM, both COLOR_ATTACHMENT | SAMPLED) at the frame size.
+  /// Same retire discipline as ensureOffscreens.
+  bool ensureGBuffer(const VulkanDevice& device, u32 width, u32 height);
 
   void advance() { frameIndex = (frameIndex + 1) % kMaxFramesInFlight; }
 };
