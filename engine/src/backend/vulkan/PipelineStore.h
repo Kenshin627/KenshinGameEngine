@@ -85,12 +85,18 @@ class PipelineStore {
   /// resolved visibility, the lighting pass does everything else.
   u32 createGBuffer(VkDevice device,
                     const IRenderBackend::FullscreenPipelineInfo& info);
-  /// M8.1 lighting pass: renders into the frame color target (the
-  /// swapchain format like createFullscreen) but its set layout is
-  /// MIXED - reflected Sampler2D bindings become combined image
-  /// samplers bound to this frame slot's GBuffer views.
-  u32 createLighting(VkDevice device, VkFormat colorFormat,
+  /// M8.1 lighting pass: renders LINEAR HDR into the per-slot RGBA16F
+  /// target (M8.3 - no depth, the tonemap pass follows); its set
+  /// layout is MIXED - reflected Sampler2D bindings become combined
+  /// image samplers bound to this frame slot's GBuffer views.
+  u32 createLighting(VkDevice device,
                      const IRenderBackend::FullscreenPipelineInfo& info);
+  /// M8.3 tonemap pass: samples the HDR target (the backend binds this
+  /// slot's view to the reflected Sampler2D binding) and writes the
+  /// final LDR into the frame color target (swapchain format, no
+  /// depth).
+  u32 createTonemap(VkDevice device, VkFormat colorFormat,
+                    const IRenderBackend::FullscreenPipelineInfo& info);
   /// Persistent compute pipeline (in-frame chain passes).
   u32 createCompute(VkDevice device,
                     const IRenderBackend::ComputePipelineInfo& info);

@@ -38,6 +38,10 @@ class CommandContext {
   /// attachments (A = normal+distance, B = base color), no depth (the
   /// VisBuffer already resolved visibility), CLEAR to zero (the
   /// lighting pass reads alpha==0 as "background").
+  /// M8.3: single color attachment, NO depth, CLEARED to zero (the
+  /// HDR chain's sentinel background; the tonemap pass fully overwrites
+  /// its target so DONT_CARE would also do - keep the uniform shape).
+  void beginColorPass(VkImageView color, u32 width, u32 height);
   void beginGBufferPass(VkImageView colorA, VkImageView colorB, u32 width,
                         u32 height);
   /// Close the viewport scope (no-op when it never opened).

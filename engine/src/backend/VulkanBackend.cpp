@@ -554,6 +554,10 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   // (format support was gated once at initialize).
   if (!impl.frameSync.ensureGBuffer(impl.device, info.width, info.height))
     return false;
+  // M8.3: the per-slot HDR intermediate (same retire discipline; the
+  // format matches the gate-checked GBuffer A's RGBA16F).
+  if (!impl.frameSync.ensureHdr(impl.device, info.width, info.height))
+    return false;
   ensureViewportTextures();
   impl.frameSync.drainRetired(impl.device);
   {
@@ -1576,10 +1580,14 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
 }
 
 u32 VulkanBackend::createLightingPipeline(const FullscreenPipelineInfo& info) {
-  // Same format source as createFullscreenPipeline (headless frames
-  // never create these pipelines - see the recon note).
-  return m_impl->pipelines.createLighting(m_impl->device.device,
-                                          m_impl->swapchain.format, info);
+  // M8.3: linear HDR target (headless frames never create these
+  // pipelines).
+  return m_impl->pipelines.createLighting(m_impl->device.device, info);
+}
+
+u32 VulkanBackend::createTonemapPipeline(const FullscreenPipelineInfo& info) {
+  return m_impl->pipelines.createTonemap(m_impl->device.device,
+                                         m_impl->swapchain.format, info);
 }
 
 void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
@@ -1593,11 +1601,11 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
   if (!fs.valid || fs.bindingCount == 0) return;
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
   if (slot.gbuffer[0].view == VK_NULL_HANDLE ||
-      slot.gbuffer[1].view == VK_NULL_HANDLE)
+      slot.gbuffer[1].view == VK_NULL_HANDLE || slot.hdr.view == VK_NULL_HANDLE)
     return;
 
   // Buffer infos for the StorageBuffer bindings (consumed in ascending
-  // binding order after the image bindings).
+  // binding order after the image bindings): lights, materials, env.
   std::vector<VkDescriptorBufferInfo> infos(bufferCount);
   for (u32 i = 0; i < bufferCount; ++i) {
     if (!impl.buffers.valid(bufferHandles[i])) return;
@@ -1608,60 +1616,151 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
     };
   }
 
-  const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "lighting"};
-  if (!impl.cmd.passOpen())
-    impl.cmd.beginViewportPass(slot.offscreen.view, impl.depthView,
-                               slot.offscreen.width, slot.offscreen.height);
+  // M8.3: the HDR target cycles UNDEFINED -> COLOR_ATTACHMENT (this
+  // pass) -> SHADER_READ_ONLY (the tonemap sample right after);
+  // depth-less fullscreen scope.
+  impl.cmd.endPass();
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(), CommandContext::imageBarrier(
+                          slot.hdr.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+  {
+    const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "lighting"};
+    impl.cmd.beginColorPass(slot.hdr.view, width, height);
 
-  const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
-  // Image infos: the reflected Sampler2D bindings (ascending) get this
-  // slot's GBuffer views in order (A, then B).
-  VkDescriptorImageInfo imageInfos[2] = {
-      VkDescriptorImageInfo{
-          .sampler = impl.linearSampler,
-          .imageView = slot.gbuffer[0].view,
-          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-      },
-      VkDescriptorImageInfo{
-          .sampler = impl.linearSampler,
-          .imageView = slot.gbuffer[1].view,
-          .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-      },
-  };
-  std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
-  u32 nextImage = 0, nextBuffer = 0;
-  for (u32 b = 0; b < fs.bindingCount; ++b) {
-    writes[b] = VkWriteDescriptorSet{
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = set,
-        .dstBinding = b,
-        .descriptorCount = 1,
-        .descriptorType = fs.bindingTypes[b],
+    const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+    // Image infos: the reflected Sampler2D bindings (ascending) get this
+    // slot's GBuffer views in order (A, then B).
+    VkDescriptorImageInfo imageInfos[2] = {
+        VkDescriptorImageInfo{
+            .sampler = impl.linearSampler,
+            .imageView = slot.gbuffer[0].view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
+        VkDescriptorImageInfo{
+            .sampler = impl.linearSampler,
+            .imageView = slot.gbuffer[1].view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
     };
-    if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-      // Only the first two image bindings map to the GBuffer pair;
-      // extra sampler bindings would need explicit views (none exist
-      // today - the lighting shader declares exactly two).
-      if (nextImage >= 2) return;
-      writes[b].pImageInfo = &imageInfos[nextImage++];
-    } else {
-      if (nextBuffer >= bufferCount) return;
-      writes[b].pBufferInfo = &infos[nextBuffer++];
+    std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
+    u32 nextImage = 0, nextBuffer = 0;
+    bool bindMismatch = false;
+    for (u32 b = 0; b < fs.bindingCount && !bindMismatch; ++b) {
+      writes[b] = VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = set,
+          .dstBinding = b,
+          .descriptorCount = 1,
+          .descriptorType = fs.bindingTypes[b],
+      };
+      if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        // Only the first two image bindings map to the GBuffer pair;
+        // extra sampler bindings would need explicit views (none exist
+        // today - the lighting shader declares exactly two).
+        if (nextImage >= 2) {
+          bindMismatch = true;
+          break;
+        }
+        writes[b].pImageInfo = &imageInfos[nextImage++];
+      } else {
+        if (nextBuffer >= bufferCount) {
+          bindMismatch = true;
+          break;
+        }
+        writes[b].pBufferInfo = &infos[nextBuffer++];
+      }
     }
+    if (bindMismatch)
+      KENSHIN_ERROR("[vulkan] drawLighting: {} handles < {} bindings",
+                    bufferCount, fs.bindingCount);
+    else {
+      vkUpdateDescriptorSets(impl.device.device, fs.bindingCount, writes.data(),
+                             0, nullptr);
+      vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              fs.layout, 0, 1, &set, 0, nullptr);
+      vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        fs.pipeline);
+      vkCmdPushConstants(
+          impl.cmd.cmd(), fs.layout,
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+          static_cast<u32>(pushBytes), push);
+      vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+    }
+    impl.cmd.endPass();
   }
-  vkUpdateDescriptorSets(impl.device.device, fs.bindingCount, writes.data(), 0,
-                         nullptr);
-  vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          fs.layout, 0, 1, &set, 0, nullptr);
-  vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    fs.pipeline);
-  vkCmdPushConstants(impl.cmd.cmd(), fs.layout,
-                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                     0, static_cast<u32>(pushBytes), push);
-  vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(slot.hdr.image,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
 }
 
-// ── in-frame compute (链入帧化) ────────────────────────────────
+// M8.3: the tonemap pass - samples this slot's HDR target (bound to
+// the reflected Sampler2D bindings in ascending order) and writes the
+// exposure/tonemapped LDR into the offscreen. The offscreen sits in
+// COLOR_ATTACHMENT since beginFrame's clear (endFrame moves it to
+// SHADER_READ for the ImGui composite as before); the pass overwrites
+// every pixel, so the clear's contents are irrelevant here.
+void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
+                                u32 width, u32 height) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.fullscreenCount())
+    return;
+  const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
+  if (!fs.valid || fs.bindingCount == 0) return;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (slot.hdr.view == VK_NULL_HANDLE || slot.offscreen.view == VK_NULL_HANDLE)
+    return;
+
+  impl.cmd.endPass();
+  {
+    const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "tonemap"};
+    impl.cmd.beginColorPass(slot.offscreen.view, width, height);
+
+    const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+    VkDescriptorImageInfo imageInfo{
+        .sampler = impl.linearSampler,
+        .imageView = slot.hdr.view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
+    for (u32 b = 0; b < fs.bindingCount; ++b) {
+      writes[b] = VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = set,
+          .dstBinding = b,
+          .descriptorCount = 1,
+          .descriptorType = fs.bindingTypes[b],
+      };
+      if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        writes[b].pImageInfo = &imageInfo;
+      }
+      // The tonemap shader declares no buffer bindings - anything else
+      // in the reflection is a programming error; the dense mixed
+      // layout leaves unwritten SSBO slots harmless.
+    }
+    vkUpdateDescriptorSets(impl.device.device, fs.bindingCount, writes.data(),
+                           0, nullptr);
+    vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            fs.layout, 0, 1, &set, 0, nullptr);
+    vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      fs.pipeline);
+    vkCmdPushConstants(
+        impl.cmd.cmd(), fs.layout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        static_cast<u32>(pushBytes), push);
+    vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+    impl.cmd.endPass();
+  }
+  // The offscreen stays COLOR_ATTACHMENT - endFrame's SHADER_READ
+  // barrier for the ImGui composite picks it up unchanged.
+}
 
 u32 VulkanBackend::createNullPipeline(const FullscreenPipelineInfo& info) {
   FullscreenPipelineInfo patched = info;

@@ -285,12 +285,20 @@ class IRenderBackend {
   /// set layout is MIXED - reflected Sampler2D bindings (in ascending
   /// binding order) are bound to this frame slot's GBuffer views (A
   /// first, then B); the reflected StorageBuffer bindings take
-  /// `bufferHandles` in ascending order (the light table). Renders
-  /// into the frame's color target via the viewport scope.
+  /// `bufferHandles` in ascending order (lights, materials, env).
+  /// M8.3: renders LINEAR HDR into this frame slot's RGBA16F target
+  /// (no depth; background = exact zero, the tonemap sentinel).
   virtual u32 createLightingPipeline(const FullscreenPipelineInfo& info) = 0;
   virtual void drawLighting(u32 pipeline, const u32* bufferHandles,
                             u32 bufferCount, const void* push, usize pushBytes,
                             u32 width, u32 height) = 0;
+  /// M8.3 tonemap pass: samples this frame slot's HDR target (bound to
+  /// the reflected Sampler2D bindings in ascending order) and writes
+  /// the exposure/tonemapped LDR into the frame color target via a
+  /// depth-less color scope. Follows drawLighting every deferred frame.
+  virtual u32 createTonemapPipeline(const FullscreenPipelineInfo& info) = 0;
+  virtual void drawTonemap(u32 pipeline, const void* push, usize pushBytes,
+                           u32 width, u32 height) = 0;
   /// M4.2 hardware raster path: VS+FS with ZERO attachments (the PS
   /// writes the VisBuffer SSBO atomically). Same info shape as the
   /// fullscreen pipeline (vsMain/psMain from one .slang file).

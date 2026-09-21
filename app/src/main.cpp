@@ -52,6 +52,7 @@
 #include "kenshin/renderer/Renderer.h"
 #include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/StreamingManager.h"
+#include "kenshin/renderer/TonemapPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
 #include "kenshin/scene/Camera.h"
@@ -290,6 +291,10 @@ struct VgDebugState {
   kenshin::f32 pointIntensity = 24.0f;
   kenshin::f32 ambient = 0.15f;
   kenshin::f32 exposure = 2.2f;
+  // M8.3: the hemisphere ambient's two poles + tonemap operator.
+  glm::vec3 skyColor{0.65f, 0.75f, 0.95f};
+  glm::vec3 groundColor{0.28f, 0.25f, 0.22f};
+  int tonemapMode = 1;                 // 0 Reinhard, 1 ACES
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
                                        // (moved off KgeoPreview at the
@@ -390,6 +395,8 @@ int main(int argc, char** argv) {
   kenshin::renderer::MaterialDecodePass decodePass;
   kenshin::renderer::LightingPass lightingPass;  // M8.1 deferred pair
   bool lightingReady = false;
+  kenshin::renderer::TonemapPass tonemapPass;  // M8.3 HDR chain tail
+  bool tonemapReady = false;
   kenshin::renderer::DecodeParams decodeParams;
   // M6.3: page-streaming driver (v3 assets; null otherwise).
   std::unique_ptr<kenshin::renderer::StreamingManager> streamer;
@@ -620,6 +627,9 @@ int main(int argc, char** argv) {
                                10.0f, "%.2f");
             ImGui::SliderFloat("points", &vgDebug.pointIntensity, 0.0f, 30.0f,
                                "%.2f");
+            ImGui::Combo("tonemap", &vgDebug.tonemapMode, "Reinhard\0ACES\0");
+            ImGui::ColorEdit3("sky", &vgDebug.skyColor.x);
+            ImGui::ColorEdit3("ground", &vgDebug.groundColor.x);
             ImGui::SliderFloat("ambient", &vgDebug.ambient, 0.0f, 0.5f, "%.3f");
             ImGui::SliderFloat("exposure", &vgDebug.exposure, 0.1f, 4.0f,
                                "%.2f");
@@ -835,6 +845,10 @@ int main(int argc, char** argv) {
       if (!decodeReady) decodeReady = decodePass.init(*vgBackend, shaders);
       if (!lightingReady)
         lightingReady = lightingPass.init(*vgBackend, shaders);
+      // Own once-only guard (a bare second statement under the
+      // brace-less if above would re-create the pipeline stack every
+      // frame - the review's catch).
+      if (!tonemapReady) tonemapReady = tonemapPass.init(*vgBackend, shaders);
       if (chainReady && decodeReady) {
         // Same camera, same frame: the chain's inputs and the decode's
         // matrices cannot disagree anymore.
@@ -984,7 +998,16 @@ int main(int argc, char** argv) {
                   : kenshin::backend::IRenderBackend::kInvalidBufferHandle,
               vgScene->paged() ? vgScene->materialCount() : 0u,
               glm::vec4(kClearColor[0], kClearColor[1], kClearColor[2], 1.0f),
-              vgDebug.ambient, vgDebug.exposure, ci.width, ci.height);
+              vgDebug.ambient, vgDebug.skyColor, vgDebug.groundColor, ci.width,
+              ci.height);
+          if (tonemapReady)
+            tonemapPass.draw(
+                *vgBackend,
+                static_cast<kenshin::renderer::TonemapPass::Operator>(
+                    vgDebug.tonemapMode),
+                vgDebug.exposure,
+                glm::vec4(kClearColor[0], kClearColor[1], kClearColor[2], 1.0f),
+                ci.width, ci.height);
         }
       }
     }
@@ -1063,6 +1086,7 @@ int main(int argc, char** argv) {
   if (virtualPath) {
     decodePass.onShutdown(*vgBackend);
     if (lightingReady) lightingPass.onShutdown(*vgBackend);
+    if (tonemapReady) tonemapPass.onShutdown(*vgBackend);
     if (chainReady) chain.onShutdown(*vgBackend);
   }
   // Reverse registration order: overlay context, mesh pool (all GPU

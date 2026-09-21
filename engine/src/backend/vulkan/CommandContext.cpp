@@ -86,6 +86,39 @@ void CommandContext::beginNullPass(u32 width, u32 height) {
   m_passOpen = true;
 }
 
+void CommandContext::beginColorPass(VkImageView color, u32 width, u32 height) {
+  const VkClearValue zero{.color = {{0.0f, 0.0f, 0.0f, 0.0f}}};
+  const VkRenderingAttachmentInfo attachment{
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView = color,
+      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .clearValue = zero,
+  };
+  const VkRenderingInfo renderingInfo{
+      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea = {0, 0, width, height},
+      .layerCount = 1,
+      .colorAttachmentCount = 1,
+      .pColorAttachments = &attachment,
+  };
+  vkCmdBeginRendering(m_cmd, &renderingInfo);
+
+  const VkViewport viewport{
+      .x = 0.0f,
+      .y = 0.0f,
+      .width = static_cast<f32>(width),
+      .height = static_cast<f32>(height),
+      .minDepth = 0.0f,
+      .maxDepth = 1.0f,
+  };
+  const VkRect2D scissor{{0, 0}, {width, height}};
+  vkCmdSetViewport(m_cmd, 0, 1, &viewport);
+  vkCmdSetScissor(m_cmd, 0, 1, &scissor);
+  m_passOpen = true;
+}
+
 void CommandContext::beginGBufferPass(VkImageView colorA, VkImageView colorB,
                                       u32 width, u32 height) {
   const VkClearValue zero{.color = {{0.0f, 0.0f, 0.0f, 0.0f}}};

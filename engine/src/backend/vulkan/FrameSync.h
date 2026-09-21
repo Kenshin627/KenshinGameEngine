@@ -35,6 +35,11 @@ struct FrameSlot {
   // normal + euclidean distance, B = RGBA8 base color + reserved).
   // Same retire discipline as `offscreen`.
   GpuImage gbuffer[2];
+  // M8.3: this slot's HDR intermediate (RGBA16F) - the lighting pass's
+  // linear output, sampled by the tonemap pass that writes the final
+  // LDR into `offscreen`. Same layout cycle and retire discipline as
+  // the GBuffer targets.
+  GpuImage hdr;
   // Deferred destroys queued while this slot was recording run when the
   // slot is reused (the timeline wait proves the frame completed by then).
   DeletionQueue deletionQueue;
@@ -125,6 +130,8 @@ struct FrameSync {
   /// RGBA8_UNORM, both COLOR_ATTACHMENT | SAMPLED) at the frame size.
   /// Same retire discipline as ensureOffscreens.
   bool ensureGBuffer(const VulkanDevice& device, u32 width, u32 height);
+  /// M8.3: the per-slot RGBA16F HDR intermediate (same pattern).
+  bool ensureHdr(const VulkanDevice& device, u32 width, u32 height);
 
   void advance() { frameIndex = (frameIndex + 1) % kMaxFramesInFlight; }
 };

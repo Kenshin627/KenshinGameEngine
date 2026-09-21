@@ -66,6 +66,7 @@ add_library(kenshin_engine STATIC
     src/renderer/ClusterCullPass.cpp
     src/renderer/SoftRasterPass.cpp
     src/renderer/LightingPass.cpp
+    src/renderer/TonemapPass.cpp
     src/renderer/MaterialDecodePass.cpp
     src/renderer/VisBufferChain.cpp
     src/renderer/HzbPass.cpp

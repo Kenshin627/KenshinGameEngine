@@ -131,6 +131,7 @@ void FrameSync::shutdown(const VulkanDevice& device) {
     FrameSlot& slot = slots[i];
     slot.offscreen.destroy(device.allocator, device.device);
     for (auto& g : slot.gbuffer) g.destroy(device.allocator, device.device);
+    slot.hdr.destroy(device.allocator, device.device);
     if (slot.imageAvailable != VK_NULL_HANDLE) {
       vkDestroySemaphore(device.device, slot.imageAvailable, nullptr);
       slot.imageAvailable = VK_NULL_HANDLE;
@@ -239,6 +240,29 @@ bool FrameSync::ensureGBuffer(const VulkanDevice& device, u32 width,
         KENSHIN_ERROR("[vulkan] gbuffer target creation failed (slot {})", i);
         return false;
       }
+    }
+  }
+  return true;
+}
+
+bool FrameSync::ensureHdr(const VulkanDevice& device, u32 width, u32 height) {
+  static const VkFormat kFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  bool anyStale = false;
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i)
+    if (!slots[i].hdr.matches(width, height, kFormat)) anyStale = true;
+  if (!anyStale) return true;
+  // Same lifecycle as the GBuffer pair: UNDEFINED -> COLOR_ATTACHMENT
+  // (the lighting pass) -> SHADER_READ_ONLY (the tonemap sample).
+  const VkImageUsageFlags usage =
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+  for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
+    FrameSlot& slot = slots[i];
+    if (slot.hdr.matches(width, height, kFormat)) continue;
+    retired.push_back({slot.hdr, frameCounter});
+    if (!slot.hdr.create(device.allocator, device.device, width, height,
+                         kFormat, usage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      KENSHIN_ERROR("[vulkan] hdr target creation failed (slot {})", i);
+      return false;
     }
   }
   return true;

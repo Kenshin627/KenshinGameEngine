@@ -35,6 +35,11 @@ bool LightingPass::init(backend::IRenderBackend& backend,
                backend::IRenderBackend::BufferHostVisible;
   desc.debugName = "light-table";
   m_lightBuffer = backend.createBuffer(desc);
+  // M8.3: the environment table (binding 4): [0] sky rgb + pad,
+  // [1] ground rgb + pad - the hemisphere ambient's two poles.
+  desc.size = 2 * sizeof(glm::vec4);
+  desc.debugName = "env-table";
+  m_envBuffer = backend.createBuffer(desc);
   // The 1-entry default material table (v2 path binds this - the
   // shader always reads materials[id], the binding must be valid).
   desc.size = 32;
@@ -53,14 +58,16 @@ bool LightingPass::init(backend::IRenderBackend& backend,
     mat[7] = 0.0f;
   }
   return m_lightBuffer != backend::IRenderBackend::kInvalidBufferHandle &&
-         m_materialDummy != backend::IRenderBackend::kInvalidBufferHandle;
+         m_materialDummy != backend::IRenderBackend::kInvalidBufferHandle &&
+         m_envBuffer != backend::IRenderBackend::kInvalidBufferHandle;
 }
 
 void LightingPass::draw(backend::IRenderBackend& backend,
                         const glm::mat4& invViewProj, const glm::vec3& camPos,
                         std::span<const GpuLightC> lights, u32 materialTable,
                         u32 materialCount, const glm::vec4& clearColor,
-                        float ambient, float exposure, u32 width, u32 height) {
+                        float ambient, const glm::vec3& skyColor,
+                        const glm::vec3& groundColor, u32 width, u32 height) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   const u32 count =
       static_cast<u32>(std::min<usize>(lights.size(), kMaxLights));
@@ -82,22 +89,25 @@ void LightingPass::draw(backend::IRenderBackend& backend,
   const u32 effectiveCount = usingDummy ? 1u : std::max(materialCount, 1u);
   push.clearColor = glm::vec4(clearColor.r, clearColor.g, clearColor.b,
                               static_cast<f32>(effectiveCount));
-  push.viewportAmb =
-      glm::vec4(1.0f / static_cast<f32>(width), 1.0f / static_cast<f32>(height),
-                ambient, exposure);
+  push.viewportAmb = glm::vec4(1.0f / static_cast<f32>(width),
+                               1.0f / static_cast<f32>(height), ambient, 0.0f);
   if (count > 0) {
     auto* table = static_cast<GpuLightC*>(backend.mappedPtr(m_lightBuffer));
     std::memcpy(table, lights.data(), count * sizeof(GpuLightC));
   }
-  const u32 buffers[2] = {m_lightBuffer,
-                          usingDummy ? m_materialDummy : materialTable};
-  backend.drawLighting(m_pipeline, buffers, 2, &push, sizeof(push), width,
+  auto* env = static_cast<glm::vec4*>(backend.mappedPtr(m_envBuffer));
+  env[0] = glm::vec4(skyColor, 0.0f);
+  env[1] = glm::vec4(groundColor, 0.0f);
+  const u32 buffers[3] = {
+      m_lightBuffer, usingDummy ? m_materialDummy : materialTable, m_envBuffer};
+  backend.drawLighting(m_pipeline, buffers, 3, &push, sizeof(push), width,
                        height);
 }
 
 void LightingPass::onShutdown(backend::IRenderBackend& backend) {
   if (m_lightBuffer != ~0u) backend.destroyBuffer(m_lightBuffer);
   if (m_materialDummy != ~0u) backend.destroyBuffer(m_materialDummy);
+  if (m_envBuffer != ~0u) backend.destroyBuffer(m_envBuffer);
   m_lightBuffer = m_materialDummy = ~0u;
   m_pipeline = ~0u;  // the pipeline dies with PipelineStore; nothing owned
 }

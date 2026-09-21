@@ -21,9 +21,16 @@
 //      [i].b = rgb color * intensity, w = range (point lights;
 //              0 = unlimited)
 //
+// M8.3: output is LINEAR HDR into the per-slot RGBA16F target - the
+// exposure/tonemap half moved to tonemap.slang (the present pass).
+// Background pixels write ALPHA 0: tonemap.slang passes the clear
+// color through for that sentinel. Lit pixels always carry alpha 1
+// by construction, so an rgb-zero LIT pixel (ambient=0, unlit
+// backfaces, metallic black) still tonemaps normally.
+//
 // Push (packed identically in C++ - 112B of the 128B budget):
 //   float4x4 invViewProj (64B) | camPos + lightCount (16B) |
-//   clearColor rgba (16B) | 1/w, 1/h + ambient + exposure (16B)
+//   clearColor rgb + materialCount (16B) | 1/w, 1/h + ambient + pad (16B)
 
 struct LightPush
 {
@@ -33,7 +40,7 @@ struct LightPush
                           // a the MATERIAL COUNT (M8.2 id clamp bound -
                           // the push block rides existing words; the
                           // alpha of a clear color is meaningless)
-    float4 viewportAmb;   // xy = 1/w, 1/h, z ambient, w exposure
+    float4 viewportAmb;   // xy = 1/w, 1/h, z ambient, w pad (M8.3: exposure moved to the tonemap push)
 };
 
 // The material table record (packed identically to decode_material's
@@ -56,6 +63,10 @@ struct GpuLight
 [[vk::binding(1)]] Sampler2D gbufferB;
 [[vk::binding(2)]] StructuredBuffer<GpuLight> lights;
 [[vk::binding(3)]] StructuredBuffer<GpuMaterial> materials;
+// M8.3: the environment table - [0] sky rgb + pad, [1] ground rgb +
+// pad. The ambient term becomes a hemisphere blend (the cheap diffuse
+// IBL; specular env waits for a prefiltered probe).
+[[vk::binding(4)]] StructuredBuffer<float4> env;
 
 // NOTE on matrices: glm stores column-major and Slang's mul reads
 // buffer vec4s as rows - every transform below is an explicit linear
@@ -106,8 +117,12 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
 {
     const float2 uv = frag.xy * push.viewportAmb.xy;
     const float4 a = gbufferA.SampleLevel(uv, 0.0);
+    // Background sentinel: alpha 0 (NOT an rgb test - lit pixels CAN
+    // be exact-zero rgb with ambient=0 / unlit backfaces / metallic
+    // black materials, and the f16 store rounds very dark values to
+    // zero; alpha is written 1 for every lit pixel by construction).
     if (a.w <= 0.0)
-        return float4(push.clearColor.rgb, 1.0);
+        return float4(0.0, 0.0, 0.0, 0.0);
 
     const float4 bTexel = gbufferB.SampleLevel(uv, 0.0);
     const float3 albedo = bTexel.rgb;
@@ -171,13 +186,16 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         lo += (kd * albedo / 3.14159265 + spec) * li * ndl;
     }
 
-    const float3 ambient = albedo * push.viewportAmb.z;
-    const float3 color = ambient + lo;
-    // Reinhard tonemap with exposure - the offscreen is 8-bit UNORM;
-    // raw GGX output would clip harshly.
-    const float3 mapped =
-        color * push.viewportAmb.w / (color * push.viewportAmb.w + 1.0);
-    if (!(mapped.x >= 0.0) || !(mapped.y >= 0.0) || !(mapped.z >= 0.0))
-        return float4(0.5, 0.0, 0.5, 1.0);
-    return float4(mapped, 1.0);
+    // Hemisphere ambient (M8.3): sky from above, ground from below -
+    // the cheap diffuse-IBL stand-in for a prefiltered probe.
+    const float3 hemi = lerp(env[1].rgb, env[0].rgb, nrm.y * 0.5 + 0.5);
+    const float3 color = albedo * push.viewportAmb.z * hemi + lo;
+    // HDR out - scrub garbage (crossing-triangle paths) to the
+    // BACKGROUND sentinel (alpha 0); magenta was too easy to miss
+    // under an exposure curve.
+    if (!(color.x >= 0.0) || !(color.y >= 0.0) || !(color.z >= 0.0) ||
+        !(color.x < 65504.0) || !(color.y < 65504.0) ||
+        !(color.z < 65504.0))
+        return float4(0.0, 0.0, 0.0, 0.0);
+    return float4(color, 1.0);
 }

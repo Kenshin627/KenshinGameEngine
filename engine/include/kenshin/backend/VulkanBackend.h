@@ -52,6 +52,9 @@ class VulkanBackend final : public IRenderBackend {
   void drawLighting(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                     const void* push, usize pushBytes, u32 width,
                     u32 height) override;
+  u32 createTonemapPipeline(const FullscreenPipelineInfo& info) override;
+  void drawTonemap(u32 pipeline, const void* push, usize pushBytes, u32 width,
+                   u32 height) override;
   u32 createNullPipeline(const FullscreenPipelineInfo& info) override;
   void destroyNullPipeline(u32 pipeline) override;
   void drawNullIndirect(u32 pipeline, const u32* bufferHandles, u32 bufferCount,

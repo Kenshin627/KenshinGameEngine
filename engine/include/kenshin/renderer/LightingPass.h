@@ -49,15 +49,20 @@ class LightingPass {
   /// roughness/metallic the decode pass indexed by GBuffer B's alpha;
   /// `materialCount` clamps it (0 = a 1-entry dummy keeps the binding
   /// validly written and shades with the defaults).
+  /// M8.3: skyColor/groundColor drive the hemisphere ambient (the env
+  /// table, binding 4); output is LINEAR HDR into the backend's
+  /// RGBA16F slot target - follow with TonemapPass::draw.
   void draw(backend::IRenderBackend& backend, const glm::mat4& invViewProj,
             const glm::vec3& camPos, std::span<const GpuLightC> lights,
             u32 materialTable, u32 materialCount, const glm::vec4& clearColor,
-            float ambient, float exposure, u32 width, u32 height);
+            float ambient, const glm::vec3& skyColor,
+            const glm::vec3& groundColor, u32 width, u32 height);
 
  private:
   u32 m_pipeline = ~0u;
   u32 m_lightBuffer = ~0u;    // host-visible, 32 lights max
   u32 m_materialDummy = ~0u;  // 1-entry default table (v2/unpaged path)
+  u32 m_envBuffer = ~0u;      // host-visible, 2 float4s: sky rgb, ground rgb
   static constexpr u32 kMaxLights = 32;
 };
 

@@ -505,10 +505,20 @@ u32 PipelineStore::createGBuffer(
 }
 
 u32 PipelineStore::createLighting(
+    VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
+  // M8.3: linear HDR into the per-slot RGBA16F intermediate; the
+  // format was gate-checked at initialize (the GBuffer A target is the
+  // same RGBA16F).
+  static const VkFormat kHdr = VK_FORMAT_R16G16B16A16_SFLOAT;
+  return createFullscreenVariant(device, info, &kHdr, 1, VK_FORMAT_UNDEFINED,
+                                 true);
+}
+
+u32 PipelineStore::createTonemap(
     VkDevice device, VkFormat colorFormat,
     const IRenderBackend::FullscreenPipelineInfo& info) {
   return createFullscreenVariant(device, info, &colorFormat, 1,
-                                 VK_FORMAT_D32_SFLOAT, true);
+                                 VK_FORMAT_UNDEFINED, true);
 }
 
 u32 PipelineStore::createNullRaster(
