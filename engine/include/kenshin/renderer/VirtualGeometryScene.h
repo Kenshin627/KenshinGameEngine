@@ -15,6 +15,7 @@
 
 #include <cstring>
 #include <glm/glm.hpp>
+#include <string>
 #include <vector>
 
 #include "kenshin/Common.h"
@@ -169,13 +170,24 @@ class VirtualGeometryScene {
   u32 pageTableBuffer() const { return m_pageTableBuffer; }
   u32 pageHeaderBuffer() const { return m_pageHeaderBuffer; }
   u32 clusterMetaBuffer() const { return m_clusterMetaBuffer; }
+  /// M8.2: the GPU material table (8-f32 records: kd, texLayer, rough,
+  /// metal, 2 pad) + the disk-side texture paths for the app to load
+  /// through the TextureManager BEFORE flushPools runs (layer indices
+  /// are baked into the records at addMeshPaged time from the dag's
+  /// texLayer values).
+  u32 materialTableBuffer() const { return m_materialBuffer; }
+  u32 materialCount() const { return u32(m_materialData.size() / 8); }
+  const std::vector<std::string>& materialTexPaths() const {
+    return m_materialTexPaths;
+  }
   u32 pageCount() const { return m_pageCount; }
   u32 pageSlotCount() const { return m_pageSlotCount; }
   /// Persistently-mapped page table (u32 per page; 0xFFFFFFFF = not
   /// resident) - the STREAMING MANAGER's write window.
   u32* pageTableMapped() const {
-    return m_pageTable ? static_cast<u32*>(m_backend->mappedPtr(
-                             m_pageTableBuffer)) : nullptr;
+    return m_pageTable
+               ? static_cast<u32*>(m_backend->mappedPtr(m_pageTableBuffer))
+               : nullptr;
   }
   /// Precomputed per-cluster AABB/maxEdge (3x vec4, the paged chain's
   /// input - sphere-box conservative: min/max = center +/- radius,
@@ -208,9 +220,12 @@ class VirtualGeometryScene {
   // ---- M6.3 paged mode ---------------------------------------------------
   bool m_paged = false;
   std::vector<u32> m_clusterPage;
-  std::vector<u32> m_clusterMetaFlat;  // v5 per-cluster meta ordinals    // global cluster -> global page
-  std::vector<u32> m_pageMetaFlat;   // 6 u32 per global page
-  std::vector<glm::vec4> m_aabbs;    // paged: conservative sphere boxes
+  std::vector<u32>
+      m_clusterMetaFlat;  // v5 per-cluster meta ordinals    // global cluster -> global page
+  std::vector<f32> m_materialData;  // M8.2: 8-f32 GPU material records
+  std::vector<std::string> m_materialTexPaths;  // disk-side albedo refs
+  std::vector<u32> m_pageMetaFlat;              // 6 u32 per global page
+  std::vector<glm::vec4> m_aabbs;  // paged: conservative sphere boxes
   u32 m_pageCount = 0;
   u32 m_pageSlotCount = 0;
   u32 m_pageSlotPool = backend::IRenderBackend::kInvalidBufferHandle;
@@ -218,6 +233,7 @@ class VirtualGeometryScene {
   u32 m_pageTableBuffer = backend::IRenderBackend::kInvalidBufferHandle;
   u32 m_pageHeaderBuffer = backend::IRenderBackend::kInvalidBufferHandle;
   u32 m_clusterMetaBuffer = backend::IRenderBackend::kInvalidBufferHandle;
+  u32 m_materialBuffer = backend::IRenderBackend::kInvalidBufferHandle;
   bool m_pageTable = false;  // mapped-pointer validity gate
 
   u32 m_clusterBuffer = backend::IRenderBackend::kInvalidBufferHandle;

@@ -19,3 +19,5 @@ Thumbs.db
 Desktop.ini
 # render regression reference images (tests/render_regression.cmake)
 !tests/data/*.bmp
+# test albedo texture (M8.2; regenerable 64x64 checker)
+!tests/assets/*.bmp

@@ -52,11 +52,13 @@ class CommandContext {
 
   /// Frame-loop image transition: "everything written so far" (src side is
   /// ALL_COMMANDS + MEMORY_WRITE) into the given dst stage/access + layout.
-  static VkImageMemoryBarrier2 imageBarrier(VkImage image,
-                                            VkImageLayout oldLayout,
-                                            VkImageLayout newLayout,
-                                            VkPipelineStageFlags2 dstStage,
-                                            VkAccessFlags2 dstAccess);
+  /// Subresource window defaults to mip 0 / layer 0 / one each (the
+  /// frame targets are all single-mip single-layer); the M8.2 texture
+  /// upload drives per-mip-range transitions through the overrides.
+  static VkImageMemoryBarrier2 imageBarrier(
+      VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
+      VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, u32 baseMip = 0,
+      u32 mipCount = 1, u32 baseLayer = 0, u32 layerCount = 1);
 
   /// Clear a color image (RGBA floats) in the given (already transitioned)
   /// layout; full mip 0 / layer 0 / single aspect range.

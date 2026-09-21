@@ -1,4 +1,6 @@
-// M8.1: deferred lighting pass - the GBuffer consumer.
+// M8.1: deferred lighting pass - the GBuffer consumer (M8.2: the
+// material table feeds per-pixel roughness/metallic via GBuffer B's
+// alpha-carried material id).
 // Fullscreen triangle; samples the decode pass's GBuffer (A = world
 // normal + euclidean camera distance, B = base color), reconstructs the
 // world position exactly (camPos + normalize(invViewProj ray) * dist -
@@ -27,8 +29,19 @@ struct LightPush
 {
     float4x4 invViewProj;
     float4 camPosCount;   // xyz camPos, w light count
-    float4 clearColor;    // the frame's clear color (background)
+    float4 clearColor;    // rgb the frame's clear color (background),
+                          // a the MATERIAL COUNT (M8.2 id clamp bound -
+                          // the push block rides existing words; the
+                          // alpha of a clear color is meaningless)
     float4 viewportAmb;   // xy = 1/w, 1/h, z ambient, w exposure
+};
+
+// The material table record (packed identically to decode_material's
+// GpuMaterial and the scene's GPU table).
+struct GpuMaterial
+{
+    float4 kdTex;    // rgb kd, a = texture-array layer (-1 = untextured)
+    float4 params;   // x roughness, y metallic, zw pad
 };
 
 struct GpuLight
@@ -42,6 +55,7 @@ struct GpuLight
 [[vk::binding(0)]] Sampler2D gbufferA;
 [[vk::binding(1)]] Sampler2D gbufferB;
 [[vk::binding(2)]] StructuredBuffer<GpuLight> lights;
+[[vk::binding(3)]] StructuredBuffer<GpuMaterial> materials;
 
 // NOTE on matrices: glm stores column-major and Slang's mul reads
 // buffer vec4s as rows - every transform below is an explicit linear
@@ -64,10 +78,9 @@ VSOut vsMain(uint id : SV_VertexID)
     return o;
 }
 
-// GGX terms (minimal PBR; constants until the material table lands in
-// M8.2).
-static const float kRoughness = 0.5;
-static const float kMetallic = 0.0;
+// GGX terms (minimal PBR; roughness/metallic come from the material
+// table via GBuffer B's alpha channel - the decode pass wrote the
+// per-cluster id there).
 
 float distributionGGX(float ndh, float rough)
 {
@@ -96,7 +109,13 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     if (a.w <= 0.0)
         return float4(push.clearColor.rgb, 1.0);
 
-    const float3 albedo = gbufferB.SampleLevel(uv, 0.0).rgb;
+    const float4 bTexel = gbufferB.SampleLevel(uv, 0.0);
+    const float3 albedo = bTexel.rgb;
+    const uint matCount = max(uint(push.clearColor.w + 0.5), 1u);
+    const uint matId =
+        min(uint(round(bTexel.a * 255.0)) & 0xFFu, matCount - 1u);
+    const float2 rm = clamp(materials[matId].params.xy,
+                            float2(0.04, 0.0), float2(1.0, 1.0));
     const float3 nrm = normalize(a.xyz);
     const float3 camPos = push.camPosCount.xyz;
 
@@ -114,7 +133,7 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
 
     const float3 viewDir = normalize(camPos - worldPos);
     const float ndv = max(dot(nrm, viewDir), 0.0);
-    const float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, kMetallic);
+    const float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, rm.y);
 
     float3 lo = float3(0.0, 0.0, 0.0);
     const uint lightCount = uint(push.camPosCount.w + 0.5);
@@ -144,11 +163,11 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         const float ndl = max(dot(nrm, l), 0.0);
         const float ndh = max(dot(nrm, h), 0.0);
         const float3 f = fresnelSchlick(max(dot(h, viewDir), 0.0), f0);
-        const float ndf = distributionGGX(ndh, kRoughness);
-        const float g = geometrySmith(ndv, max(ndl, 1e-4), kRoughness);
+        const float ndf = distributionGGX(ndh, rm.x);
+        const float g = geometrySmith(ndv, max(ndl, 1e-4), rm.x);
         const float3 spec =
             (ndf * g * f) / max(4.0 * ndv * max(ndl, 1e-4), 1e-4);
-        const float3 kd = (float3(1.0, 1.0, 1.0) - f) * (1.0 - kMetallic);
+        const float3 kd = (float3(1.0, 1.0, 1.0) - f) * (1.0 - rm.y);
         lo += (kd * albedo / 3.14159265 + spec) * li * ndl;
     }
 

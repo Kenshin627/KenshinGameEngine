@@ -140,7 +140,9 @@ VkDescriptorSetLayout DescriptorCache::createMixedLayout(
   for (const auto& r : reflected) {
     const bool usable =
         r.type == manager::ReflectedBinding::Type::StorageBuffer ||
-        r.type == manager::ReflectedBinding::Type::SampledImage;
+        r.type == manager::ReflectedBinding::Type::CombinedImageSampler ||
+        r.type == manager::ReflectedBinding::Type::SampledTexture ||
+        r.type == manager::ReflectedBinding::Type::Sampler;
     if (usable) {
       maxBinding = std::max(maxBinding, r.binding);
       ++count;
@@ -148,9 +150,9 @@ VkDescriptorSetLayout DescriptorCache::createMixedLayout(
   }
   if (count == 0 || maxBinding >= kMaxMixedBindings) return VK_NULL_HANDLE;
 
-  // Dense 0..maxBinding: StorageBuffer -> STORAGE_BUFFER, SampledImage
-  // (Slang's combined Sampler2D) -> COMBINED_IMAGE_SAMPLER. Gaps become
-  // the SSBO type (never written by the draw path, harmless).
+  // Dense 0..maxBinding; gaps stay the SSBO type (never written by the
+  // draw path, harmless). Reflected image/sampler types override their
+  // slot (see the header contract).
   std::vector<VkDescriptorSetLayoutBinding> bindings(maxBinding + 1);
   for (u32 b = 0; b <= maxBinding; ++b) {
     typesOut[b] = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -164,10 +166,16 @@ VkDescriptorSetLayout DescriptorCache::createMixedLayout(
   }
   for (const auto& r : reflected) {
     if (r.binding > maxBinding) continue;
-    if (r.type == manager::ReflectedBinding::Type::SampledImage) {
-      typesOut[r.binding] = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-      bindings[r.binding].descriptorType =
-          VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    VkDescriptorType t = VK_DESCRIPTOR_TYPE_MAX_ENUM;
+    if (r.type == manager::ReflectedBinding::Type::CombinedImageSampler)
+      t = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    else if (r.type == manager::ReflectedBinding::Type::SampledTexture)
+      t = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    else if (r.type == manager::ReflectedBinding::Type::Sampler)
+      t = VK_DESCRIPTOR_TYPE_SAMPLER;
+    if (t != VK_DESCRIPTOR_TYPE_MAX_ENUM) {
+      typesOut[r.binding] = t;
+      bindings[r.binding].descriptorType = t;
     }
   }
   if (bindingCountOut) *bindingCountOut = maxBinding + 1;
@@ -187,19 +195,26 @@ VkDescriptorPool DescriptorCache::createMixedPool(VkDevice device,
                                                   const VkDescriptorType* types,
                                                   u32 bindingCount,
                                                   u32 setCount) {
-  u32 ssbo = 0, cis = 0;
+  u32 ssbo = 0, cis = 0, sampled = 0, samp = 0;
   for (u32 b = 0; b < bindingCount; ++b) {
     if (types[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
       ++cis;
+    else if (types[b] == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)
+      ++sampled;
+    else if (types[b] == VK_DESCRIPTOR_TYPE_SAMPLER)
+      ++samp;
     else
       ++ssbo;
   }
-  VkDescriptorPoolSize sizes[2] = {
+  VkDescriptorPoolSize sizes[4] = {
       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, ssbo * setCount},
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, cis * setCount},
+      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, sampled * setCount},
+      {VK_DESCRIPTOR_TYPE_SAMPLER, samp * setCount},
   };
-  u32 sizeCount = (ssbo && cis) ? 2 : 1;
-  if (!ssbo) sizes[0] = sizes[1];  // CIS only
+  u32 sizeCount = 0;
+  for (u32 i = 0; i < 4; ++i)
+    if (sizes[i].descriptorCount > 0) sizes[sizeCount++] = sizes[i];
   const VkDescriptorPoolCreateInfo info{
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
       .maxSets = setCount,

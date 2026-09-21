@@ -42,6 +42,33 @@ TEST_CASE("reflect descriptor bindings from compiled slang", "[shader]") {
   REQUIRE_FALSE(kenshin::manager::reflectDescriptorBindings(garbage, bindings));
 }
 
+TEST_CASE("reflect texture array + separate sampler bindings", "[shader]") {
+  // M8.2's albedo form: Texture2DArray + SamplerState must compile
+  // through the vendored Slang and reflect as SAMPLED_IMAGE + SAMPLER
+  // (two descriptors, not a combined image sampler) - the mixed
+  // descriptor layout depends on distinguishing them.
+  kenshin::manager::ShaderManager shaders;
+  REQUIRE(shaders.init(kShaderRoot));
+
+  std::vector<kenshin::u32> spirv;
+  std::string log;
+  REQUIRE(shaders.compileFile("texprobe.slang", spirv, log, "main"));
+
+  std::vector<kenshin::manager::ReflectedBinding> bindings;
+  REQUIRE(kenshin::manager::reflectDescriptorBindings(spirv, bindings));
+  REQUIRE(bindings.size() == 4);
+  REQUIRE(bindings[0].binding == 0);
+  REQUIRE(bindings[0].type ==
+          kenshin::manager::ReflectedBinding::Type::SampledTexture);
+  REQUIRE(bindings[1].binding == 1);
+  REQUIRE(bindings[1].type ==
+          kenshin::manager::ReflectedBinding::Type::Sampler);
+  REQUIRE(bindings[2].type ==
+          kenshin::manager::ReflectedBinding::Type::StorageBuffer);
+  REQUIRE(bindings[3].type ==
+          kenshin::manager::ReflectedBinding::Type::StorageBuffer);
+}
+
 TEST_CASE("repeated compiles of one shader stay alive and cache cleanly",
           "[shader]") {
   // Regression for the module-cache use-after-free: loadModule caches by

@@ -48,9 +48,14 @@ bool reflectDescriptorBindings(const std::vector<u32>& spirv,
       case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE:
         r.type = ReflectedBinding::Type::StorageImage;
         break;
-      case SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
       case SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-        r.type = ReflectedBinding::Type::SampledImage;
+        r.type = ReflectedBinding::Type::CombinedImageSampler;
+        break;
+      case SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        r.type = ReflectedBinding::Type::SampledTexture;
+        break;
+      case SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLER:
+        r.type = ReflectedBinding::Type::Sampler;
         break;
       case SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
         r.type = ReflectedBinding::Type::UniformBuffer;

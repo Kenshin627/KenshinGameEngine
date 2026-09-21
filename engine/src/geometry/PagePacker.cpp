@@ -168,6 +168,11 @@ bool packPages(ClusterDag& dag, PackedGeometry& out, std::string& log) {
 
     q.meta.posWordOff = u32(posWords.size());
     q.meta.idxBits |= u32(idxBits) << 8;
+    // v7: the per-cluster material id rides the widths word's free
+    // high bits (12..19) - every reader masks per-axis to 0xF, so the
+    // field is invisible to v6-era decode paths.
+    if (!dag.clusterMaterial.empty())
+      q.meta.widths |= (dag.clusterMaterial[c] & 0xFFu) << 12;
     storeMeta(metaWords, q.meta);
     posWords.insert(posWords.end(), q.posWords.begin(), q.posWords.end());
     nrmBytes.insert(nrmBytes.end(), q.nrmOct.begin(), q.nrmOct.end());

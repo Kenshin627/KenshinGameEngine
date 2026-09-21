@@ -45,13 +45,15 @@ class DescriptorCache {
   static VkDescriptorPool createStoragePool(VkDevice device,
                                             VkDescriptorSetLayout layout,
                                             u32 bindingCount, u32 setCount);
-  /// M8.1 lighting pass: a MIXED layout - reflected StorageBuffer
-  /// bindings become STORAGE_BUFFER, reflected SampledImage bindings
-  /// (Slang Sampler2D reflects as combined) become
-  /// COMBINED_IMAGE_SAMPLER. `typesOut` (capacity >= bindingCount)
-  /// receives the per-binding type so the draw path knows which writes
-  /// take image infos. Dense 0..maxBinding like createStorageLayout.
-  static constexpr u32 kMaxMixedBindings = 16;
+  /// M8.1 lighting pass: a MIXED layout over reflected binding types -
+  /// StorageBuffer -> STORAGE_BUFFER, CombinedImageSampler (Slang
+  /// Sampler2D) -> COMBINED_IMAGE_SAMPLER, SampledTexture (Texture2D+
+  /// SamplerState / Texture2DArray) -> SAMPLED_IMAGE, Sampler ->
+  /// SAMPLER. `typesOut` (capacity >= kMaxMixedBindings) receives the
+  /// per-binding type so the draw path knows which writes take image
+  /// infos. Dense 0..maxBinding like createStorageLayout (gaps become
+  /// the SSBO type - never written by the draw path, harmless).
+  static constexpr u32 kMaxMixedBindings = 20;
   static VkDescriptorSetLayout createMixedLayout(VkDevice device,
                                                  const u32* spirv,
                                                  usize spirvWords,

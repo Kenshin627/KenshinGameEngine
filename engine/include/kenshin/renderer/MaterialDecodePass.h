@@ -88,18 +88,22 @@ class MaterialDecodePass {
   /// M8.1 GBuffer variants: the SAME decode chain writing the per-slot
   /// GBuffer targets (fsGBuffer) instead of the final color - the
   /// deferred pair's producer half. Follow with LightingPass::draw.
+  /// M8.2: `albedoTexture` is the TextureManager's texture-array handle
+  /// (kInvalidTextureHandle binds the backend's 1x1 dummy); the
+  /// material table + count come from the scene (paged) or a zero
+  /// dummy (v2 - the shader's paged gate keeps it unread).
   void drawGBuffer(backend::IRenderBackend& backend, const glm::mat4& viewProj,
                    const VirtualGeometryScene& scene,
                    const DecodeParams& params, u32 width, u32 height,
                    u32 visHandle, u32 pairs, u32 hwPairs, u32 postPairs,
-                   u32 pairCapacity);
+                   u32 pairCapacity, u32 albedoTexture);
   void drawGBufferPaged(backend::IRenderBackend& backend,
                         const glm::mat4& viewProj,
                         const VirtualGeometryScene& scene,
                         const DecodeParams& params, u32 width, u32 height,
                         u32 visHandle, const DecodePagedInputs& paged,
-                        u32 pairs, u32 hwPairs, u32 postPairs,
-                        u32 pairCapacity);
+                        u32 pairs, u32 hwPairs, u32 postPairs, u32 pairCapacity,
+                        u32 albedoTexture);
 
   void onShutdown(backend::IRenderBackend& backend);
 
@@ -107,6 +111,7 @@ class MaterialDecodePass {
   u32 m_pipeline = ~0u;
   u32 m_gbufferPipeline = ~0u;  // M8.1: the fsGBuffer MRT variant
   u32 m_decodeParams = ~0u;  // 32B host-visible: [0] mode flags, [1].x pair cap
+  u32 m_dummyMaterial = ~0u;         // v2 material-table stand-in (32B)
   u32 m_dummyU32[2] = {~0u, ~0u};    // v2 stand-ins (bindings 8/9)
   u32 m_dummyPageHeader = ~0u;       // v2 stand-in (binding 10)
   u32 m_dummyPairs[2] = {~0u, ~0u};  // decode-only tests' stand-ins (12/13)

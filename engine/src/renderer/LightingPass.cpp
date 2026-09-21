@@ -35,14 +35,32 @@ bool LightingPass::init(backend::IRenderBackend& backend,
                backend::IRenderBackend::BufferHostVisible;
   desc.debugName = "light-table";
   m_lightBuffer = backend.createBuffer(desc);
-  return m_lightBuffer != backend::IRenderBackend::kInvalidBufferHandle;
+  // The 1-entry default material table (v2 path binds this - the
+  // shader always reads materials[id], the binding must be valid).
+  desc.size = 32;
+  desc.initialData = nullptr;
+  desc.debugName = "lighting-material-dummy";
+  m_materialDummy = backend.createBuffer(desc);
+  if (m_materialDummy != backend::IRenderBackend::kInvalidBufferHandle) {
+    auto* mat = static_cast<f32*>(backend.mappedPtr(m_materialDummy));
+    mat[0] = 0.75f;
+    mat[1] = 0.75f;
+    mat[2] = 0.78f;
+    mat[3] = -1.0f;
+    mat[4] = 0.5f;
+    mat[5] = 0.0f;
+    mat[6] = 0.0f;
+    mat[7] = 0.0f;
+  }
+  return m_lightBuffer != backend::IRenderBackend::kInvalidBufferHandle &&
+         m_materialDummy != backend::IRenderBackend::kInvalidBufferHandle;
 }
 
 void LightingPass::draw(backend::IRenderBackend& backend,
                         const glm::mat4& invViewProj, const glm::vec3& camPos,
-                        std::span<const GpuLightC> lights,
-                        const glm::vec4& clearColor, float ambient,
-                        float exposure, u32 width, u32 height) {
+                        std::span<const GpuLightC> lights, u32 materialTable,
+                        u32 materialCount, const glm::vec4& clearColor,
+                        float ambient, float exposure, u32 width, u32 height) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   const u32 count =
       static_cast<u32>(std::min<usize>(lights.size(), kMaxLights));
@@ -55,7 +73,15 @@ void LightingPass::draw(backend::IRenderBackend& backend,
   } push;
   push.invViewProj = invViewProj;
   push.camPosCount = glm::vec4(camPos, static_cast<f32>(count));
-  push.clearColor = clearColor;
+  // clearColor.a carries the material count (lighting.slang's clamp
+  // bound; the clear color's own alpha is meaningless). The dummy
+  // fallback has exactly ONE entry - clamping to the scene's count
+  // would read past it.
+  const bool usingDummy =
+      materialTable == backend::IRenderBackend::kInvalidBufferHandle;
+  const u32 effectiveCount = usingDummy ? 1u : std::max(materialCount, 1u);
+  push.clearColor = glm::vec4(clearColor.r, clearColor.g, clearColor.b,
+                              static_cast<f32>(effectiveCount));
   push.viewportAmb =
       glm::vec4(1.0f / static_cast<f32>(width), 1.0f / static_cast<f32>(height),
                 ambient, exposure);
@@ -63,13 +89,16 @@ void LightingPass::draw(backend::IRenderBackend& backend,
     auto* table = static_cast<GpuLightC*>(backend.mappedPtr(m_lightBuffer));
     std::memcpy(table, lights.data(), count * sizeof(GpuLightC));
   }
-  backend.drawLighting(m_pipeline, &m_lightBuffer, 1, &push, sizeof(push),
-                       width, height);
+  const u32 buffers[2] = {m_lightBuffer,
+                          usingDummy ? m_materialDummy : materialTable};
+  backend.drawLighting(m_pipeline, buffers, 2, &push, sizeof(push), width,
+                       height);
 }
 
 void LightingPass::onShutdown(backend::IRenderBackend& backend) {
   if (m_lightBuffer != ~0u) backend.destroyBuffer(m_lightBuffer);
-  m_lightBuffer = ~0u;
+  if (m_materialDummy != ~0u) backend.destroyBuffer(m_materialDummy);
+  m_lightBuffer = m_materialDummy = ~0u;
   m_pipeline = ~0u;  // the pipeline dies with PipelineStore; nothing owned
 }
 

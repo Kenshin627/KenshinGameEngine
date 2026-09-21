@@ -115,6 +115,25 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
   REQUIRE(buildDag(mesh, dag, log));
   INFO("log: " << log);
 
+  // v7: the material table + per-cluster ids (alternating 0/1 so the
+  // widths-word stamp carries REAL values through the page blobs).
+  kenshin::geometry::ClusterDag::DagMaterial m0, m1;
+  m0.kd[0] = 0.8f;
+  m0.kd[1] = 0.7f;
+  m0.kd[2] = 0.6f;
+  m0.roughness = 0.35f;
+  m0.metallic = 0.1f;
+  m0.texPath = "checker_64.bmp";
+  m1.kd[0] = 0.2f;
+  m1.kd[1] = 0.3f;
+  m1.kd[2] = 0.4f;
+  m1.roughness = 0.9f;
+  m1.metallic = 0.0f;  // untextured
+  dag.materials = {m0, m1};
+  dag.clusterMaterial.resize(dag.clusters.size());
+  for (kenshin::u32 c = 0; c < dag.clusterMaterial.size(); ++c)
+    dag.clusterMaterial[c] = c % 2u;
+
   kenshin::geometry::PackedGeometry pg;
   REQUIRE(kenshin::geometry::packPages(dag, pg, log));
   INFO("log: " << log);
@@ -172,6 +191,20 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
   INFO("log: " << log);
   REQUIRE(loaded.paged);
   REQUIRE(loaded.pagesQuantized);  // v5 gate
+  // v7: the material table roundtrips (texPath from the string blob,
+  // texLayer stays runtime-assigned = -1 out of the file).
+  REQUIRE(loaded.hasMaterialTable);
+  REQUIRE(loaded.materials.size() == 2);
+  REQUIRE(loaded.materials[0].kd[0] == 0.8f);
+  REQUIRE(loaded.materials[0].kd[1] == 0.7f);
+  REQUIRE(loaded.materials[0].kd[2] == 0.6f);
+  REQUIRE(loaded.materials[0].roughness == 0.35f);
+  REQUIRE(loaded.materials[0].metallic == 0.1f);
+  REQUIRE(loaded.materials[0].texPath == "checker_64.bmp");
+  REQUIRE(loaded.materials[0].texLayer == -1.0f);
+  REQUIRE(loaded.materials[1].kd[0] == 0.2f);
+  REQUIRE(loaded.materials[1].roughness == 0.9f);
+  REQUIRE(loaded.materials[1].texPath.empty());
   REQUIRE(loaded.pageCount == pg.pageCount);
   REQUIRE(loaded.pageSlotSize == kenshin::geometry::kPageSlotSize);
   REQUIRE(loaded.pagesHaveNormals == pg.hasNormals);
@@ -227,6 +260,9 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
         10 * sizeof(kenshin::u32));
     const kenshin::u32 b[3] = {meta.widths & 0xFu, (meta.widths >> 4) & 0xFu,
                                (meta.widths >> 8) & 0xFu};
+    // v7: the per-cluster material id survives the page blob (the
+    // widths word's free high bits - the packer stamped c % 2).
+    REQUIRE(((meta.widths >> 12) & 0xFFu) == (c % 2u));
     const kenshin::u32 nV = cl.vertexCount;
     const kenshin::u64 axisBase[3] = {
         kenshin::u64(meta.posWordOff) * 32,
@@ -320,5 +356,11 @@ TEST_CASE("scene rejects pre-v5 paged dags", "[geometry][kgeo][paged]") {
   // decode garbage - the same silent-black-screen class.
   dag.pagesQuantized = true;
   dag.pageIdxPacked = false;
+  REQUIRE(scene.addMeshPaged(dag) == 0xFFFFFFFFu);
+
+  // The v7 gate (M8.2): fsGBuffer reads the per-cluster material id
+  // and the material table; a v6 asset would bind an empty table (the
+  // same silent-black-screen class).
+  dag.pageIdxPacked = true;
   REQUIRE(scene.addMeshPaged(dag) == 0xFFFFFFFFu);
 }

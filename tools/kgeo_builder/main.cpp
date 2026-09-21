@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
@@ -26,7 +27,12 @@ int main(int argc, char** argv) {
 
   std::string input, output = "out/mesh.kgeo";
   std::string proc;      // "sphere" or "knot"
-  bool unpaged = false;  // --unpaged: emit v2 (pools) instead of v3 (pages)
+  bool unpaged = false;  // --unpaged: emit v2 (pools) instead of v3+ (pages)
+  // M8.2 material overrides (single material v1; OBJ inputs already
+  // carry Kd/map_Kd from their MTL - the CLI wins where given).
+  std::string albedo;  // --albedo <path>: 24-bit BMP, copied next to -o
+  float kd[3] = {-1.0f, -1.0f, -1.0f};  // --kd r g b
+  float rough = -1.0f, metal = -1.0f;   // --rough f / --metal f
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
       output = argv[++i];
@@ -34,6 +40,16 @@ int main(int argc, char** argv) {
       unpaged = true;
     else if (std::strcmp(argv[i], "--proc") == 0 && i + 1 < argc)
       proc = argv[++i];
+    else if (std::strcmp(argv[i], "--albedo") == 0 && i + 1 < argc)
+      albedo = argv[++i];
+    else if (std::strcmp(argv[i], "--kd") == 0 && i + 3 < argc) {
+      kd[0] = std::atof(argv[++i]);
+      kd[1] = std::atof(argv[++i]);
+      kd[2] = std::atof(argv[++i]);
+    } else if (std::strcmp(argv[i], "--rough") == 0 && i + 1 < argc)
+      rough = std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--metal") == 0 && i + 1 < argc)
+      metal = std::atof(argv[++i]);
     else
       input = argv[i];
   }
@@ -103,6 +119,36 @@ int main(int argc, char** argv) {
     kenshin::log::shutdown();
     return 1;
   }
+  // M8.2: the single-material table (v1). OBJ/MTL provides the
+  // defaults; the CLI overrides win. The albedo reference is stored as
+  // a bare FILE NAME - the runtime resolves it against the .kgeo's
+  // directory (the mtllib precedent) and the builder copies the file
+  // next to the output so the pair travels together.
+  std::string albedoSrc;  // the path to copy FROM (CWD/MTL-relative)
+  {
+    kenshin::geometry::ClusterDag::DagMaterial mat;
+    if (mesh.material.kd[0] >= 0.0f) {
+      mat.kd[0] = mesh.material.kd[0];
+      mat.kd[1] = mesh.material.kd[1];
+      mat.kd[2] = mesh.material.kd[2];
+    }
+    if (kd[0] >= 0.0f) {
+      mat.kd[0] = kd[0];
+      mat.kd[1] = kd[1];
+      mat.kd[2] = kd[2];
+    }
+    if (rough >= 0.0f) mat.roughness = rough;
+    if (metal >= 0.0f) mat.metallic = metal;
+    if (!albedo.empty())
+      albedoSrc = albedo;
+    else if (!mesh.material.diffuseTexture.empty())
+      albedoSrc = mesh.material.diffuseTexture;
+    if (!albedoSrc.empty())
+      mat.texPath = std::filesystem::path(albedoSrc).filename().string();
+    dag.materials = {mat};
+    dag.clusterMaterial.assign(dag.clusters.size(), 0);
+  }
+
   KENSHIN_INFO(
       "[builder] dag: {} clusters, {} groups, {} levels, {} roots, "
       "{} monotonic fixes, hierarchy {} nodes (root {})",
@@ -260,7 +306,29 @@ int main(int argc, char** argv) {
     kenshin::log::shutdown();
     return 1;
   }
-  KENSHIN_INFO("[builder] written (v5 quantized paged): {}", output);
+  // The albedo travels WITH the asset (bare-name reference; the
+  // runtime resolves against the .kgeo's directory).
+  if (!albedoSrc.empty()) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path src = fs::path(albedoSrc);
+    if (!fs::exists(src, ec)) {
+      KENSHIN_ERROR("[builder] albedo not found: {} (relative to CWD)",
+                    albedoSrc);
+      kenshin::log::shutdown();
+      return 1;
+    }
+    const fs::path dst = fs::path(output).parent_path() / src.filename();
+    if (!fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec)) {
+      KENSHIN_ERROR("[builder] albedo copy failed: {} -> {} ({})", src.string(),
+                    dst.string(), ec.message());
+      kenshin::log::shutdown();
+      return 1;
+    }
+    KENSHIN_INFO("[builder] albedo: {} -> {}", src.string(), dst.string());
+  }
+  KENSHIN_INFO("[builder] written (v7 paged, materials: {}): {}",
+               dag.materials.size(), output);
   kenshin::log::shutdown();
   return 0;
 }

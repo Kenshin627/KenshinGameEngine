@@ -487,7 +487,8 @@ u32 PipelineStore::createFullscreenVariant(
   entry.pool = pool;
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) entry.sets[i] = sets[i];
   entry.valid = true;
-  for (u32 b = 0; b < bindingCount && b < 16u; ++b)
+  for (u32 b = 0; b < bindingCount && b < DescriptorCache::kMaxMixedBindings;
+       ++b)
     entry.bindingTypes[b] = types[b];
   entry.bindingCount = bindingCount;
   return static_cast<u32>(m_fullscreen.size());
@@ -497,8 +498,10 @@ u32 PipelineStore::createGBuffer(
     VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
   static const VkFormat kFormats[2] = {VK_FORMAT_R16G16B16A16_SFLOAT,
                                        VK_FORMAT_R8G8B8A8_UNORM};
+  // M8.2: MIXED layout - fsGBuffer samples the albedo Texture2DArray
+  // (binding 17/18: SAMPLED_IMAGE + SAMPLER) alongside its SSBOs.
   return createFullscreenVariant(device, info, kFormats, 2, VK_FORMAT_UNDEFINED,
-                                 false);
+                                 true);
 }
 
 u32 PipelineStore::createLighting(

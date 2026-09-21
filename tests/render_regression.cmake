@@ -24,10 +24,22 @@
 
 file(REMOVE "${EXEDIR}/imgui.ini")
 
+# ALBEDO (M8.2): the texture reference goes through the BUILDER (-
+# -albedo) so the .kgeo carries a material table with a real texture;
+# the builder copies the BMP next to the generated .kgeo. NEVER append
+# --albedo to the demo args: the demo has no such flag and silently
+# drops unknown flags (that masking is why the first version of this
+# test passed while exercising nothing).
+if(ALBEDO)
+  set(BUILDER_ARGS --albedo "${ALBEDO}")
+else()
+  set(BUILDER_ARGS)
+endif()
+
 if(KGEO)
   set(KGEO_FILE "${OUT}.kgeo")
   execute_process(
-    COMMAND "${BUILDER}" --proc "${PROC}" -o "${KGEO_FILE}"
+    COMMAND "${BUILDER}" --proc "${PROC}" ${BUILDER_ARGS} -o "${KGEO_FILE}"
     RESULT_VARIABLE rc)
   if(NOT rc EQUAL 0)
     message(FATAL_ERROR "kgeo_builder --proc ${PROC} failed (${rc})")

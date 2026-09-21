@@ -21,6 +21,14 @@ constexpr u32 kVersion5 =
     5;  // M7.1: quantized pages + clusterMetaIndex + 12-u32 page meta
 constexpr u32 kVersion6 =
     6;  // M7.2: packed triangle indices (same table layout as v5; the idx section becomes a bit stream and the meta's 10th word carries the widths/bit base). Old assets are loadable for TABLE reads but the RUNTIME paged path requires v6 (pageIdxPacked).
+constexpr u32 kVersion7 =
+    7;  // M8.2: material table. A 17th header u32 (materialCount)
+        // follows the fixed 16-u32 header, and a material section
+        // sits between the maxEdge table and the page blobs: a string
+        // blob (albedo paths) + per-material path offsets + 8-f32
+        // records. The per-cluster material id rides the clusterMeta
+        // widths word's high bits (12..19). The RUNTIME paged path
+        // requires v7 (hasMaterialTable).
 
 #pragma pack(push, 4)
 struct FileHeader {
@@ -117,7 +125,7 @@ bool readVector(std::FILE* file, std::vector<T>& data, usize count) {
 // after the writers; FileHeaderV3/PageDir are anon-namespace types so
 // these stay internal by ODR-friendliness of identical TU scope).
 bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
-                         ClusterDag& dag, std::string& log);
+                         u32 materialCount, ClusterDag& dag, std::string& log);
 bool rehydrateTables(std::FILE* file, u32 groupCount, u32 clusterCount,
                      u32 childEdgeCount, u32 rootCount, u32 hierarchyCount,
                      ClusterDag& dag, std::string& log);
@@ -279,9 +287,15 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
          m.indexCount, m.clusterCount, stepBits, m.flags, m.pad0, m.pad1});
   }
 
+  // v7 always carries a material table; synthesize the single
+  // default entry when the dag has none (the builder sets it from
+  // MeshData::Material / CLI overrides).
+  std::vector<ClusterDag::DagMaterial> mats = dag.materials;
+  if (mats.empty()) mats.emplace_back();
+
   const FileHeaderV3 header{
       .magic = kMagicV3,
-      .version = kVersion6,
+      .version = kVersion7,
       .groupCount = static_cast<u32>(dag.groups.size()),
       .clusterCount = static_cast<u32>(dag.clusters.size()),
       .childEdgeCount = static_cast<u32>(childIndices.size()),
@@ -331,7 +345,11 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
     maxEdge[c] = e;
   }
 
+  // v7: the 17th header word (materialCount) - the v2->v3 append
+  // precedent; v7 readers seek past it, older readers never get here.
+  const u32 materialCount = static_cast<u32>(mats.size());
   bool ok = std::fwrite(&header, sizeof(header), 1, file) == 1 &&
+            std::fwrite(&materialCount, sizeof(materialCount), 1, file) == 1 &&
             writeVector(file, groups) && writeVector(file, clusters) &&
             writeVector(file, childIndices) &&
             writeVector(file, memberIndices) &&
@@ -340,6 +358,38 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
             writeVector(file, dag.roots) && writeVector(file, pg.clusterPage) &&
             writeVector(file, pg.clusterMetaIndex) &&
             writeVector(file, pageMetaFlat) && writeVector(file, maxEdge);
+
+  // v7 material section (before the blobs - the tail-directory math
+  // is offset-relative and stays untouched): string blob + per-
+  // material path offsets + 8-f32 records (kd, texFlag, rough, metal).
+  std::vector<u32> texOff(mats.size(), 0xFFFFFFFFu);
+  std::string strings;
+  for (usize m = 0; m < mats.size(); ++m) {
+    if (mats[m].texPath.empty()) continue;
+    texOff[m] = static_cast<u32>(strings.size());
+    strings += mats[m].texPath;
+    strings.push_back('\0');
+  }
+  while (strings.size() % 4 != 0) strings.push_back('\0');
+  if (ok) {
+    std::vector<f32> records(mats.size() * 8);
+    for (usize m = 0; m < mats.size(); ++m) {
+      f32* r = records.data() + m * 8;
+      r[0] = mats[m].kd[0];
+      r[1] = mats[m].kd[1];
+      r[2] = mats[m].kd[2];
+      r[3] = texOff[m] == 0xFFFFFFFFu ? -1.0f : 0.0f;  // has-texture flag
+      r[4] = mats[m].roughness;
+      r[5] = mats[m].metallic;
+      r[6] = 0.0f;
+      r[7] = 0.0f;
+    }
+    const u32 stringBytes = static_cast<u32>(strings.size());
+    ok = std::fwrite(&stringBytes, sizeof(stringBytes), 1, file) == 1 &&
+         (stringBytes == 0 ||
+          std::fwrite(strings.data(), 1, stringBytes, file) == stringBytes) &&
+         writeVector(file, texOff) && writeVector(file, records);
+  }
 
   // Blobs (16 B aligned, offsets recorded); the DIRECTORY goes to the
   // file tail so the writer stays single-pass - the reader lands on it
@@ -383,13 +433,23 @@ bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log) {
     std::rewind(file);
     if (std::fread(&h3, sizeof(h3), 1, file) != 1 || h3.magic != kMagicV3 ||
         (h3.version != kVersion3 && h3.version != kVersion4 &&
-         h3.version != kVersion5 && h3.version != kVersion6)) {
+         h3.version != kVersion5 && h3.version != kVersion6 &&
+         h3.version != kVersion7)) {
       log = "bad magic/version";
       std::fclose(file);
       return false;
     }
+    // v7: the 17th header word (materialCount) follows the fixed
+    // header; hand it to the table reader alongside.
+    u32 materialCount = 0;
+    if (h3.version == kVersion7 &&
+        std::fread(&materialCount, sizeof(materialCount), 1, file) != 1) {
+      log = "truncated (materialCount)";
+      std::fclose(file);
+      return false;
+    }
     std::fclose(file);
-    return readKGeoPagedTables(path, h3, dag, log);
+    return readKGeoPagedTables(path, h3, materialCount, dag, log);
   }
 
   std::vector<GroupDisk> groups;
@@ -546,28 +606,35 @@ bool rehydrateTables(std::FILE* file, u32 groupCount, u32 clusterCount,
 }
 
 bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
-                         ClusterDag& dag, std::string& log) {
+                         u32 materialCount, ClusterDag& dag, std::string& log) {
   std::FILE* file = nullptr;
   if (fopen_s(&file, path.c_str(), "rb") != 0 || !file) {
     log = "cannot open for read: " + path;
     return false;
   }
   dag = {};
-  if (std::fseek(file, long(sizeof(FileHeaderV3)), SEEK_SET) != 0 ||
+  // v7's 17th header word sits between the fixed header and the
+  // sections; skip past it (the caller already consumed its value).
+  const u32 headerWords = 16 + (h3.version >= kVersion7 ? 1 : 0);
+  if (std::fseek(file, long(headerWords) * 4, SEEK_SET) != 0 ||
       !rehydrateTables(file, h3.groupCount, h3.clusterCount, h3.childEdgeCount,
                        h3.rootCount, h3.hierarchyNodeCount, dag, log) ||
       !readVector(file, dag.clusterPage, h3.clusterCount)) {
     std::fclose(file);
     return false;
   }
-  if ((h3.version == kVersion5 || h3.version == kVersion6) &&
+  if ((h3.version == kVersion5 || h3.version == kVersion6 ||
+       h3.version == kVersion7) &&
       !readVector(file, dag.clusterMetaIndex, h3.clusterCount)) {
     log = "truncated (clusterMetaIndex)";
     std::fclose(file);
     return false;
   }
   const u32 metaWordsPerPage =
-      (h3.version == kVersion5 || h3.version == kVersion6) ? 12u : 6u;
+      (h3.version == kVersion5 || h3.version == kVersion6 ||
+       h3.version == kVersion7)
+          ? 12u
+          : 6u;
   std::vector<u32> metaFlat;
   if (!readVector(file, metaFlat, usize(h3.pageCount) * metaWordsPerPage)) {
     log = "truncated (page metadata)";
@@ -575,20 +642,73 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     return false;
   }
   if ((h3.version == kVersion4 || h3.version == kVersion5 ||
-       h3.version == kVersion6) &&
+       h3.version == kVersion6 || h3.version == kVersion7) &&
       !readVector(file, dag.clusterMaxEdge, h3.clusterCount)) {
     log = "truncated (maxEdge table)";
     std::fclose(file);
     return false;
   }
+  if (h3.version == kVersion7) {
+    // The material section: string blob + per-material path offsets +
+    // 8-f32 records. texPath carries the disk reference; texLayer
+    // stays -1 until the app resolves it through the TextureManager.
+    u32 stringBytes = 0;
+    std::string strings;
+    std::vector<u32> texOff;
+    std::vector<f32> records;
+    // Bounds: material ids ride the meta widths word's 8 high bits, so
+    // more than 256 materials could never be addressed; stringBytes is
+    // bounded by the file's own remaining size (a corrupt word must
+    // not turn into a multi-GB allocation - reject loudly instead).
+    const long long curPos = _ftelli64(file);
+    _fseeki64(file, 0, SEEK_END);
+    const long long endPos = _ftelli64(file);
+    _fseeki64(file, curPos, SEEK_SET);
+    if (std::fread(&stringBytes, sizeof(stringBytes), 1, file) != 1 ||
+        materialCount == 0 || materialCount > 256 ||
+        endPos - curPos - 4 < static_cast<long long>(stringBytes)) {
+      log = "truncated (material section)";
+      std::fclose(file);
+      return false;
+    }
+    strings.resize(stringBytes);
+    if (stringBytes > 0 &&
+        std::fread(strings.data(), 1, stringBytes, file) != stringBytes) {
+      log = "truncated (material strings)";
+      std::fclose(file);
+      return false;
+    }
+    if (!readVector(file, texOff, materialCount) ||
+        !readVector(file, records, usize(materialCount) * 8)) {
+      log = "truncated (material table)";
+      std::fclose(file);
+      return false;
+    }
+    dag.materials.resize(materialCount);
+    for (u32 m = 0; m < materialCount; ++m) {
+      const f32* r = records.data() + usize(m) * 8;
+      auto& mat = dag.materials[m];
+      mat.kd[0] = r[0];
+      mat.kd[1] = r[1];
+      mat.kd[2] = r[2];
+      mat.roughness = r[4];
+      mat.metallic = r[5];
+      if (r[3] >= 0.0f && texOff[m] != 0xFFFFFFFFu &&
+          texOff[m] < strings.size()) {
+        mat.texPath = std::string(strings.data() + texOff[m]);
+      }
+    }
+    dag.hasMaterialTable = true;
+  }
   dag.pageMeta.resize(h3.pageCount);
   dag.pageMetaV5.clear();
-  if (h3.version == kVersion5 || h3.version == kVersion6) {
+  if (h3.version == kVersion5 || h3.version == kVersion6 ||
+      h3.version == kVersion7) {
     dag.pageMetaV5.resize(h3.pageCount);
     dag.pagesQuantized = true;
-    // M7.2: only v6 pages carry the PACKED index bit stream - the
-    // runtime paged gate requires this (v5 pages' idx is u8-flat).
-    dag.pageIdxPacked = h3.version == kVersion6;
+    // M7.2: v6+ pages carry the PACKED index bit stream - the runtime
+    // paged gate requires this (v5 pages' idx is u8-flat).
+    dag.pageIdxPacked = h3.version >= kVersion6;
     for (u32 p = 0; p < h3.pageCount; ++p) {
       const u32* m = metaFlat.data() + usize(p) * 12;
       dag.pageMetaV5[p] = ClusterDag::DagPageMetaV5{
@@ -599,8 +719,9 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     }
   }
   for (u32 p = 0; p < h3.pageCount; ++p) {
-    if (h3.version == kVersion5 || h3.version == kVersion6) {
-      // v5/v6: the old 6-field view keeps only the CONSERVATION fields
+    if (h3.version == kVersion5 || h3.version == kVersion6 ||
+        h3.version == kVersion7) {
+      // v5+: the old 6-field view keeps only the CONSERVATION fields
       // (vertex/index totals; the base fields' semantics changed to u32
       // units and live in pageMetaV5).
       const u32* m = metaFlat.data() + usize(p) * 12;
@@ -660,7 +781,8 @@ bool KGeoPageReader::open(const std::string& path, std::string& log) {
   FileHeaderV3 h3{};
   if (std::fread(&h3, sizeof(h3), 1, file) != 1 || h3.magic != kMagicV3 ||
       h3.version != kVersion3 && h3.version != kVersion4 &&
-          h3.version != kVersion5 && h3.version != kVersion6) {
+          h3.version != kVersion5 && h3.version != kVersion6 &&
+          h3.version != kVersion7) {
     log = "not a v3 paged file: " + path;
     std::fclose(file);
     return false;

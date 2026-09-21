@@ -149,7 +149,8 @@ void CommandContext::pipelineBarrier(VkCommandBuffer cmd,
 
 VkImageMemoryBarrier2 CommandContext::imageBarrier(
     VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
-    VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+    VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, u32 baseMip,
+    u32 mipCount, u32 baseLayer, u32 layerCount) {
   return VkImageMemoryBarrier2{
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
       .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -159,7 +160,8 @@ VkImageMemoryBarrier2 CommandContext::imageBarrier(
       .oldLayout = oldLayout,
       .newLayout = newLayout,
       .image = image,
-      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+      .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, mipCount,
+                           baseLayer, layerCount},
   };
 }
 

@@ -1,11 +1,13 @@
 // S2.1 asset tests: OBJ known-answer assets + procedural generators.
 
 #include <catch2/catch_test_macros.hpp>
+#include <cstdio>
 #include <filesystem>
 #include <glm/glm.hpp>
 #include <glm/gtc/epsilon.hpp>
 #include <map>
 #include <string>
+#include <tuple>
 
 #include "kenshin/assets/MeshData.h"
 #include "kenshin/assets/ObjLoader.h"
@@ -13,6 +15,8 @@
 #include "kenshin/core/Timer.h"
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
+#include "kenshin/util/BmpReader.h"
+#include "kenshin/util/BmpWriter.h"
 
 namespace {
 std::string assetPath(const char* name) {
@@ -134,4 +138,47 @@ TEST_CASE("torus knot million triangles under 2s", "[assets][procedural]") {
   kenshin::log::init();
   KENSHIN_INFO("[test] torus knot 1,048,576 tris generated in {:.0f} ms",
                seconds * 1000.0);
+}
+
+TEST_CASE("bmp reader roundtrips the writer and the committed checker",
+          "[assets][bmp]") {
+  // M8.2: the hand-written 24-bit BI_RGB reader. Roundtrip the writer's
+  // exact output first (top-down RGBA in, top-down RGBA out).
+  std::vector<kenshin::u8> rgba(8 * 5 * 4);
+  for (kenshin::u32 i = 0; i < rgba.size() / 4; ++i) {
+    rgba[i * 4 + 0] = kenshin::u8(i * 7);
+    rgba[i * 4 + 1] = kenshin::u8(255 - i * 3);
+    rgba[i * 4 + 2] = kenshin::u8(i);
+    rgba[i * 4 + 3] = 255;
+  }
+  REQUIRE(kenshin::util::writeBmp24("out/bmp_roundtrip.bmp", rgba, 8, 5));
+  kenshin::util::ImageRgba img;
+  std::string log;
+  REQUIRE(kenshin::util::readBmp24("out/bmp_roundtrip.bmp", img, log));
+  INFO("log: " << log);
+  REQUIRE(img.width == 8);
+  REQUIRE(img.height == 5);
+  REQUIRE(img.rgba == rgba);
+  std::remove("out/bmp_roundtrip.bmp");
+
+  // The committed test albedo parses with the expected structure: a
+  // 64x64 two-tone checker with a colored border (the M8.2 regression
+  // asset - catches silent format drift of the checked-in file).
+  REQUIRE(kenshin::util::readBmp24(assetPath("checker_64.bmp"), img, log));
+  REQUIRE(img.width == 64);
+  REQUIRE(img.height == 64);
+  REQUIRE(img.rgba.size() == 64 * 64 * 4);
+  const auto px = [&](int x, int y) {
+    const kenshin::u8* p = img.rgba.data() + (kenshin::usize(y) * 64 + x) * 4;
+    return std::tuple<int, int, int>(p[0], p[1], p[2]);
+  };
+  // Border rows/cols carry the orientation colors; interior is the
+  // two-tone 8px checker.
+  auto [tr, tg, tb] = px(32, 1);     // top strip
+  auto [br, bg, bb] = px(32, 62);    // bottom strip
+  REQUIRE(tr > tb);                  // top reads red-ish
+  REQUIRE(bb > br);                  // bottom reads blue-ish
+  auto [c0r, c0g, c0b] = px(8, 8);   // first checker cell (dark)
+  auto [c1r, c1g, c1b] = px(16, 8);  // adjacent cell (light)
+  REQUIRE(c1r - c0r > 40);           // the two tones differ
 }

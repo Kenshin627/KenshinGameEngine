@@ -10,6 +10,7 @@
 
 #include <vector>
 
+#include "DescriptorCache.h"
 #include "FrameSync.h"
 #include "kenshin/Common.h"
 #include "kenshin/backend/RenderBackend.h"
@@ -49,11 +50,12 @@ class PipelineStore {
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkDescriptorSet sets[kMaxFramesInFlight] = {};
     bool valid = false;
-    /// M8.1 lighting pipelines: the per-binding descriptor type (dense
-    /// 0..bindingCount-1, STORAGE_BUFFER or COMBINED_IMAGE_SAMPLER) so
-    /// the draw path knows which writes take image infos. Unused (all
+    /// M8.1 lighting / M8.2 GBuffer pipelines: the per-binding
+    /// descriptor type (dense 0..bindingCount-1: STORAGE_BUFFER,
+    /// COMBINED_IMAGE_SAMPLER, SAMPLED_IMAGE or SAMPLER) so the draw
+    /// path knows which writes take image infos. Unused (all
     /// STORAGE_BUFFER) for the classic SSBO pipelines.
-    VkDescriptorType bindingTypes[16] = {};
+    VkDescriptorType bindingTypes[DescriptorCache::kMaxMixedBindings] = {};
     u32 bindingCount = 0;
   };
 

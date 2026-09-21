@@ -91,8 +91,22 @@ add_test(NAME render_kgeo_nohw
         -DKGEO=1 -DPROC=knot -DLOD=1 -DNOHW=1
         -DTOLERANCE=8
         -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
+# M8.2: the albedo variant - same knot asset built with --albedo (the
+# committed checker_64.bmp), pinning the full texture path (upload +
+# blit mips + analytic-lod sampling + material table) deterministically.
+add_test(NAME render_kgeo_albedo
+    COMMAND ${CMAKE_COMMAND}
+        -DDEMO=$<TARGET_FILE:KENSHINDemo>
+        -DBUILDER=$<TARGET_FILE:kgeo_builder>
+        -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_kgeo_albedo_ref.bmp
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_albedo_out.bmp
+        -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
+        -DKGEO=1 -DPROC=knot -DLOD=1
+        -DALBEDO=${CMAKE_CURRENT_SOURCE_DIR}/assets/checker_64.bmp
+        -DTOLERANCE=8
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
 set_tests_properties(render_baseline render_kgeo render_kgeo_nohw
-    PROPERTIES LABELS "gpu")
+    render_kgeo_albedo PROPERTIES LABELS "gpu")
 
 add_test(NAME kenshin_tests COMMAND kenshin_tests)
 set_tests_properties(kenshin_tests PROPERTIES

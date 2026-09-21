@@ -196,6 +196,15 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
         "indices");
     return 0xFFFFFFFFu;
   }
+  // v7 gate (M8.2): fsGBuffer reads the per-cluster material id out of
+  // the meta widths word and the material table SSBO - a v6 asset
+  // would bind an empty table (the same silent-black-screen class).
+  if (!dag.hasMaterialTable) {
+    KENSHIN_ERROR(
+        "[vgscene] paged asset is pre-v7 (no material table); rebuild it "
+        "with the current kgeo_builder - the shaders read v7 materials");
+    return 0xFFFFFFFFu;
+  }
   m_paged = true;
   VgMeshRange range;
   range.clusterBegin = m_clusterCount;
@@ -226,6 +235,25 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   m_clusterMetaFlat.insert(m_clusterMetaFlat.end(),
                            dag.clusterMetaIndex.begin(),
                            dag.clusterMetaIndex.end());
+  // v7: the material table rides along (texture layers are resolved
+  // by the app through the TextureManager BEFORE it calls this -
+  // m_materialData entries are already GPU-ready 8-f32 records).
+  // V1 LIMIT: per-cluster ids are stamped per-DAG at pack time and
+  // index their OWN dag's table; with multiple paged meshes the
+  // concatenated table is NOT rebased - only single-mesh scenes are
+  // correct today (the app only ever adds one). Warn loudly.
+  if (!m_materialData.empty() && !dag.materials.empty()) {
+    KENSHIN_WARN(
+        "[vgscene] multi-mesh paged material tables concatenate without "
+        "id rebasing (v1 single-mesh limitation) - later meshes' ids "
+        "index the wrong entries");
+  }
+  for (const auto& mat : dag.materials) {
+    f32 r[8] = {mat.kd[0],     mat.kd[1],    mat.kd[2], mat.texLayer,
+                mat.roughness, mat.metallic, 0.0f,      0.0f};
+    m_materialData.insert(m_materialData.end(), r, r + 8);
+    m_materialTexPaths.push_back(mat.texPath);
+  }
   m_pageCount += dag.pageCount;
   range.pageEnd = m_pageCount;
 
@@ -329,8 +357,8 @@ void VirtualGeometryScene::onShutdown() {
   for (const u32 handle :
        {m_clusterBuffer, m_groupBuffer, m_positionBuffer, m_normalBuffer,
         m_uvBuffer, m_indexBuffer, m_instanceBuffer, m_clusterPageBuffer,
-        m_clusterMetaBuffer, m_pageHeaderBuffer, m_pageTableBuffer,
-        m_pageSlotPool})
+        m_clusterMetaBuffer, m_materialBuffer, m_pageHeaderBuffer,
+        m_pageTableBuffer, m_pageSlotPool})
     if (handle != backend::IRenderBackend::kInvalidBufferHandle)
       m_backend->destroyBuffer(handle);
   m_pageTable = false;
@@ -368,6 +396,8 @@ u32 VirtualGeometryScene::flushPools(u32 slotCap) {
     m_clusterMetaBuffer =
         upload(m_clusterMetaFlat.data(), m_clusterMetaFlat.size() * 4,
                "vg-clusterMeta");
+    m_materialBuffer = upload(m_materialData.data(), m_materialData.size() * 4,
+                              "vg-materials");
     m_pageSlotCount = std::min(m_pageCount, slotCap);
     m_pageSlotPool =
         m_backend->createPageSlotPool(m_pageSlotCount, geometry::kPageSlotSize);

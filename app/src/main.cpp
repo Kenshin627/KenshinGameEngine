@@ -45,6 +45,7 @@
 #include "kenshin/geometry/PagePacker.h"
 #include "kenshin/manager/MeshPool.h"
 #include "kenshin/manager/ShaderManager.h"
+#include "kenshin/manager/TextureManager.h"
 #include "kenshin/renderer/ClusterCullPass.h"
 #include "kenshin/renderer/LightingPass.h"
 #include "kenshin/renderer/MaterialDecodePass.h"
@@ -369,6 +370,10 @@ int main(int argc, char** argv) {
   auto& renderer = engine.registerSubsystem<kenshin::renderer::Renderer>(
       kenshin::renderer::Renderer::Config{args.validation});
   auto& meshPool = engine.registerSubsystem<kenshin::manager::MeshPool>();
+  // M8.2: albedo textures (LIFO shutdown destroys images before the
+  // backend tears down).
+  auto& textureManager =
+      engine.registerSubsystem<kenshin::manager::TextureManager>();
   auto& overlay = engine.registerSubsystem<kenshin::DebugOverlay>();
 
   // ---- demo scene (S2.2): one instance of every shape on the X axis;
@@ -388,6 +393,10 @@ int main(int argc, char** argv) {
   kenshin::renderer::DecodeParams decodeParams;
   // M6.3: page-streaming driver (v3 assets; null otherwise).
   std::unique_ptr<kenshin::renderer::StreamingManager> streamer;
+  // M8.2: the albedo texture-array handle (kInvalidTextureHandle =
+  // no textures loaded; the backend binds its 1x1 dummy).
+  kenshin::u32 albedoTexture =
+      kenshin::backend::IRenderBackend::kInvalidTextureHandle;
   VgDebugState vgDebug;
   if (args.viewMode >= 0 && args.viewMode <= 6)
     vgDebug.viewMode = args.viewMode;
@@ -414,6 +423,25 @@ int main(int argc, char** argv) {
       // vertex pools are never uploaded, the pages stream via the
       // StreamingManager. slotCap = the budget's structural form.
       const bool pagedAsset = kgeoPreview.dag.paged;
+      // M8.2: resolve the dag's material albedo references (bare file
+      // names against the .kgeo's directory - the mtllib rule) into
+      // texture-array LAYERS before the scene bakes them into its GPU
+      // table. A failed load keeps texLayer = -1 (untextured kd).
+      if (pagedAsset && !kgeoPreview.dag.materials.empty()) {
+        const auto kgeoDir = std::filesystem::path(args.kgeo).parent_path();
+        for (auto& mat : kgeoPreview.dag.materials) {
+          if (mat.texPath.empty()) continue;
+          const auto resolved =
+              mat.texPath.find(':') == std::string::npos &&
+                      !std::filesystem::exists(kgeoDir / mat.texPath)
+                  ? std::filesystem::path(mat.texPath)
+                  : (kgeoDir / mat.texPath);
+          const kenshin::u32 layer = textureManager.load(resolved.string());
+          if (layer != kenshin::manager::TextureManager::kInvalidLayer)
+            mat.texLayer = static_cast<kenshin::f32>(layer);
+        }
+        albedoTexture = textureManager.textureArray();
+      }
       const kenshin::u32 vgMeshId = pagedAsset
                                         ? vgScene.addMeshPaged(kgeoPreview.dag)
                                         : vgScene.addMesh(kgeoPreview.dag);
@@ -905,7 +933,8 @@ int main(int argc, char** argv) {
                 ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
                 chain.pairsCurrent(*vgBackend),
                 chain.hwPairsCurrent(*vgBackend),
-                chain.postPairsCurrent(*vgBackend), chain.maxPairs());
+                chain.postPairsCurrent(*vgBackend), chain.maxPairs(),
+                albedoTexture);
           } else {
             decodePass.drawPaged(
                 *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
@@ -916,12 +945,13 @@ int main(int argc, char** argv) {
           }
         } else {
           if (finalView) {
-            decodePass.drawGBuffer(
-                *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
-                ci.width, ci.height, chain.visBufferCurrent(*vgBackend),
-                chain.pairsCurrent(*vgBackend),
-                chain.hwPairsCurrent(*vgBackend),
-                chain.postPairsCurrent(*vgBackend), chain.maxPairs());
+            decodePass.drawGBuffer(*vgBackend, camera.viewProjMatrix(),
+                                   *vgScene, decodeParams, ci.width, ci.height,
+                                   chain.visBufferCurrent(*vgBackend),
+                                   chain.pairsCurrent(*vgBackend),
+                                   chain.hwPairsCurrent(*vgBackend),
+                                   chain.postPairsCurrent(*vgBackend),
+                                   chain.maxPairs(), albedoTexture);
           } else {
             decodePass.draw(
                 *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
@@ -949,6 +979,10 @@ int main(int argc, char** argv) {
           lightingPass.draw(
               *vgBackend, glm::inverse(camera.viewProjMatrix()),
               camera.position(), lights,
+              vgScene->paged()
+                  ? vgScene->materialTableBuffer()
+                  : kenshin::backend::IRenderBackend::kInvalidBufferHandle,
+              vgScene->paged() ? vgScene->materialCount() : 0u,
               glm::vec4(kClearColor[0], kClearColor[1], kClearColor[2], 1.0f),
               vgDebug.ambient, vgDebug.exposure, ci.width, ci.height);
         }

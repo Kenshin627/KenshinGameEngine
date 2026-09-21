@@ -220,6 +220,31 @@ class IRenderBackend {
   virtual bool readbackBuffer(u32 buffer, usize offset, usize bytes,
                               std::vector<u8>& out) = 0;
 
+  // ---- textures (M8.2) ---------------------------------------------
+  /// Handle to an uploaded immutable texture array.
+  static constexpr u32 kInvalidTextureHandle = 0xFFFFFFFFu;
+  struct TextureArrayDesc {
+    u32 width = 0;
+    u32 height = 0;
+    u32 layers = 1;  // Texture2DArray layers (>= 1; 1 = plain 2D)
+    /// Top-down RGBA8 rows (the BmpReader output contract), layers
+    /// consecutive: width*height*4 bytes each. The mip chain is
+    /// generated on the GPU (linear blit downsample); mip count =
+    /// floor(log2(max(width, height))) + 1.
+    const u8* rgba = nullptr;
+    usize bytes = 0;  // width*height*4*layers
+    const char* debugName = nullptr;
+  };
+  /// One-shot upload of a texture array: staging copy of every layer's
+  /// mip 0, GPU blit mip chain, final transition to shader-read layout.
+  /// Immutable afterwards. All layers must share dimensions (the
+  /// Texture2DArray contract; enforced by the caller).
+  virtual u32 createTextureArray(const TextureArrayDesc& desc) = 0;
+  /// Destroy a texture array. Static scene resources only: the
+  /// implementation drains the device first (no per-frame retire
+  /// machinery for textures in v1).
+  virtual void destroyTexture(u32 texture) = 0;
+
   // ---- fullscreen pass (VisBuffer decode path, S4.5) ----------------
   /// A fullscreen-triangle graphics pipeline: no vertex input (positions
   /// generated in the VS), depth test/write OFF (the VisBuffer already
@@ -245,12 +270,17 @@ class IRenderBackend {
   /// Draw into THIS frame slot's GBuffer targets: barriers them into
   /// color-attachment layout, opens the 2-attachment scope (cleared to
   /// zero - the lighting pass reads alpha==0 as background), binds the
-  /// pipeline's SSBO set (buffers[i] -> binding i) and draws the
-  /// fullscreen triangle. Self-contained: closes its scope and barriers
-  /// the targets to shader-read for the lighting pass.
+  /// pipeline's MIXED set and draws the fullscreen triangle. Binding
+  /// contract (M8.2): reflected STORAGE_BUFFER bindings take
+  /// `bufferHandles` in ascending order; the reflected SAMPLED_IMAGE
+  /// binding gets `albedoTexture`'s view (an invalid handle falls back
+  /// to a backend-internal 1x1 dummy so the set is always validly
+  /// written) and the SAMPLER binding the backend's albedo sampler.
+  /// Self-contained: closes its scope and barriers the targets to
+  /// shader-read for the lighting pass.
   virtual void drawGBuffer(u32 pipeline, const u32* bufferHandles,
-                           u32 bufferCount, const void* push, usize pushBytes,
-                           u32 width, u32 height) = 0;
+                           u32 bufferCount, u32 albedoTexture, const void* push,
+                           usize pushBytes, u32 width, u32 height) = 0;
   /// M8.1 deferred shading - the lighting pass: fullscreen VS+FS whose
   /// set layout is MIXED - reflected Sampler2D bindings (in ascending
   /// binding order) are bound to this frame slot's GBuffer views (A

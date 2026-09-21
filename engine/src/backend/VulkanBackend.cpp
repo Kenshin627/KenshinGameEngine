@@ -124,8 +124,16 @@ struct VulkanBackend::Impl {
   u32 depthWidth = 0, depthHeight = 0;
 
   // M8.1: the one engine sampler (linear, clamp-to-edge) for the
-  // lighting pass's GBuffer reads (and future texture sampling).
+  // lighting pass's GBuffer reads.
   VkSampler linearSampler = VK_NULL_HANDLE;
+  // M8.2: albedo sampling (mip-filtered, repeat for tiling UVs) and the
+  // immutable texture-array table (static scene resources; destroyed at
+  // shutdown). dummyTexture keeps mixed descriptor sets validly written
+  // even when a scene carries no albedo.
+  VkSampler albedoSampler = VK_NULL_HANDLE;
+  GpuImage dummyTexture;
+  std::vector<GpuImage> textures;
+  std::vector<bool> textureAlive;
 
   // GPU timestamps + graphics pipelines (PipelineStore: table + disk cache)
   bool gpuTimestamps = false;
@@ -282,6 +290,35 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
                                &m_impl->linearSampler)))
       return false;
   }
+  // M8.2: the albedo sampler - mip-filtered LINEAR (analytic-lod
+  // SampleLevel snaps between mips with the default NEAREST mipmap
+  // mode) and REPEAT addressing (tiling UVs; the knot wraps).
+  {
+    const VkSamplerCreateInfo samplerInfo{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .maxLod = VK_LOD_CLAMP_NONE,
+    };
+    if (!KE_VK(vkCreateSampler(m_impl->device.device, &samplerInfo, nullptr,
+                               &m_impl->albedoSampler)))
+      return false;
+  }
+  // The always-valid binding target for mixed sets without a scene
+  // texture (fsGBuffer's SPIR-V always carries the sample opcode, so
+  // the binding is always live - dead-strip discipline in reverse).
+  {
+    const u8 white[4] = {255, 255, 255, 255};
+    const TextureArrayDesc dummy{1, 1, 1, white, 4, "dummy-texture"};
+    if (createTextureArray(dummy) == kInvalidTextureHandle) return false;
+    m_impl->dummyTexture = m_impl->textures.back();
+    m_impl->textures.pop_back();
+    m_impl->textureAlive.pop_back();
+  }
   // M8.1 format gate: the deferred GBuffer needs RGBA16F/RGBA8 as
   // color attachment + sampled (the engine never queried format
   // support before - report instead of trusting the driver blind).
@@ -373,6 +410,18 @@ void VulkanBackend::shutdown() {
     vkDestroySampler(m_impl->device.device, m_impl->linearSampler, nullptr);
     m_impl->linearSampler = VK_NULL_HANDLE;
   }
+  if (m_impl->albedoSampler != VK_NULL_HANDLE) {
+    vkDestroySampler(m_impl->device.device, m_impl->albedoSampler, nullptr);
+    m_impl->albedoSampler = VK_NULL_HANDLE;
+  }
+  for (GpuImage& t : m_impl->textures)
+    if (t.image != VK_NULL_HANDLE)
+      t.destroy(m_impl->device.allocator, m_impl->device.device);
+  m_impl->textures.clear();
+  m_impl->textureAlive.clear();
+  if (m_impl->dummyTexture.image != VK_NULL_HANDLE)
+    m_impl->dummyTexture.destroy(m_impl->device.allocator,
+                                 m_impl->device.device);
   m_impl->buffers.destroyAll(m_impl->device.allocator);
   // M6.2 page streaming (device idled above; the slot POOL buffer rode
   // buffers.destroyAll, these are the batch-side resources).
@@ -1185,13 +1234,226 @@ void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
 
 // ── M8.1 deferred shading: GBuffer decode + lighting ────────────
 
+// M8.2 texture upload: one-shot (own pool + cb, submit, wait) - the
+// uploadDeviceBuffer pattern applied to images. Mip chain via linear
+// blits; layouts per subresource tracked explicitly (a barrier's
+// oldLayout must match reality):
+//   copy stage : whole image UNDEFINED -> TRANSFER_DST
+//   blit stage : before blitting m-1 -> m, mip m-1 goes DST -> SRC
+//                (invariant: mip m-1 is in DST when the loop reaches
+//                it - mip 0 from the copy, deeper mips from the blit
+//                that produced them)
+//   final      : [0, mips-1) SRC -> SHADER_READ_ONLY, last mip DST ->
+//                SHADER_READ_ONLY
+u32 VulkanBackend::createTextureArray(const TextureArrayDesc& desc) {
+  Impl& impl = *m_impl;
+  if (desc.width == 0 || desc.height == 0 || desc.layers == 0 ||
+      desc.rgba == nullptr ||
+      desc.bytes <
+          static_cast<usize>(desc.width) * desc.height * 4 * desc.layers) {
+    KENSHIN_ERROR("[vulkan] createTextureArray: bad desc ({}x{}x{} bytes={})",
+                  desc.width, desc.height, desc.layers, desc.bytes);
+    return kInvalidTextureHandle;
+  }
+  u32 mips = 1;
+  while ((desc.width | desc.height) >> mips != 0) ++mips;
+
+  GpuImage image;
+  if (!image.create(impl.device.allocator, impl.device.device, desc.width,
+                    desc.height, VK_FORMAT_R8G8B8A8_UNORM,
+                    VK_IMAGE_USAGE_SAMPLED_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mips, desc.layers,
+                    /*arrayedView=*/true)) {
+    KENSHIN_ERROR("[vulkan] createTextureArray: image creation failed");
+    return kInvalidTextureHandle;
+  }
+
+  // Staging: every layer's mip 0, consecutive.
+  const usize layerBytes = static_cast<usize>(desc.width) * desc.height * 4;
+  const VkBufferCreateInfo stagingInfo{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = static_cast<VkDeviceSize>(layerBytes * desc.layers),
+      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  const VmaAllocationCreateInfo stagingAlloc{
+      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+               VMA_ALLOCATION_CREATE_MAPPED_BIT,
+      .usage = VMA_MEMORY_USAGE_AUTO,
+      .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+  };
+  VkBuffer staging = VK_NULL_HANDLE;
+  VmaAllocation stagingAllocHandle = VK_NULL_HANDLE;
+  VmaAllocationInfo mapped{};
+  if (vmaCreateBuffer(impl.device.allocator, &stagingInfo, &stagingAlloc,
+                      &staging, &stagingAllocHandle, &mapped) != VK_SUCCESS) {
+    image.destroy(impl.device.allocator, impl.device.device);
+    return kInvalidTextureHandle;
+  }
+  std::memcpy(mapped.pMappedData, desc.rgba, layerBytes * desc.layers);
+
+  const VkCommandPoolCreateInfo poolInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+      .queueFamilyIndex = impl.device.graphicsFamily,
+  };
+  VkCommandPool pool = VK_NULL_HANDLE;
+  if (!KE_VK(
+          vkCreateCommandPool(impl.device.device, &poolInfo, nullptr, &pool))) {
+    vmaDestroyBuffer(impl.device.allocator, staging, stagingAllocHandle);
+    image.destroy(impl.device.allocator, impl.device.device);
+    return kInvalidTextureHandle;
+  }
+  const VkCommandBufferAllocateInfo cbInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+  };
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  KE_VK(vkAllocateCommandBuffers(impl.device.device, &cbInfo, &cmd));
+  const VkCommandBufferBeginInfo begin{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+  KE_VK(vkBeginCommandBuffer(cmd, &begin));
+
+  // Every barrier spans ALL array layers (the review's layer-0-only
+  // bug: copies/blits/draws touch layer 1..N-1 too).
+  const auto barrier = [&](u32 baseMip, u32 mipCount, VkImageLayout oldL,
+                           VkImageLayout newL) {
+    CommandContext::pipelineBarrier(
+        cmd, CommandContext::imageBarrier(image.image, oldL, newL,
+                                          VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                          VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                          baseMip, mipCount, 0, desc.layers));
+  };
+  barrier(0, mips, VK_IMAGE_LAYOUT_UNDEFINED,
+          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+  std::vector<VkBufferImageCopy> copies(desc.layers);
+  for (u32 l = 0; l < desc.layers; ++l) {
+    copies[l] = VkBufferImageCopy{
+        .bufferOffset = static_cast<VkDeviceSize>(layerBytes * l),
+        .imageSubresource =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = l,
+                .layerCount = 1,
+            },
+        .imageExtent = {desc.width, desc.height, 1},
+    };
+  }
+  vkCmdCopyBufferToImage(cmd, staging, image.image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         static_cast<u32>(copies.size()), copies.data());
+
+  for (u32 m = 1; m < mips; ++m) {
+    barrier(m - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    const u32 sw = (std::max)(desc.width >> (m - 1), 1u);
+    const u32 sh = (std::max)(desc.height >> (m - 1), 1u);
+    const u32 dw = (std::max)(desc.width >> m, 1u);
+    const u32 dh = (std::max)(desc.height >> m, 1u);
+    for (u32 l = 0; l < desc.layers; ++l) {
+      const VkImageBlit region{
+          .srcSubresource =
+              {
+                  .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                  .mipLevel = m - 1,
+                  .baseArrayLayer = l,
+                  .layerCount = 1,
+              },
+          .srcOffsets = {{0, 0, 0},
+                         {static_cast<i32>(sw), static_cast<i32>(sh), 1}},
+          .dstSubresource =
+              {
+                  .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                  .mipLevel = m,
+                  .baseArrayLayer = l,
+                  .layerCount = 1,
+              },
+          .dstOffsets = {{0, 0, 0},
+                         {static_cast<i32>(dw), static_cast<i32>(dh), 1}},
+      };
+      vkCmdBlitImage(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                     image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                     &region, VK_FILTER_LINEAR);
+    }
+  }
+  // Final read transitions order against FRAGMENT sampling (the
+  // upload's queue-wait below already covers it host-side; this keeps
+  // the barrier scopes semantically correct for any future reuse).
+  if (mips > 1)
+    CommandContext::pipelineBarrier(
+        cmd,
+        CommandContext::imageBarrier(
+            image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, 0, mips - 1, 0, desc.layers));
+  CommandContext::pipelineBarrier(
+      cmd,
+      CommandContext::imageBarrier(
+          image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, mips - 1, 1, 0, desc.layers));
+
+  KE_VK(vkEndCommandBuffer(cmd));
+  const VkCommandBufferSubmitInfo cbSubmit{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+      .commandBuffer = cmd,
+  };
+  const VkSubmitInfo2 submit{
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos = &cbSubmit,
+  };
+  KE_VK(vkQueueSubmit2(impl.device.graphicsQueue, 1, &submit, VK_NULL_HANDLE));
+  KE_VK(vkQueueWaitIdle(impl.device.graphicsQueue));
+  vkDestroyCommandPool(impl.device.device, pool, nullptr);
+  vmaDestroyBuffer(impl.device.allocator, staging, stagingAllocHandle);
+
+  if (desc.debugName)
+    vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE,
+                    reinterpret_cast<uint64_t>(image.image), desc.debugName);
+  for (u32 i = 0; i < impl.textures.size(); ++i) {
+    if (!impl.textureAlive[i]) {
+      impl.textures[i] = std::move(image);
+      impl.textureAlive[i] = true;
+      return i;
+    }
+  }
+  impl.textures.push_back(std::move(image));
+  impl.textureAlive.push_back(true);
+  return static_cast<u32>(impl.textures.size() - 1);
+}
+
+void VulkanBackend::destroyTexture(u32 texture) {
+  Impl& impl = *m_impl;
+  if (texture >= impl.textures.size() || !impl.textureAlive[texture]) {
+    KENSHIN_ERROR("[vulkan] destroyTexture: invalid handle {}", texture);
+    return;
+  }
+  // Static scene resources only (v1): draining the device is heavy but
+  // correct - textures are destroyed at scene teardown, not per frame.
+  vkDeviceWaitIdle(impl.device.device);
+  impl.textures[texture].destroy(impl.device.allocator, impl.device.device);
+  impl.textureAlive[texture] = false;
+}
+
 u32 VulkanBackend::createGBufferPipeline(const FullscreenPipelineInfo& info) {
   return m_impl->pipelines.createGBuffer(m_impl->device.device, info);
 }
 
 void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
-                                u32 bufferCount, const void* push,
-                                usize pushBytes, u32 width, u32 height) {
+                                u32 bufferCount, u32 albedoTexture,
+                                const void* push, usize pushBytes, u32 width,
+                                u32 height) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
       pipeline > impl.pipelines.fullscreenCount())
@@ -1210,6 +1472,16 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
         .range = impl.buffers.size(bufferHandles[i]),
     };
   }
+  // The albedo binding target: the scene texture when valid, the
+  // backend's 1x1 dummy otherwise (the mixed set must always be
+  // validly written - the SPIR-V sample opcode exists regardless of
+  // whether any material references a texture).
+  const GpuImage* albedo = &impl.dummyTexture;
+  if (albedoTexture < impl.textures.size() && impl.textureAlive[albedoTexture])
+    albedo = &impl.textures[albedoTexture];
+  else if (albedoTexture != kInvalidTextureHandle)
+    KENSHIN_ERROR("[vulkan] drawGBuffer: bad albedo texture {} (dummy)",
+                  albedoTexture);
 
   // The GBuffer targets cycle UNDEFINED/COLOR_ATTACHMENT (this pass) ->
   // SHADER_READ_ONLY (after it) -> COLOR_ATTACHMENT (next frame).
@@ -1226,28 +1498,71 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
     const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "gbuffer-decode"};
     impl.cmd.beginGBufferPass(slot.gbuffer[0].view, slot.gbuffer[1].view, width,
                               height);
+    // Mixed binding writes (M8.2): STORAGE_BUFFER bindings take the
+    // buffer handles in ascending order; the SAMPLED_IMAGE binding
+    // gets the albedo view and the SAMPLER binding the albedo sampler.
     const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
-    std::vector<VkWriteDescriptorSet> writes(bufferCount);
-    for (u32 i = 0; i < bufferCount; ++i)
-      writes[i] = VkWriteDescriptorSet{
+    VkDescriptorImageInfo albedoImage{
+        .sampler = VK_NULL_HANDLE,
+        .imageView = albedo->view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    VkDescriptorImageInfo albedoSamplerInfo{
+        .sampler = impl.albedoSampler,
+        .imageView = VK_NULL_HANDLE,
+        .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
+    u32 nextBuffer = 0;
+    bool bindMismatch = false;
+    for (u32 b = 0; b < fs.bindingCount && !bindMismatch; ++b) {
+      writes[b] = VkWriteDescriptorSet{
           .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
           .dstSet = set,
-          .dstBinding = i,
+          .dstBinding = b,
           .descriptorCount = 1,
-          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-          .pBufferInfo = &infos[i],
+          .descriptorType = fs.bindingTypes[b],
       };
-    vkUpdateDescriptorSets(impl.device.device, bufferCount, writes.data(), 0,
-                           nullptr);
-    vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            fs.layout, 0, 1, &set, 0, nullptr);
-    vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      fs.pipeline);
-    vkCmdPushConstants(
-        impl.cmd.cmd(), fs.layout,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-        static_cast<u32>(pushBytes), push);
-    vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+      switch (fs.bindingTypes[b]) {
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+          writes[b].pImageInfo = &albedoImage;
+          break;
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+          writes[b].pImageInfo = &albedoSamplerInfo;
+          break;
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+          // fsGBuffer uses separate image+sampler; a combined binding
+          // (if one ever appears) gets view + albedo sampler.
+          albedoImage.sampler = impl.albedoSampler;
+          writes[b].pImageInfo = &albedoImage;
+          break;
+        default:
+          // Never early-return here: the GBuffer pass is OPEN - a
+          // mismatch means a programming error; log once, skip the
+          // draw, and let the scope close below.
+          if (nextBuffer >= bufferCount) {
+            KENSHIN_ERROR("[vulkan] drawGBuffer: {} handles < {} bindings",
+                          bufferCount, fs.bindingCount);
+            bindMismatch = true;
+            break;
+          }
+          writes[b].pBufferInfo = &infos[nextBuffer++];
+          break;
+      }
+    }
+    if (!bindMismatch) {
+      vkUpdateDescriptorSets(impl.device.device, fs.bindingCount, writes.data(),
+                             0, nullptr);
+      vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              fs.layout, 0, 1, &set, 0, nullptr);
+      vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        fs.pipeline);
+      vkCmdPushConstants(
+          impl.cmd.cmd(), fs.layout,
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+          static_cast<u32>(pushBytes), push);
+      vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+    }
     impl.cmd.endPass();
   }
   for (u32 g = 0; g < 2; ++g)

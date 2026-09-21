@@ -150,6 +150,14 @@ float2 v5Uv(uint vi, uint uvBase, uint poolTotal, uint vertexOffset,
                   qm.uvMinY + float(qy) * (qm.uvRangeY / 255.0));
 }
 
+// M8.2: the material table record (8 f32 - the .kgeo v7 section's GPU
+// shape, packed identically in VirtualGeometryScene).
+struct GpuMaterial
+{
+    float4 kdTex;    // rgb kd, a = texture-array layer (-1 = untextured)
+    float4 params;   // x roughness, y metallic, zw pad (the lighting pass)
+};
+
 struct DecodePush
 {
     float4x4 viewProj;   // world -> NDC, the camera's own (Y-flipped) matrix
@@ -193,6 +201,12 @@ struct DecodePush
 [[vk::binding(13)]] StructuredBuffer<uint2> hwPairs;
 [[vk::binding(14)]] StructuredBuffer<uint2> postPairs;
 [[vk::binding(15)]] StructuredBuffer<uint> clusterMeta;  // v5: per-cluster ordinal into its page's meta array
+// M8.2 (fsGBuffer only - dead-stripped from fsMain's SPIR-V): the
+// material table + the albedo Texture2DArray. decodeParams[1].y
+// carries the material count (the id clamp bound).
+[[vk::binding(16)]] StructuredBuffer<GpuMaterial> materials;
+[[vk::binding(17)]] Texture2DArray<float4> albedoTex;
+[[vk::binding(18)]] SamplerState albedoSamp;
 
 // kPageSlotSize (128 KB) in u32 elements - mirrors rasterize_sw / CPU
 // (v5: all page sections are u32-addressed).
@@ -646,6 +660,10 @@ GBufferOut fsGBuffer(float4 frag : SV_Position)
         qm.posStartZ = int(positions[min(mb + 2u, metaEnd)]);
         qm.widths = positions[min(mb + 3u, metaEnd)];
         qm.posWordOff = positions[min(mb + 4u, metaEnd)];
+        qm.uvMinX = asfloat(positions[min(mb + 5u, metaEnd)]);
+        qm.uvMinY = asfloat(positions[min(mb + 6u, metaEnd)]);
+        qm.uvRangeX = asfloat(positions[min(mb + 7u, metaEnd)]);
+        qm.uvRangeY = asfloat(positions[min(mb + 8u, metaEnd)]);
         qm.idxBits = positions[min(mb + 9u, metaEnd)];
     }
 
@@ -767,8 +785,77 @@ GBufferOut fsGBuffer(float4 frag : SV_Position)
     const float3 worldPos = (w0 * p0 + w1 * p1 + w2 * p2) * pSumInv;
     const float dist = length(worldPos - push.camFlags.xyz);
 
+    // M8.2: UVs + the analytic-derivative block, the fsMain mirror
+    // (do not refactor one without the other). The derivatives drive
+    // the albedo's manual mip - implicit derivatives are garbage
+    // across VisBuffer seams.
+    float2 uv0, uv1, uv2;
+    if (paged)
+    {
+        uv0 = v5Uv(i0, uvBase, posTotal, cluster.vertexOffset, qm);
+        uv1 = v5Uv(i1, uvBase, posTotal, cluster.vertexOffset, qm);
+        uv2 = v5Uv(i2, uvBase, posTotal, cluster.vertexOffset, qm);
+    }
+    else
+    {
+        const uint uvTotal = posTotal;  // no clamp in v2 (~0xFFFFFFFF)
+        const uint a = min((uvBase + cluster.vertexOffset + i0) * 2u, uvTotal - 2u);
+        const uint b = min((uvBase + cluster.vertexOffset + i1) * 2u, uvTotal - 2u);
+        const uint c2 = min((uvBase + cluster.vertexOffset + i2) * 2u, uvTotal - 2u);
+        uv0 = float2(asfloat(uvs[a]), asfloat(uvs[a + 1u]));
+        uv1 = float2(asfloat(uvs[b]), asfloat(uvs[b + 1u]));
+        uv2 = float2(asfloat(uvs[c2]), asfloat(uvs[c2 + 1u]));
+    }
+    const float2 uv = (uv0 * p0 + uv1 * p1 + uv2 * p2) * pSumInv;
+    const float invDetUv = 1.0 / det;
+    const float dudx = e2.y * invDetUv, dudy = -e2.x * invDetUv;
+    const float dvdx = -e1.y * invDetUv, dvdy = e1.x * invDetUv;
+    const float dp0x = -(dudx + dvdx) / cw0;
+    const float dp0y = -(dudy + dvdy) / cw0;
+    const float dp1x = dudx / cw1, dp1y = dudy / cw1;
+    const float dp2x = dvdx / cw2, dp2y = dvdy / cw2;
+    const float2 A = uv0 * p0 + uv1 * p1 + uv2 * p2;
+    const float D = p0 + p1 + p2;
+    const float2 Ax = float2(uv0.x * dp0x + uv1.x * dp1x + uv2.x * dp2x,
+                             uv0.y * dp0x + uv1.y * dp1x + uv2.y * dp2x);
+    const float2 Ay = float2(uv0.x * dp0y + uv1.x * dp1y + uv2.x * dp2y,
+                             uv0.y * dp0y + uv1.y * dp1y + uv2.y * dp2y);
+    const float Dx = dp0x + dp1x + dp2x;
+    const float Dy = dp0y + dp1y + dp2y;
+    const float dSafe = abs(D) < 1e-9f ? (D < 0.0 ? -1e-9f : 1e-9f) : D;
+    const float2 dUVdx = (Ax * D - A * Dx) / (dSafe * dSafe);
+    const float2 dUVdy = (Ay * D - A * Dy) / (dSafe * dSafe);
+
+    // Material chain (paged only - the v2 path stays on the global kd,
+    // keeping unpaged draws bit-identical): the per-cluster id rides
+    // the meta widths word's high bits (v7), clamped by the count in
+    // decodeParams[1].y. The mip comes from the analytic derivatives
+    // and the texture's own dimensions (GetDimensions - one uniform
+    // size for the whole array), value-clamped never discarded.
+    float3 kd = push.kdScale.rgb;
+    float matIdOut = 0.0;
+    if (paged)
+    {
+        const uint matCount = max(uint(decodeParams[1].y), 1u);
+        const uint matId = min((qm.widths >> 12) & 0xFFu, matCount - 1u);
+        const GpuMaterial mat = materials[matId];
+        matIdOut = float(matId) / 255.0;
+        kd = mat.kdTex.rgb;
+        if (mat.kdTex.a >= 0.0)
+        {
+            uint tw = 1, th = 1, layers = 1, mips = 1;
+            albedoTex.GetDimensions(0, tw, th, layers, mips);
+            const float texScale = float(max(tw, th));
+            const float2 duv = max(abs(dUVdx), abs(dUVdy));
+            const float foot = max(max(duv.x, duv.y) * texScale, 1e-9f);
+            const float lod = clamp(log2(foot), 0.0, float(mips - 1u));
+            const float3 sampleUv = float3(uv, min(mat.kdTex.a, float(layers) - 1.0));
+            kd *= albedoTex.SampleLevel(albedoSamp, sampleUv, lod).rgb;
+        }
+    }
+
     o.a = float4(nrm, dist);
-    o.b = float4(push.kdScale.rgb, 0.0);
+    o.b = float4(kd, matIdOut);
     // NaN scrub (crossing-triangle garbage paths) - the lighting pass
     // must never read non-finite GBuffer data.
     if (!(nrm.x >= -1.0 && nrm.x <= 1.0) || !(dist >= 0.0) ||

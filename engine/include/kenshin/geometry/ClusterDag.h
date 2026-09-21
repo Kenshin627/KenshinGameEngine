@@ -145,6 +145,23 @@ struct ClusterDag {
   bool pageIdxPacked = false;
   /// v5: per-cluster ordinal into its page's clusterMeta array.
   std::vector<u32> clusterMetaIndex;
+  /// v7 (M8.2): the material table. texPath is the disk-side albedo
+  /// reference ("" = untextured); texLayer is RUNTIME-assigned by the
+  /// TextureManager's load order (-1 until the app resolves it).
+  struct DagMaterial {
+    f32 kd[3] = {0.75f, 0.75f, 0.78f};
+    f32 texLayer = -1.0f;
+    f32 roughness = 0.5f;
+    f32 metallic = 0.0f;
+    std::string texPath;
+  };
+  std::vector<DagMaterial> materials;
+  /// Per-cluster material id into `materials` (u8 range; stamped into
+  /// the clusterMeta widths word's free high bits at pack time).
+  std::vector<u32> clusterMaterial;
+  /// v7: true when the file carried a material table (the runtime
+  /// paged gate; pre-v7 assets are rejected with a rebuild hint).
+  bool hasMaterialTable = false;
 
   // ---- queries -------------------------------------------------------
   u32 triangleCount(u32 cluster) const {

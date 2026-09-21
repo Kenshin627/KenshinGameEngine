@@ -24,7 +24,9 @@ struct ReflectedBinding {
   enum class Type {
     StorageBuffer,
     StorageImage,
-    SampledImage,
+    CombinedImageSampler,  // Slang Sampler2D (combined)
+    SampledTexture,        // SPIR-V SAMPLED_IMAGE (separate sampler)
+    Sampler,
     UniformBuffer,
     Unknown,
   };

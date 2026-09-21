@@ -58,6 +58,7 @@ add_library(kenshin_engine STATIC
     src/Engine.cpp
     src/manager/MeshPool.cpp
     src/manager/ShaderManager.cpp
+    src/manager/TextureManager.cpp
     src/renderer/BaselineForwardPipeline.cpp
     src/renderer/Renderer.cpp
     src/renderer/VirtualGeometryScene.cpp
@@ -71,6 +72,7 @@ add_library(kenshin_engine STATIC
     src/renderer/StreamingManager.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
+    src/util/BmpReader.cpp
     src/util/BmpWriter.cpp
     src/math/ray.cpp
 )

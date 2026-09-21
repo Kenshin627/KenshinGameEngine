@@ -44,15 +44,20 @@ class LightingPass {
   /// Record the fullscreen lighting draw: `lights` uploads into the
   /// host-visible table this frame; `invViewProj` is the inverse of the
   /// camera's own (Y-flipped) view-proj - the exact matrix pair the
-  /// decode pass used, so positions roundtrip.
+  /// decode pass used, so positions roundtrip. M8.2: `materialTable`
+  /// (the scene's 8-f32 records) feeds the per-pixel
+  /// roughness/metallic the decode pass indexed by GBuffer B's alpha;
+  /// `materialCount` clamps it (0 = a 1-entry dummy keeps the binding
+  /// validly written and shades with the defaults).
   void draw(backend::IRenderBackend& backend, const glm::mat4& invViewProj,
             const glm::vec3& camPos, std::span<const GpuLightC> lights,
-            const glm::vec4& clearColor, float ambient, float exposure,
-            u32 width, u32 height);
+            u32 materialTable, u32 materialCount, const glm::vec4& clearColor,
+            float ambient, float exposure, u32 width, u32 height);
 
  private:
   u32 m_pipeline = ~0u;
-  u32 m_lightBuffer = ~0u;  // host-visible, 32 lights max
+  u32 m_lightBuffer = ~0u;    // host-visible, 32 lights max
+  u32 m_materialDummy = ~0u;  // 1-entry default table (v2/unpaged path)
   static constexpr u32 kMaxLights = 32;
 };
 

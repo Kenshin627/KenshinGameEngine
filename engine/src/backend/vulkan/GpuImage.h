@@ -21,11 +21,14 @@ struct GpuImage {
   VkImageView view = VK_NULL_HANDLE;
   u32 width = 0;
   u32 height = 0;
+  u32 mipLevels = 1;
+  u32 arrayLayers = 1;
   VkFormat format = VK_FORMAT_UNDEFINED;
 
   bool create(VmaAllocator allocator, VkDevice device, u32 w, u32 h,
               VkFormat fmt, VkImageUsageFlags usage,
-              VkMemoryPropertyFlags memoryFlags);
+              VkMemoryPropertyFlags memoryFlags, u32 mips = 1, u32 layers = 1,
+              bool arrayedView = false);
   void destroy(VmaAllocator allocator, VkDevice device);
 
   /// True when it can serve a request of the given size/format.
