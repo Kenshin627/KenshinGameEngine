@@ -75,8 +75,11 @@ add_test(NAME render_kgeo
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_out.bmp
         -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
         -DKGEO=1 -DPROC=knot -DLOD=1
-        # v5 quantized grid -> near-tie depth flips across runs
-        -DTOLERANCE=8
+        # v5 quantized grid -> near-tie depth flips across runs; M9.1
+        # shadow-edge sampling amplifies the tie jitter (measured ~40
+        # px run-to-run vs 5 without shadows) - 64 keeps real
+        # regressions (thousands of px) loud while absorbing the jitter.
+        -DTOLERANCE=64
         -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
 # HW-path anchor: same reference, --no-hw. Route and no-hw render
 # byte-identically (verified after a13ba83), so both tests sharing one
@@ -89,7 +92,7 @@ add_test(NAME render_kgeo_nohw
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_nohw_out.bmp
         -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
         -DKGEO=1 -DPROC=knot -DLOD=1 -DNOHW=1
-        -DTOLERANCE=8
+        -DTOLERANCE=64
         -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
 # M8.2: the albedo variant - same knot asset built with --albedo (the
 # committed checker_64.bmp), pinning the full texture path (upload +
@@ -103,7 +106,7 @@ add_test(NAME render_kgeo_albedo
         -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
         -DKGEO=1 -DPROC=knot -DLOD=1
         -DALBEDO=${CMAKE_CURRENT_SOURCE_DIR}/assets/checker_64.bmp
-        -DTOLERANCE=8
+        -DTOLERANCE=64
         -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
 set_tests_properties(render_baseline render_kgeo render_kgeo_nohw
     render_kgeo_albedo PROPERTIES LABELS "gpu")

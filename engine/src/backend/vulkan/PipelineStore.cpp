@@ -521,6 +521,13 @@ u32 PipelineStore::createTonemap(
                                  VK_FORMAT_UNDEFINED, true);
 }
 
+u32 PipelineStore::createShadowDecode(
+    VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
+  static const VkFormat kFormat = VK_FORMAT_R32_SFLOAT;
+  return createFullscreenVariant(device, info, &kFormat, 1, VK_FORMAT_UNDEFINED,
+                                 false);
+}
+
 u32 PipelineStore::createNullRaster(
     VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
   if (info.vsSpirv == nullptr || info.vsBytes == 0 || info.fsSpirv == nullptr ||

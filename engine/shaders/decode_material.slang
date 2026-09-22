@@ -872,3 +872,154 @@ GBufferOut fsGBuffer(float4 frag : SV_Position)
     }
     return o;
 }
+
+// ── M9.1 shadow depth entry ──────────────────────────────────────
+// The THIRD decode mirror (D5 discipline: the geometry chain below is
+// fsGBuffer's minus the normal transform and the material/UV blocks -
+// change the shared decode together). Renders the LIGHT-VIEW VisBuffer
+// (the shadow chain's, same frame) into light-space linear depth for
+// the single R32F shadow target. Ortho projection: clip.w == 1, so
+// clip.z IS the [0,1] depth. Background pixels write 1.0 (far = no
+// occluder) instead of discarding - the fullscreen pass then covers
+// every texel and the pass clear value never leaks.
+[shader("fragment")]
+float fsShadowDepth(float4 frag : SV_Position) : SV_Target
+{
+    const float2 wh = push.viewport.xy;
+    const uint2 pixel = uint2(frag.xy);
+    const uint visLo = vis[(pixel.y * uint(wh.x) + pixel.x) * 2u];
+    if (visLo == 0u)
+        return 1.0;  // far: nothing casts here
+
+    const uint triIdx = visLo & 0x7Fu;
+    const uint listSel = (visLo >> 7) & 3u;
+    const uint pairIdx = min((visLo >> 9) & 0x7FFFFFu,
+                             max(uint(decodeParams[1].x), 1u) - 1u);
+    const uint2 pair = listSel == 1u   ? hwPairs[pairIdx]
+                       : listSel == 2u ? postPairs[pairIdx]
+                                       : pairs[pairIdx];
+    const uint instanceIdx = min(pair.x, uint(push.lightDir.w) - 1u);
+    const uint clusterIdx = min(pair.y, uint(push.viewport.z) - 1u);
+    const GpuCluster cluster = clusters[clusterIdx];
+
+    uint posBase = 0, idxBase = 0;
+    uint posTotal = 0xFFFFFFFFu, idxTotal = 0xFFFFFFFFu;
+    GpuClusterQuant qm;
+    float posStep = 1.0;
+    const bool paged = uint(decodeParams[0].x) != 0u;
+    if (paged)
+    {
+        const uint page = clusterPage[clusterIdx];
+        const GpuPageHeader ph = pageHeader[page];
+        const uint slot = pageTable[page];
+        const uint pool = slot * kSlotU32s;
+        posTotal = max(uint(decodeParams[0].y), 1u);
+        idxTotal = posTotal;
+        posBase = min(pool + ph.posBase, posTotal - 1u);
+        idxBase = min(pool + ph.idxBase, posTotal - 1u);
+        posStep = ph.posStep;
+        const uint ord = min(clusterMeta[clusterIdx], ph.clusterCount - 1u);
+        const uint metaEnd = posTotal - 10u;
+        const uint mb = min(pool + ph.metaBase + ord * 10u, metaEnd);
+        qm.posStartX = int(positions[min(mb, metaEnd)]);
+        qm.posStartY = int(positions[min(mb + 1u, metaEnd)]);
+        qm.posStartZ = int(positions[min(mb + 2u, metaEnd)]);
+        qm.widths = positions[min(mb + 3u, metaEnd)];
+        qm.posWordOff = positions[min(mb + 4u, metaEnd)];
+        qm.idxBits = positions[min(mb + 9u, metaEnd)];
+    }
+
+    const uint tri3 = min(triIdx * 3u, cluster.indexCount - 3u);
+    uint i0, i1, i2;
+    if (paged)
+    {
+        const uint tri = tri3 / 3u;
+        const uint baseBits = qm.idxBits & 0xFu;
+        const uint offsetBits = (qm.idxBits >> 4) & 0xFu;
+        const uint bitIdx = (qm.idxBits >> 8) + tri * (baseBits + 2u * offsetBits);
+        const uint wi0 = idxBase + (bitIdx >> 5);
+        const uint base = loadBits2(indices[min(wi0, idxTotal - 1u)],
+                                    indices[min(wi0 + 1u, idxTotal - 1u)],
+                                    bitIdx & 31u, baseBits);
+        const uint at1 = bitIdx + baseBits;
+        const uint wi1 = idxBase + (at1 >> 5);
+        const uint o1 = loadBits2(indices[min(wi1, idxTotal - 1u)],
+                                  indices[min(wi1 + 1u, idxTotal - 1u)],
+                                  at1 & 31u, offsetBits);
+        const uint at2 = at1 + offsetBits;
+        const uint wi2 = idxBase + (at2 >> 5);
+        const uint o2 = loadBits2(indices[min(wi2, idxTotal - 1u)],
+                                  indices[min(wi2 + 1u, idxTotal - 1u)],
+                                  at2 & 31u, offsetBits);
+        i0 = min(base, cluster.vertexCount - 1u);
+        i1 = min(base + o1, cluster.vertexCount - 1u);
+        i2 = min(base + o2, cluster.vertexCount - 1u);
+    }
+    else
+    {
+        i0 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 0u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+        i1 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 1u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+        i2 = min(indices[min(idxBase + cluster.indexOffset + tri3 + 2u,
+                             idxTotal - 1u)],
+                 cluster.vertexCount - 1u);
+    }
+    float3 lp0, lp1, lp2;
+    if (paged)
+    {
+        lp0 = v5Pos(i0, qm, posBase, posTotal, cluster.vertexCount, posStep);
+        lp1 = v5Pos(i1, qm, posBase, posTotal, cluster.vertexCount, posStep);
+        lp2 = v5Pos(i2, qm, posBase, posTotal, cluster.vertexCount, posStep);
+    }
+    else
+    {
+        const uint p0 = min((posBase + cluster.vertexOffset + i0) * 4u, posTotal - 2u);
+        const uint p1 = min((posBase + cluster.vertexOffset + i1) * 4u, posTotal - 2u);
+        const uint p2 = min((posBase + cluster.vertexOffset + i2) * 4u, posTotal - 2u);
+        lp0 = float3(asfloat(positions[p0]), asfloat(positions[p0 + 1u]),
+                     asfloat(positions[p0 + 2u]));
+        lp1 = float3(asfloat(positions[p1]), asfloat(positions[p1 + 1u]),
+                     asfloat(positions[p1 + 2u]));
+        lp2 = float3(asfloat(positions[p2]), asfloat(positions[p2 + 1u]),
+                     asfloat(positions[p2 + 2u]));
+    }
+    const float3 w0 = applyModel(lp0, instanceIdx);
+    const float3 w1 = applyModel(lp1, instanceIdx);
+    const float3 w2 = applyModel(lp2, instanceIdx);
+
+    const float2 pr = float2(pixel.x + 0.5, pixel.y + 0.5);
+    const float2 s0 = worldToScreen(w0);
+    const float2 s1 = worldToScreen(w1);
+    const float2 s2 = worldToScreen(w2);
+    const float2 e1 = s1 - s0;
+    const float2 e2 = s2 - s0;
+    const float det = e1.x * e2.y - e1.y * e2.x;
+    if (abs(det) < 1e-12) return 1.0;
+    const float2 dp = pr - s0;
+    const float u = (dp.x * e2.y - dp.y * e2.x) / det;
+    const float v = (e1.x * dp.y - e1.y * dp.x) / det;
+    const float b0 = 1.0 - u - v;
+    const float cw0 = max(clipW(w0), 0.001);
+    const float cw1 = max(clipW(w1), 0.001);
+    const float cw2 = max(clipW(w2), 0.001);
+    const float p0 = b0 / cw0, p1 = u / cw1, p2 = v / cw2;
+    const float pSum = p0 + p1 + p2;
+    const float pSumSafe =
+        abs(pSum) < 1e-9f ? (pSum < 0.0 ? -1e-9f : 1e-9f) : pSum;
+    const float3 worldPos = (w0 * p0 + w1 * p1 + w2 * p2) / pSumSafe;
+
+    // Light clip (ortho: w == 1, z is the linear [0,1] depth). NaN
+    // scrub clamps to 1.0 (far) - a garbage texel must read as LIT
+    // space, not as a shadow caster at depth 0. Explicit glm-column
+    // combination (the file's convention).
+    const float4x4 m = push.viewProj;
+    const float4 clip =
+        m[0] * worldPos.x + m[1] * worldPos.y + m[2] * worldPos.z + m[3];
+    if (!(clip.z >= 0.0) || !(clip.z <= 1.0) || !(clip.x >= -1.5) ||
+        !(clip.x <= 1.5) || !(clip.y >= -1.5) || !(clip.y <= 1.5))
+        return 1.0;
+    return clip.z;
+}

@@ -97,6 +97,11 @@ class PipelineStore {
   /// depth).
   u32 createTonemap(VkDevice device, VkFormat colorFormat,
                     const IRenderBackend::FullscreenPipelineInfo& info);
+  /// M9.1 shadow depth decode: renders the fsShadowDepth entry into
+  /// the persistent R32F shadow target (single float output, no depth
+  /// attachment; SSBO layout like the classic fullscreen pipelines).
+  u32 createShadowDecode(VkDevice device,
+                         const IRenderBackend::FullscreenPipelineInfo& info);
   /// Persistent compute pipeline (in-frame chain passes).
   u32 createCompute(VkDevice device,
                     const IRenderBackend::ComputePipelineInfo& info);

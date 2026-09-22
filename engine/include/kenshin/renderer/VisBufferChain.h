@@ -123,6 +123,13 @@ class VisBufferChain {
   /// (Re)create the per-slot VisBuffers on resolution change.
   void resize(backend::IRenderBackend& backend, u32 width, u32 height);
 
+  /// M9.1: per-chain GPU-timestamp toggle. The per-slot timing pool
+  /// is SHARED - a second same-frame chain would overwrite the first
+  /// chain's segments (and the per-slot armed guard would skip its
+  /// reset). The shadow chain runs with timing off; the main chain
+  /// keeps the [chainms] segments.
+  void setTimingEnabled(bool enabled) { m_timingEnabled = enabled; }
+
   /// Record the whole chain into the CURRENT frame (between beginFrame
   /// and endFrame). CPU-writes this slot's params first, then five
   /// dispatches + count conversions, each behind barriers.
@@ -200,6 +207,7 @@ class VisBufferChain {
   void onShutdown(backend::IRenderBackend& backend);
 
  private:
+  bool m_timingEnabled = true;  // M9.1: see setTimingEnabled
   u32 m_pipeCull = ~0u, m_pipeExpand = ~0u, m_pipeCluster = ~0u,
       m_pipeRaster = ~0u;
   // Three SEPARATE conversion pipelines (same shader): a descriptor set

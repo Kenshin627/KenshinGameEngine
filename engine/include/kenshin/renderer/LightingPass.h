@@ -56,13 +56,17 @@ class LightingPass {
             const glm::vec3& camPos, std::span<const GpuLightC> lights,
             u32 materialTable, u32 materialCount, const glm::vec4& clearColor,
             float ambient, const glm::vec3& skyColor,
-            const glm::vec3& groundColor, u32 width, u32 height);
+            const glm::vec3& groundColor, const glm::mat4& lightViewProj,
+            float shadowBias, float shadowTexelWorld, bool shadowsEnabled,
+            u32 width, u32 height);
 
  private:
   u32 m_pipeline = ~0u;
   u32 m_lightBuffer = ~0u;    // host-visible, 32 lights max
   u32 m_materialDummy = ~0u;  // 1-entry default table (v2/unpaged path)
   u32 m_envBuffer = ~0u;      // host-visible, 2 float4s: sky rgb, ground rgb
+  u32 m_shadowParams = ~0u;   // M9.1: [0..3] light viewProj columns, [4] =
+  // (mapSize, bias, texelWorld, enabled)
   static constexpr u32 kMaxLights = 32;
 };
 

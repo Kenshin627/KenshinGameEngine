@@ -67,6 +67,13 @@ struct GpuLight
 // pad. The ambient term becomes a hemisphere blend (the cheap diffuse
 // IBL; specular env waits for a prefiltered probe).
 [[vk::binding(4)]] StructuredBuffer<float4> env;
+// M9.1: the directional light's shadow map (this frame's shadow-chain
+// decode; the backend binds its view to the reflected sampler
+// bindings after the GBuffer pair) + the shadow parameter block
+// ([0..3] the light viewProj columns, [4] = mapSize, bias, texelWorld,
+// enabled).
+[[vk::binding(5)]] Sampler2D shadowMap;
+[[vk::binding(6)]] StructuredBuffer<float4> shadowParams;
 
 // NOTE on matrices: glm stores column-major and Slang's mul reads
 // buffer vec4s as rows - every transform below is an explicit linear
@@ -87,6 +94,42 @@ VSOut vsMain(uint id : SV_VertexID)
     VSOut o;
     o.pos = float4(float2((id << 1u) & 2u, id & 2u) * 2.0 - 1.0, 0.0, 1.0);
     return o;
+}
+
+/// PCF 3x3 over the shadow map in LIGHT clip space. `sp` rows: the
+/// light viewProj columns; params = (mapSize, bias, texelWorld,
+/// enabled). Returns 1 = lit, 0 = shadowed.
+float shadowFactor(float3 worldPos, float3 nrm)
+{
+    const float4 p4 = shadowParams[4];
+    if (p4.w < 0.5) return 1.0;  // shadows disabled
+    const float4x4 lvp = float4x4(shadowParams[0], shadowParams[1],
+                                  shadowParams[2], shadowParams[3]);
+    const float4 clip = lvp[0] * worldPos.x + lvp[1] * worldPos.y +
+                        lvp[2] * worldPos.z + lvp[3];
+    if (abs(clip.x) > 1.0 || abs(clip.y) > 1.0 || clip.z < 0.0 ||
+        clip.z > 1.0)
+        return 1.0;  // outside the shadow frustum: unshadowed
+    // Normal-offset bias: lift the sample point along the surface
+    // normal by a couple of world texels (cheap acne fix; the map's
+    // world texel size rides the params).
+    const float3 lifted =
+        worldPos + nrm * (p4.z * 2.0);
+    const float4 clipN = lvp[0] * lifted.x + lvp[1] * lifted.y +
+                         lvp[2] * lifted.z + lvp[3];
+    const float2 uv = clipN.xy * 0.5 + 0.5;
+    const float depth = clipN.z;
+    const float texel = 1.0 / p4.x;
+    float lit = 0.0;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            const float s = shadowMap.SampleLevel(
+                clamp(uv + float2(float(dx), float(dy)) * texel,
+                      float2(0.0), float2(1.0)), 0.0).r;
+            lit += (depth - p4.y) <= s ? 1.0 : 0.0;
+        }
+    return lit / 9.0;
 }
 
 // GGX terms (minimal PBR; roughness/metallic come from the material
@@ -158,6 +201,8 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         const float4 radiance = lights[i].b;
         float3 l;
         float3 li = radiance.rgb;
+        const float shadow =
+            (meta.w < 0.5) ? shadowFactor(worldPos, nrm) : 1.0;
         if (meta.w < 0.5)
         {
             l = normalize(meta.xyz);  // directional: TO light
@@ -183,7 +228,7 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         const float3 spec =
             (ndf * g * f) / max(4.0 * ndv * max(ndl, 1e-4), 1e-4);
         const float3 kd = (float3(1.0, 1.0, 1.0) - f) * (1.0 - rm.y);
-        lo += (kd * albedo / 3.14159265 + spec) * li * ndl;
+        lo += (kd * albedo / 3.14159265 + spec) * li * ndl * shadow;
     }
 
     // Hemisphere ambient (M8.3): sky from above, ground from below -

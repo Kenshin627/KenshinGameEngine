@@ -131,6 +131,13 @@ struct VulkanBackend::Impl {
   // shutdown). dummyTexture keeps mixed descriptor sets validly written
   // even when a scene carries no albedo.
   VkSampler albedoSampler = VK_NULL_HANDLE;
+  // M9.1: the directional light's shadow target (persistent, fixed
+  // size - not per-slot) + the NEAREST sampler for depth comparison
+  // (a linear filter would average DEPTHS, not comparisons).
+  GpuImage shadowMap;
+  VkSampler shadowSampler = VK_NULL_HANDLE;
+  VkImageLayout shadowMapLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  u32 shadowMapSize = 2048;
   GpuImage dummyTexture;
   std::vector<GpuImage> textures;
   std::vector<bool> textureAlive;
@@ -290,6 +297,31 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
                                &m_impl->linearSampler)))
       return false;
   }
+  // M9.1: shadow support gate + the comparison sampler (NEAREST -
+  // PCF does its own kernel; linear-filtered depths are wrong).
+  {
+    VkFormatProperties fp{};
+    vkGetPhysicalDeviceFormatProperties(m_impl->context.physicalDevice,
+                                        VK_FORMAT_R32_SFLOAT, &fp);
+    const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                      VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if ((fp.optimalTilingFeatures & need) == need) {
+      const VkSamplerCreateInfo samplerInfo{
+          .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+          .magFilter = VK_FILTER_NEAREST,
+          .minFilter = VK_FILTER_NEAREST,
+          .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+          .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+          .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+          .maxLod = VK_LOD_CLAMP_NONE,
+      };
+      if (KE_VK(vkCreateSampler(m_impl->device.device, &samplerInfo, nullptr,
+                                &m_impl->shadowSampler)))
+        KENSHIN_INFO("[vulkan] shadow map R32F: supported");
+    } else {
+      KENSHIN_WARN("[vulkan] shadow map R32F unsupported - shadows off");
+    }
+  }
   // M8.2: the albedo sampler - mip-filtered LINEAR (analytic-lod
   // SampleLevel snaps between mips with the default NEAREST mipmap
   // mode) and REPEAT addressing (tiling UVs; the knot wraps).
@@ -413,6 +445,14 @@ void VulkanBackend::shutdown() {
   if (m_impl->albedoSampler != VK_NULL_HANDLE) {
     vkDestroySampler(m_impl->device.device, m_impl->albedoSampler, nullptr);
     m_impl->albedoSampler = VK_NULL_HANDLE;
+  }
+  if (m_impl->shadowSampler != VK_NULL_HANDLE) {
+    vkDestroySampler(m_impl->device.device, m_impl->shadowSampler, nullptr);
+    m_impl->shadowSampler = VK_NULL_HANDLE;
+  }
+  if (m_impl->shadowMap.image != VK_NULL_HANDLE) {
+    m_impl->shadowMap.destroy(m_impl->device.allocator, m_impl->device.device);
+    m_impl->shadowMapLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   }
   for (GpuImage& t : m_impl->textures)
     if (t.image != VK_NULL_HANDLE)
@@ -1590,6 +1630,11 @@ u32 VulkanBackend::createTonemapPipeline(const FullscreenPipelineInfo& info) {
                                          m_impl->swapchain.format, info);
 }
 
+u32 VulkanBackend::createShadowDecodePipeline(
+    const FullscreenPipelineInfo& info) {
+  return m_impl->pipelines.createShadowDecode(m_impl->device.device, info);
+}
+
 void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
                                  u32 bufferCount, const void* push,
                                  usize pushBytes, u32 width, u32 height) {
@@ -1631,9 +1676,10 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
     impl.cmd.beginColorPass(slot.hdr.view, width, height);
 
     const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
-    // Image infos: the reflected Sampler2D bindings (ascending) get this
-    // slot's GBuffer views in order (A, then B).
-    VkDescriptorImageInfo imageInfos[2] = {
+    // Image infos: the reflected Sampler2D bindings (ascending) get
+    // this slot's GBuffer views in order (A, then B), and the third
+    // the shadow map (NEAREST - depth comparisons must not filter).
+    VkDescriptorImageInfo imageInfos[3] = {
         VkDescriptorImageInfo{
             .sampler = impl.linearSampler,
             .imageView = slot.gbuffer[0].view,
@@ -1642,6 +1688,11 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
         VkDescriptorImageInfo{
             .sampler = impl.linearSampler,
             .imageView = slot.gbuffer[1].view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
+        VkDescriptorImageInfo{
+            .sampler = impl.shadowSampler,
+            .imageView = impl.shadowMap.view,
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         },
     };
@@ -1657,10 +1708,10 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
           .descriptorType = fs.bindingTypes[b],
       };
       if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-        // Only the first two image bindings map to the GBuffer pair;
-        // extra sampler bindings would need explicit views (none exist
-        // today - the lighting shader declares exactly two).
-        if (nextImage >= 2) {
+        // Two GBuffer views then the shadow map; anything beyond the
+        // three is a programming error (the shader declares exactly
+        // these three sampler bindings).
+        if (nextImage >= 3) {
           bindMismatch = true;
           break;
         }
@@ -1698,6 +1749,129 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
+}
+
+// M9.1: the shadow depth decode - the shadow chain's VisBuffer
+// rendered (fsShadowDepth) into the persistent R32F shadow target.
+// When shadows are disabled the target still transitions to
+// SHADER_READ (cleared to one - lighting's PCF then reads "far"
+// everywhere and multiplies by 1.0), so drawLighting's binding stays
+// valid either way.
+void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
+                                     u32 bufferCount, const void* push,
+                                     usize pushBytes, u32 width, u32 height,
+                                     bool shadowEnabled) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.fullscreenCount())
+    return;
+  const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
+  if (!fs.valid || fs.bindingCount == 0) return;
+  if (impl.shadowSampler == VK_NULL_HANDLE) return;  // unsupported format
+  if (width == 0 || height == 0) return;
+
+  // (Re)create the fixed-size target on first use or size change.
+  if (!impl.shadowMap.matches(impl.shadowMapSize, impl.shadowMapSize,
+                              VK_FORMAT_R32_SFLOAT)) {
+    if (impl.shadowMap.image != VK_NULL_HANDLE)
+      impl.shadowMap.destroy(impl.device.allocator, impl.device.device);
+    if (!impl.shadowMap.create(
+            impl.device.allocator, impl.device.device, impl.shadowMapSize,
+            impl.shadowMapSize, VK_FORMAT_R32_SFLOAT,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      KENSHIN_ERROR("[vulkan] shadow target creation failed");
+      return;
+    }
+    vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE,
+                    reinterpret_cast<uint64_t>(impl.shadowMap.image),
+                    "shadow-map");
+    impl.shadowMapLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  }
+
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+
+  impl.cmd.endPass();
+  if (shadowEnabled) {
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(), CommandContext::imageBarrier(
+                            impl.shadowMap.image, impl.shadowMapLayout,
+                            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+    {
+      const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "shadow-decode"};
+      impl.cmd.beginColorPass(impl.shadowMap.view, width, height);
+
+      const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+      std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
+      for (u32 b = 0; b < fs.bindingCount; ++b) {
+        // The dense SSBO layout consumes handles in order (gaps in the
+        // reflection stay harmless unwritten SSBO slots).
+        if (b < bufferCount) {
+          writes[b] = VkWriteDescriptorSet{
+              .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+              .dstSet = set,
+              .dstBinding = b,
+              .descriptorCount = 1,
+              .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+              .pBufferInfo = &infos[b],
+          };
+        }
+      }
+      // The dense layout spans only the REFLECTED bindings (16 for
+      // fsShadowDepth) - the callers' 17-handle array (the GBuffer
+      // shape) must not overflow the write count.
+      const u32 writeCount = (std::min)(bufferCount, fs.bindingCount);
+      vkUpdateDescriptorSets(impl.device.device, writeCount, writes.data(), 0,
+                             nullptr);
+      vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              fs.layout, 0, 1, &set, 0, nullptr);
+      vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        fs.pipeline);
+      vkCmdPushConstants(
+          impl.cmd.cmd(), fs.layout,
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+          static_cast<u32>(pushBytes), push);
+      vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+      impl.cmd.endPass();
+    }
+  } else {
+    // Disabled: clear the whole target to 1.0 ("far" = lit) through a
+    // dummy color pass loadOp instead of a transfer clear (keeps the
+    // layout cycle in graphics; beginColorPass clears to zero so
+    // render one fullscreen discard... simplest correct: a transfer
+    // clear then barrier - the map is not being sampled this frame).
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(),
+        CommandContext::imageBarrier(impl.shadowMap.image, impl.shadowMapLayout,
+                                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                     VK_ACCESS_2_TRANSFER_WRITE_BIT));
+    const f32 farOne[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    CommandContext::clearColorImage(impl.cmd.cmd(), impl.shadowMap.image,
+                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                    farOne);
+    impl.shadowMapLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  }
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(
+          impl.shadowMap.image,
+          shadowEnabled ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                        : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
+  impl.shadowMapLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 // M8.3: the tonemap pass - samples this slot's HDR target (bound to

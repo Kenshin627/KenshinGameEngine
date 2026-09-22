@@ -104,12 +104,29 @@ class MaterialDecodePass {
                         u32 visHandle, const DecodePagedInputs& paged,
                         u32 pairs, u32 hwPairs, u32 postPairs, u32 pairCapacity,
                         u32 albedoTexture);
+  /// M9.1: decode the SHADOW chain's VisBuffer (the light's view) into
+  /// light-space depth (fsShadowDepth -> the backend's R32F shadow
+  /// target). `viewProj` is the LIGHT's own (Y-flipped) ortho matrix;
+  /// `shadowEnabled` false clears the target to "far" so lighting's
+  /// sampling stays valid.
+  void drawShadowPaged(backend::IRenderBackend& backend,
+                       const glm::mat4& viewProj,
+                       const VirtualGeometryScene& scene,
+                       const DecodeParams& params, u32 width, u32 height,
+                       u32 visHandle, const DecodePagedInputs& paged, u32 pairs,
+                       u32 hwPairs, u32 postPairs, u32 pairCapacity,
+                       bool shadowEnabled);
+  void drawShadow(backend::IRenderBackend& backend, const glm::mat4& viewProj,
+                  const VirtualGeometryScene& scene, const DecodeParams& params,
+                  u32 width, u32 height, u32 visHandle, u32 pairs, u32 hwPairs,
+                  u32 postPairs, u32 pairCapacity, bool shadowEnabled);
 
   void onShutdown(backend::IRenderBackend& backend);
 
  private:
   u32 m_pipeline = ~0u;
   u32 m_gbufferPipeline = ~0u;  // M8.1: the fsGBuffer MRT variant
+  u32 m_shadowPipeline = ~0u;   // M9.1: the fsShadowDepth R32F variant
   u32 m_decodeParams = ~0u;  // 32B host-visible: [0] mode flags, [1].x pair cap
   u32 m_dummyMaterial = ~0u;         // v2 material-table stand-in (32B)
   u32 m_dummyU32[2] = {~0u, ~0u};    // v2 stand-ins (bindings 8/9)

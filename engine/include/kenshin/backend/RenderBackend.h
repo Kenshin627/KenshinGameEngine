@@ -299,6 +299,21 @@ class IRenderBackend {
   virtual u32 createTonemapPipeline(const FullscreenPipelineInfo& info) = 0;
   virtual void drawTonemap(u32 pipeline, const void* push, usize pushBytes,
                            u32 width, u32 height) = 0;
+  /// M9.1 shadow depth decode: the fsShadowDepth entry (the shadow
+  /// chain's VisBuffer decoded from the light's view) rendered into the
+  /// backend's persistent R32F shadow target (created on first use,
+  /// format-gated at initialize; 2048x2048 v1). SSBO handles like
+  /// drawFullscreen; the target cycles COLOR_ATTACHMENT -> SHADER_READ
+  /// and drawLighting binds it to the third reflected Sampler2D
+  /// binding with a NEAREST sampler (depth comparison must not filter
+  /// linearly). `shadowEnabled` false parks the target in SHADER_READ
+  /// so lighting reads a cleared-to-one map (fully lit).
+  virtual u32 createShadowDecodePipeline(
+      const FullscreenPipelineInfo& info) = 0;
+  virtual void drawShadowDecode(u32 pipeline, const u32* bufferHandles,
+                                u32 bufferCount, const void* push,
+                                usize pushBytes, u32 width, u32 height,
+                                bool shadowEnabled) = 0;
   /// M4.2 hardware raster path: VS+FS with ZERO attachments (the PS
   /// writes the VisBuffer SSBO atomically). Same info shape as the
   /// fullscreen pipeline (vsMain/psMain from one .slang file).

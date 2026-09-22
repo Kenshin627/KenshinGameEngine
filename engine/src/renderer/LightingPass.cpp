@@ -40,6 +40,10 @@ bool LightingPass::init(backend::IRenderBackend& backend,
   desc.size = 2 * sizeof(glm::vec4);
   desc.debugName = "env-table";
   m_envBuffer = backend.createBuffer(desc);
+  // M9.1: the shadow parameter block (binding 6).
+  desc.size = 5 * sizeof(glm::vec4);
+  desc.debugName = "shadow-params";
+  m_shadowParams = backend.createBuffer(desc);
   // The 1-entry default material table (v2 path binds this - the
   // shader always reads materials[id], the binding must be valid).
   desc.size = 32;
@@ -60,6 +64,7 @@ bool LightingPass::init(backend::IRenderBackend& backend,
   return m_lightBuffer != backend::IRenderBackend::kInvalidBufferHandle &&
          m_materialDummy != backend::IRenderBackend::kInvalidBufferHandle &&
          m_envBuffer != backend::IRenderBackend::kInvalidBufferHandle;
+  m_shadowParams != backend::IRenderBackend::kInvalidBufferHandle;
 }
 
 void LightingPass::draw(backend::IRenderBackend& backend,
@@ -67,7 +72,10 @@ void LightingPass::draw(backend::IRenderBackend& backend,
                         std::span<const GpuLightC> lights, u32 materialTable,
                         u32 materialCount, const glm::vec4& clearColor,
                         float ambient, const glm::vec3& skyColor,
-                        const glm::vec3& groundColor, u32 width, u32 height) {
+                        const glm::vec3& groundColor,
+                        const glm::mat4& lightViewProj, float shadowBias,
+                        float shadowTexelWorld, bool shadowsEnabled, u32 width,
+                        u32 height) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   const u32 count =
       static_cast<u32>(std::min<usize>(lights.size(), kMaxLights));
@@ -98,9 +106,17 @@ void LightingPass::draw(backend::IRenderBackend& backend,
   auto* env = static_cast<glm::vec4*>(backend.mappedPtr(m_envBuffer));
   env[0] = glm::vec4(skyColor, 0.0f);
   env[1] = glm::vec4(groundColor, 0.0f);
-  const u32 buffers[3] = {
-      m_lightBuffer, usingDummy ? m_materialDummy : materialTable, m_envBuffer};
-  backend.drawLighting(m_pipeline, buffers, 3, &push, sizeof(push), width,
+  auto* sp = static_cast<glm::vec4*>(backend.mappedPtr(m_shadowParams));
+  sp[0] = lightViewProj[0];
+  sp[1] = lightViewProj[1];
+  sp[2] = lightViewProj[2];
+  sp[3] = lightViewProj[3];
+  sp[4] = glm::vec4(2048.0f, shadowBias, shadowTexelWorld,
+                    shadowsEnabled ? 1.0f : 0.0f);
+  const u32 buffers[4] = {m_lightBuffer,
+                          usingDummy ? m_materialDummy : materialTable,
+                          m_envBuffer, m_shadowParams};
+  backend.drawLighting(m_pipeline, buffers, 4, &push, sizeof(push), width,
                        height);
 }
 
@@ -108,6 +124,7 @@ void LightingPass::onShutdown(backend::IRenderBackend& backend) {
   if (m_lightBuffer != ~0u) backend.destroyBuffer(m_lightBuffer);
   if (m_materialDummy != ~0u) backend.destroyBuffer(m_materialDummy);
   if (m_envBuffer != ~0u) backend.destroyBuffer(m_envBuffer);
+  if (m_shadowParams != ~0u) backend.destroyBuffer(m_shadowParams);
   m_lightBuffer = m_materialDummy = ~0u;
   m_pipeline = ~0u;  // the pipeline dies with PipelineStore; nothing owned
 }

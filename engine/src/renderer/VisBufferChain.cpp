@@ -614,7 +614,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // support): 0 begin / 1 post-cull / 2 post-SW-raster / 3 post-HZB#1
   // / 4 post-post-raster / 5 post-HZB#2 / 6 chain end. The harvested
   // deltas land in gpuTimings().chainMs ([chainms] log line).
-  backend.writeChainTimestamp(0);
+  if (m_timingEnabled) backend.writeChainTimestamp(0);
 
   backend.fillBuffer(m_vis[slot], 0);
 
@@ -756,7 +756,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   backend.dispatchCompute(m_pipeConvert[2], cv3, 4, 1, 1, 1);
   b(m_argsRaster[slot]);
   b(m_rasterCnt[slot]);
-  backend.writeChainTimestamp(1);
+  if (m_timingEnabled) backend.writeChainTimestamp(1);
 
   // M6.3: the paged tables at bindings 8/9/10 (dummies in v2 - the
   // shader's reads are params-gated there). Bindings 1/2 are the slot
@@ -776,7 +776,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       m_rasterProbe[slot]};
   backend.dispatchComputeIndirect(m_pipeRaster, rasterHandles, 13,
                                   m_argsRaster[slot], 0);
-  backend.writeChainTimestamp(2);
+  if (m_timingEnabled) backend.writeChainTimestamp(2);
 
   // ---- M3.3 post half + the final HZB stay on the CHAIN side (they
   // are pure compute); the M4.2 HW draw moved AFTER the chain submit
@@ -799,7 +799,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       backend.dispatchCompute(m_pipeReduce1[l], reduceHandles, 3, groups, 1, 1);
       b(m_hzb[slot]);
     }
-    backend.writeChainTimestamp(3);
+    if (m_timingEnabled) backend.writeChainTimestamp(3);
 
     // M5.2: the post cull's envelope is PENDING-sized (counters[4]) -
     // REQUIRED in hierarchy mode: argsCull is only written by the
@@ -842,12 +842,12 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     backend.dispatchComputeIndirect(m_pipeRasterPost, postRasterHandles, 13,
                                     m_argsPostRaster[slot], 0);
     b(m_vis[slot]);
-    backend.writeChainTimestamp(4);
+    if (m_timingEnabled) backend.writeChainTimestamp(4);
   } else {
     // Stamps 3/4 bracket the (skipped) HZB#1 + post section so the
     // segment deltas read ~0 instead of folding into a neighbor.
-    backend.writeChainTimestamp(3);
-    backend.writeChainTimestamp(4);
+    if (m_timingEnabled) backend.writeChainTimestamp(3);
+    if (m_timingEnabled) backend.writeChainTimestamp(4);
   }
 
   // Order EVERY prior write of the vis (the main SW raster - and, on
@@ -872,7 +872,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       b(m_hzb[slot]);
     }
   }
-  backend.writeChainTimestamp(5);
+  if (m_timingEnabled) backend.writeChainTimestamp(5);
 
   // Compute write -> fragment read (the decode pass consumes the vis).
   // On the async path this in-cb barrier is advisory only - the real
@@ -905,7 +905,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   // Submit the chain (no-op on the graphics fallback path) BEFORE
   // recording the graphics-side HW draw.
-  backend.writeChainTimestamp(6);
+  if (m_timingEnabled) backend.writeChainTimestamp(6);
   backend.submitChain();
 
   // ---- M4.2 hardware raster (graphics queue): the routed clusters

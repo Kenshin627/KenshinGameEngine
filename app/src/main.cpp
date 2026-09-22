@@ -93,7 +93,6 @@ LONG WINAPI crashLogFilter(EXCEPTION_POINTERS* ep) {
     else
       fprintf(stderr, "  #%02u %p\n", i, frames[i]);
   }
-  fflush(stderr);
   return EXCEPTION_CONTINUE_SEARCH;
 }
 }  // namespace
@@ -139,6 +138,7 @@ struct Args {
                                 // the 2026-09-19 A/B (+82% pure-SW, bit-exact)
   bool rasterBase = false;      // A/B: force the baseline walk (mode 0)
   bool rasterProbe = false;     // coverage histogram probe ([rasthist])
+  bool noShadows = false;       // M9.1 A/B: disable the shadow map
   bool multi = false;           // S4.6 acceptance: near/mid/far instances
   bool dense = false;           // M3.4 acceptance: front-back occluders
   int grid = 0;                 // --grid N: N-instance occlusion carpet
@@ -208,6 +208,8 @@ Args parseArgs(int argc, char** argv) {
       args.rasterBase = true;
     else if (std::strcmp(argv[i], "--raster-probe") == 0)
       args.rasterProbe = true;
+    else if (std::strcmp(argv[i], "--no-shadows") == 0)
+      args.noShadows = true;
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
@@ -294,7 +296,8 @@ struct VgDebugState {
   // M8.3: the hemisphere ambient's two poles + tonemap operator.
   glm::vec3 skyColor{0.65f, 0.75f, 0.95f};
   glm::vec3 groundColor{0.28f, 0.25f, 0.22f};
-  int tonemapMode = 1;                 // 0 Reinhard, 1 ACES
+  int tonemapMode = 1;  // 0 Reinhard, 1 ACES
+  bool shadows = true;  // M9.1: the directional light's shadow map
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
                                        // (moved off KgeoPreview at the
@@ -627,6 +630,7 @@ int main(int argc, char** argv) {
                                10.0f, "%.2f");
             ImGui::SliderFloat("points", &vgDebug.pointIntensity, 0.0f, 30.0f,
                                "%.2f");
+            ImGui::Checkbox("shadows", &vgDebug.shadows);
             ImGui::Combo("tonemap", &vgDebug.tonemapMode, "Reinhard\0ACES\0");
             ImGui::ColorEdit3("sky", &vgDebug.skyColor.x);
             ImGui::ColorEdit3("ground", &vgDebug.groundColor.x);
@@ -725,6 +729,11 @@ int main(int argc, char** argv) {
   // raster into the current command buffer; the decode below consumes
   // the SAME frame's VisBuffer (camera lag and inter-frame stalls gone).
   kenshin::renderer::VisBufferChain chain;
+  // M9.1: the shadow chain (a SECOND instance - own VisBuffer/pairs;
+  // the same-frame second chain records on the graphics queue via the
+  // M4.3 fallback).
+  kenshin::renderer::VisBufferChain shadowChain;
+  bool shadowChainReady = false;
   bool chainReady = false;
   bool decodeReady = false;  // pipeline is lazy: needs the swapchain format
   // Coverage histogram state (only with --raster-probe; the snapshot
@@ -838,6 +847,20 @@ int main(int argc, char** argv) {
                 kenshin::u64(chainInstances.size()) * vgScene->clusterCount(),
                 kenshin::u64(4) << 20)),
             vgScene->clusterAabbs(), pagedPtr, 1, 1);
+        // M9.1: the shadow chain mirrors the main chain's setup
+        // (same scene buffers; its VisBuffer sized to the 2048x2048
+        // shadow-map resolution). The same-frame second chain records
+        // on the graphics queue via the M4.3 fallback.
+        if (!shadowChainReady)
+          shadowChainReady = shadowChain.init(
+              *vgBackend, shaders, vgScene->positions4(), vgScene->indices(),
+              vgScene->clusterData(), vgScene->groupData(),
+              vgScene->hierarchyData(), vgScene->groupRanges(), meshHierRoots,
+              chainInstances, chainMeshRanges, chain.maxPairs(),
+              vgScene->clusterAabbs(), pagedPtr, 2048, 2048);
+        // The timing pool is per-slot shared with the main chain -
+        // the shadow chain must not touch it (see setTimingEnabled).
+        shadowChain.setTimingEnabled(false);
         if (chainReady)
           KENSHIN_INFO("[vgchain] in-frame chain ready{}",
                        pagedPtr ? " (paged)" : "");
@@ -924,6 +947,91 @@ int main(int argc, char** argv) {
 
         chain.execute(*vgBackend, ci);
 
+        // M9.1: the directional light's shadow chain + depth decode.
+        // Ortho box centered on the camera TARGET (a fixed extent v1 -
+        // clipmap levels are Stage B), 2px LOD bias (D11.5). Runs
+        // AFTER the main chain's execute: the same-frame second chain
+        // records on the graphics queue (the M4.3 fallback) and the
+        // decode follows inline, so no extra sync.
+        glm::mat4 lightViewProj(1.0f);
+        // pagedPtr lives inside the chain-init scope; rebuild the
+        // shadow decode's paged inputs from the scene here.
+        kenshin::renderer::DecodePagedInputs spd{};
+        if (vgScene->paged()) {
+          spd.slotPool = vgScene->pageSlotPool();
+          spd.clusterPage = vgScene->clusterPageBuffer();
+          spd.pageTable = vgScene->pageTableBuffer();
+          spd.pageHeader = vgScene->pageHeaderBuffer();
+          spd.slotU32Total =
+              vgScene->pageSlotCount() * (kenshin::geometry::kPageSlotSize / 4);
+          spd.clusterMeta = vgScene->clusterMetaBuffer();
+        }
+        bool shadowsOn = vgDebug.shadows && !args.noShadows &&
+                         shadowChainReady && decodeReady;
+        const bool shadowPhase = vgDebug.viewMode == 0 && lightingReady &&
+                                 shadowChainReady && decodeReady;
+        (void)shadowsOn;
+        if (shadowsOn) {
+          const glm::vec3 L = glm::normalize(vgDebug.lightDir);
+          const glm::vec3 center(args.hasCam ? args.camTarget[0] : 0.0f,
+                                 args.hasCam ? args.camTarget[1] : 0.0f,
+                                 args.hasCam ? args.camTarget[2] : 0.0f);
+          constexpr float kExtent = 12.0f;
+          constexpr float kDepth = 40.0f;
+          const glm::vec3 up =
+              std::abs(L.y) > 0.95f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+          const glm::mat4 lightView =
+              glm::lookAtRH(center - L * (kDepth * 0.5f), center, up);
+          glm::mat4 lightProj = glm::orthoRH_ZO(-kExtent, kExtent, -kExtent,
+                                                kExtent, 0.1f, kDepth);
+          lightProj[1][1] *= -1.0f;  // the engine's Y-flip convention
+          lightViewProj = lightProj * lightView;
+
+          kenshin::renderer::ChainInputs si{};
+          si.view = lightView;
+          si.proj = lightProj;
+          si.nearZ = 0.1f;
+          si.camPos = center;
+          si.pixelThreshold = vgDebug.pixelThreshold * 2.0f;  // D11.5 bias
+          si.worldPerPixel = (2.0f * kExtent) / 2048.0f;
+          si.width = 2048;
+          si.height = 2048;
+          kenshin::renderer::extractFrustumPlanes(lightViewProj, si.planes);
+          si.occlusionEnabled = false;  // HZB is main-view; shadows skip
+          si.hwMode = 0;
+          si.cullMode = ci.cullMode;
+          si.rasterMode = 1;
+
+          shadowChain.execute(*vgBackend, si);
+
+          kenshin::renderer::DecodeParams sp{};
+          sp.camPos = center;
+          sp.lightDir = vgDebug.lightDir;
+          sp.view = kenshin::renderer::DecodeView::Final;
+          if (vgScene->paged()) {
+            decodePass.drawShadowPaged(
+                *vgBackend, lightViewProj, *vgScene, sp, 2048, 2048,
+                shadowChain.visBufferCurrent(*vgBackend), spd,
+                shadowChain.pairsCurrent(*vgBackend),
+                shadowChain.hwPairsCurrent(*vgBackend),
+                shadowChain.postPairsCurrent(*vgBackend),
+                shadowChain.maxPairs(), true);
+          } else {
+            decodePass.drawShadow(*vgBackend, lightViewProj, *vgScene, sp, 2048,
+                                  2048,
+                                  shadowChain.visBufferCurrent(*vgBackend),
+                                  shadowChain.pairsCurrent(*vgBackend),
+                                  shadowChain.hwPairsCurrent(*vgBackend),
+                                  shadowChain.postPairsCurrent(*vgBackend),
+                                  shadowChain.maxPairs(), true);
+          }
+        } else if (shadowPhase) {
+          // Disabled this frame: still touch the target so lighting's
+          // sampling reads a fully-lit map (clear-to-one path).
+          decodePass.drawShadow(*vgBackend, glm::mat4(1.0f), *vgScene, {}, 16,
+                                16, 0, 0, 0, 0, 0, false);
+        }
+
         decodeParams.camPos = camera.position();
         decodeParams.view =
             static_cast<kenshin::renderer::DecodeView>(vgDebug.viewMode);
@@ -990,6 +1098,9 @@ int main(int argc, char** argv) {
                              kPointRange);
             lights.push_back(pt);
           }
+          // M9.1: the shadow phase's light matrix (identity when the
+          // chain didn't run - the params carry the disabled flag).
+          constexpr float kShadowTexelWorld = (2.0f * 12.0f) / 2048.0f;
           lightingPass.draw(
               *vgBackend, glm::inverse(camera.viewProjMatrix()),
               camera.position(), lights,
@@ -998,7 +1109,9 @@ int main(int argc, char** argv) {
                   : kenshin::backend::IRenderBackend::kInvalidBufferHandle,
               vgScene->paged() ? vgScene->materialCount() : 0u,
               glm::vec4(kClearColor[0], kClearColor[1], kClearColor[2], 1.0f),
-              vgDebug.ambient, vgDebug.skyColor, vgDebug.groundColor, ci.width,
+              vgDebug.ambient, vgDebug.skyColor, vgDebug.groundColor,
+              lightViewProj, 0.0015f, kShadowTexelWorld,
+              shadowsOn && vgDebug.viewMode == 0 && lightingReady, ci.width,
               ci.height);
           if (tonemapReady)
             tonemapPass.draw(
