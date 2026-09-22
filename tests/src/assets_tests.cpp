@@ -178,7 +178,7 @@ TEST_CASE("bmp reader roundtrips the writer and the committed checker",
   auto [br, bg, bb] = px(32, 62);    // bottom strip
   REQUIRE(tr > tb);                  // top reads red-ish
   REQUIRE(bb > br);                  // bottom reads blue-ish
-  auto [c0r, c0g, c0b] = px(8, 8);   // first checker cell (dark)
-  auto [c1r, c1g, c1b] = px(16, 8);  // adjacent cell (light)
-  REQUIRE(c1r - c0r > 40);           // the two tones differ
+  auto [c0r, c0g, c0b] = px(6, 8);   // first checker cell (light)
+  auto [c1r, c1g, c1b] = px(10, 8);  // adjacent cell (dark)
+  REQUIRE(c0r - c1r > 60);           // the two tones differ
 }

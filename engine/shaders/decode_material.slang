@@ -650,6 +650,13 @@ GBufferOut fsGBuffer(float4 frag : SV_Position)
         idxTotal = posTotal;
         posBase = min(pool + ph.posBase, posTotal - 1u);
         nrmBase = min(pool + ph.nrmBase, posTotal - 1u);
+        // M8.2 fix: the UV section base. fsMain always set it; fsGBuffer
+        // skipped it pre-M8.2 (no UV consumers) and the M8.2 port brought
+        // the consumers WITHOUT this line - every vertex then read pool
+        // word 0, uv came out constant and the albedo sampled ONE texel
+        // (the "surface doesn't look textured" report). D5 mirror rule:
+        // porting a consumer means porting its whole setup chain.
+        uvBase = min(pool + ph.uvBase, posTotal - 1u);
         idxBase = min(pool + ph.idxBase, posTotal - 1u);
         posStep = ph.posStep;
         const uint ord = min(clusterMeta[clusterIdx], ph.clusterCount - 1u);
