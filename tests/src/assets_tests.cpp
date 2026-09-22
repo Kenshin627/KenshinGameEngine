@@ -1,5 +1,6 @@
 // S2.1 asset tests: OBJ known-answer assets + procedural generators.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdio>
 #include <filesystem>
@@ -9,6 +10,7 @@
 #include <string>
 #include <tuple>
 
+#include "kenshin/assets/GltfLoader.h"
 #include "kenshin/assets/MeshData.h"
 #include "kenshin/assets/ObjLoader.h"
 #include "kenshin/core/Log.h"
@@ -181,4 +183,313 @@ TEST_CASE("bmp reader roundtrips the writer and the committed checker",
   auto [c0r, c0g, c0b] = px(6, 8);   // first checker cell (light)
   auto [c1r, c1g, c1b] = px(10, 8);  // adjacent cell (dark)
   REQUIRE(c0r - c1r > 60);           // the two tones differ
+}
+
+namespace {
+// GLB writer helpers: a tiny JSON + BIN with one triangle primitive
+// (POSITION/TEXCOORD, ushort indices, NO normals -> compute path) and
+// an embedded BMP image.
+std::vector<kenshin::u8> pad4(const std::vector<kenshin::u8>& b) {
+  std::vector<kenshin::u8> out = b;
+  out.resize(out.size() + (4 - out.size() % 4) % 4, 0);
+  return out;
+}
+void appendU32(std::vector<kenshin::u8>& out, kenshin::u32 v) {
+  out.insert(out.end(), {kenshin::u8(v), kenshin::u8(v >> 8),
+                         kenshin::u8(v >> 16), kenshin::u8(v >> 24)});
+}
+}  // namespace
+
+TEST_CASE("gltf loader: glb with transform, computed normals, image",
+          "[assets][gltf]") {
+  // One triangle at x+0.5 (node translation), UVs, embedded 4x2 BMP.
+  const float pos[9] = {0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f};
+  const float uv[6] = {0.0f, 0.0f, 1.0f, 0.0f, 0.5f, 1.0f};
+  const kenshin::u16 idx[3] = {0, 1, 2};
+  std::vector<kenshin::u8> posB((const kenshin::u8*)pos,
+                                (const kenshin::u8*)pos + sizeof(pos));
+  std::vector<kenshin::u8> uvB((const kenshin::u8*)uv,
+                               (const kenshin::u8*)uv + sizeof(uv));
+  std::vector<kenshin::u8> idxB((const kenshin::u8*)idx,
+                                (const kenshin::u8*)idx + sizeof(idx));
+  // 4x2 two-tone BMP (writeBmp24's exact shape).
+  std::vector<kenshin::u8> rgba(4 * 2 * 4);
+  for (int i = 0; i < 8; ++i) {
+    const int tone = i % 2 ? 200 : 60;
+    rgba[kenshin::usize(i) * 4 + 0] = kenshin::u8(tone);
+    rgba[kenshin::usize(i) * 4 + 1] = kenshin::u8(tone);
+    rgba[kenshin::usize(i) * 4 + 2] = kenshin::u8(tone);
+    rgba[kenshin::usize(i) * 4 + 3] = 255;
+  }
+  std::vector<kenshin::u8> bmp;
+  {
+    std::vector<kenshin::u8> bgr;
+    for (int y = 1; y >= 0; --y)
+      for (int x = 0; x < 4; ++x) {
+        bgr.push_back(rgba[(kenshin::usize(y) * 4 + x) * 4 + 2]);
+        bgr.push_back(rgba[(kenshin::usize(y) * 4 + x) * 4 + 1]);
+        bgr.push_back(rgba[(kenshin::usize(y) * 4 + x) * 4 + 0]);
+      }
+    const kenshin::u8 fh[14] = {0x42, 0x4D, 0, 0,  0, 0, 0,
+                                0,    0,    0, 54, 0, 0, 0};
+    bmp.insert(bmp.end(), fh, fh + 14);
+    appendU32(bmp, 40);
+    appendU32(bmp, 4);
+    appendU32(bmp, 2);
+    bmp.insert(bmp.end(), {1, 0, 24, 0, 0, 0, 0, 0});
+    appendU32(bmp, kenshin::u32(bgr.size()));
+    bmp.insert(bmp.end(), {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
+    bmp.insert(bmp.end(), bgr.begin(), bgr.end());
+  }
+  const auto posP = pad4(posB), uvP = pad4(uvB), idxP = pad4(idxB);
+  std::vector<kenshin::u8> bin = posP;
+  bin.insert(bin.end(), uvP.begin(), uvP.end());
+  bin.insert(bin.end(), idxP.begin(), idxP.end());
+  bin.insert(bin.end(), bmp.begin(), bmp.end());
+  const kenshin::u32 uvOff = kenshin::u32(posP.size());
+  const kenshin::u32 idxOff = uvOff + kenshin::u32(uvP.size());
+  const kenshin::u32 imgOff = idxOff + kenshin::u32(idxP.size());
+
+  const std::string json =
+      "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+      "\"scenes\":[{\"nodes\":[0]}],"
+      "\"nodes\":[{\"mesh\":0,\"translation\":[0.5,0,0]}],"
+      "\"meshes\":[{\"primitives\":[{\"attributes\":{"
+      "\"POSITION\":0,\"TEXCOORD_0\":1},\"indices\":2,"
+      "\"material\":0}]}],"
+      "\"materials\":[{\"pbrMetallicRoughness\":{"
+      "\"baseColorFactor\":[0.9,0.8,0.7,1],\"metallicFactor\":0.1,"
+      "\"roughnessFactor\":0.35,\"baseColorTexture\":{\"index\":0}}}],"
+      "\"textures\":[{\"source\":0}],"
+      "\"images\":[{\"bufferView\":3,\"mimeType\":\"image/bmp\"}],"
+      "\"accessors\":["
+      "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+      "{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC2\"},"
+      "{\"bufferView\":2,\"componentType\":5123,\"count\":3,\"type\":"
+      "\"SCALAR\"}],"
+      "\"bufferViews\":["
+      "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":" +
+      std::to_string(posB.size()) +
+      "},"
+      "{\"buffer\":0,\"byteOffset\":" +
+      std::to_string(uvOff) + ",\"byteLength\":" + std::to_string(uvB.size()) +
+      "},"
+      "{\"buffer\":0,\"byteOffset\":" +
+      std::to_string(idxOff) +
+      ",\"byteLength\":" + std::to_string(idxB.size()) +
+      "},"
+      "{\"buffer\":0,\"byteOffset\":" +
+      std::to_string(imgOff) + ",\"byteLength\":" + std::to_string(bmp.size()) +
+      "}],"
+      "\"buffers\":[{\"byteLength\":" +
+      std::to_string(bin.size()) + "}]}";
+  const auto jsonP = pad4(std::vector<kenshin::u8>(json.begin(), json.end()));
+  std::vector<kenshin::u8> glb;
+  appendU32(glb, 0x46546C67);
+  appendU32(glb, 2);
+  appendU32(glb, kenshin::u32(12 + 8 + jsonP.size() + 8 + bin.size()));
+  appendU32(glb, kenshin::u32(jsonP.size()));
+  appendU32(glb, 0x4E4F534A);
+  glb.insert(glb.end(), jsonP.begin(), jsonP.end());
+  appendU32(glb, kenshin::u32(bin.size()));
+  appendU32(glb, 0x004E4942);
+  glb.insert(glb.end(), bin.begin(), bin.end());
+  REQUIRE((std::filesystem::exists("out") ||
+           std::filesystem::create_directories("out")));
+  {
+    FILE* f = nullptr;
+    REQUIRE(fopen_s(&f, "out/tri.glb", "wb") == 0);
+    std::fwrite(glb.data(), 1, glb.size(), f);
+    std::fclose(f);
+  }
+
+  kenshin::assets::MeshData mesh;
+  kenshin::assets::GltfImage albedo;
+  std::string log;
+  REQUIRE(kenshin::assets::loadGltf("out/tri.glb", mesh, &albedo, log));
+  INFO("log: " << log);
+  REQUIRE(mesh.vertexCount() == 3);
+  REQUIRE(mesh.triangleCount() == 1);
+  REQUIRE(mesh.positions.size() == 9);
+  // Node translation applied: x + 0.5.
+  REQUIRE(mesh.positions[0] == Catch::Approx(1.0f).margin(1e-5f));
+  REQUIRE(mesh.positions[3] == Catch::Approx(2.0f).margin(1e-5f));
+  REQUIRE(mesh.positions[7] == Catch::Approx(1.0f).margin(1e-5f));
+  REQUIRE(mesh.positions[1] == Catch::Approx(0.0f).margin(1e-5f));
+  REQUIRE(mesh.indices.size() == 3);
+  REQUIRE(mesh.indices[0] == 0);
+  REQUIRE(mesh.indices[2] == 2);
+  REQUIRE(mesh.uvs.size() == 6);
+  REQUIRE(mesh.uvs[2] == Catch::Approx(1.0f).margin(1e-5f));
+  // Normals were COMPUTED (none in the file): +z face normal.
+  REQUIRE(mesh.normals.size() == 9);
+  REQUIRE(mesh.normals[2] == Catch::Approx(1.0f).margin(1e-4f));
+  REQUIRE(mesh.normals[5] == Catch::Approx(1.0f).margin(1e-4f));
+  // Material: factors + the decoded embedded image.
+  REQUIRE(mesh.material.kd.r == Catch::Approx(0.9f).margin(1e-5f));
+  REQUIRE(mesh.material.roughness == Catch::Approx(0.35f).margin(1e-5f));
+  REQUIRE(mesh.material.metallic == Catch::Approx(0.1f).margin(1e-5f));
+  REQUIRE(albedo.width == 4);
+  REQUIRE(albedo.height == 2);
+  REQUIRE(albedo.rgba.size() == 4 * 2 * 4);
+  REQUIRE(albedo.rgba[0] == 60);   // first texel dark tone
+  REQUIRE(albedo.rgba[4] == 200);  // second texel light tone
+  std::remove("out/tri.glb");
+}
+
+TEST_CASE("gltf loader: rejects hostile bounds violations", "[assets][gltf]") {
+  // The three P0 classes the adversarial review caught, now pinned:
+  // index values beyond the vertex count, node mesh indices beyond the
+  // meshes array, and the u32-wrapping image bufferView bound.
+  const auto writeGlb = [](const std::string& json,
+                           const std::vector<kenshin::u8>& bin,
+                           const char* path) {
+    std::vector<kenshin::u8> jsonP(json.begin(), json.end());
+    jsonP.resize(jsonP.size() + (4 - jsonP.size() % 4) % 4, 0);
+    std::vector<kenshin::u8> glb;
+    auto u32 = [&glb](kenshin::u32 v) {
+      glb.insert(glb.end(), {kenshin::u8(v), kenshin::u8(v >> 8),
+                             kenshin::u8(v >> 16), kenshin::u8(v >> 24)});
+    };
+    u32(0x46546C67);
+    u32(2);
+    u32(kenshin::u32(12 + 8 + jsonP.size() + 8 + bin.size()));
+    u32(kenshin::u32(jsonP.size()));
+    u32(0x4E4F534A);
+    glb.insert(glb.end(), jsonP.begin(), jsonP.end());
+    u32(kenshin::u32(bin.size()));
+    u32(0x004E4942);
+    glb.insert(glb.end(), bin.begin(), bin.end());
+    FILE* f = nullptr;
+    REQUIRE(fopen_s(&f, path, "wb") == 0);
+    std::fwrite(glb.data(), 1, glb.size(), f);
+    std::fclose(f);
+  };
+  const float pos[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+  const kenshin::u16 badIdx[3] = {0, 60000, 2};  // 60000 >= 3 verts
+  std::vector<kenshin::u8> bin((const kenshin::u8*)pos,
+                               (const kenshin::u8*)pos + sizeof(pos));
+  bin.insert(bin.end(), (const kenshin::u8*)badIdx,
+             (const kenshin::u8*)badIdx + sizeof(badIdx));
+  bin.resize(bin.size() + (4 - bin.size() % 4) % 4, 0);
+  const std::string head =
+      "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+      "\"scenes\":[{\"nodes\":[0]}],"
+      "\"nodes\":[{\"mesh\":0}],"
+      "\"meshes\":[{\"primitives\":[{"
+      "\"attributes\":{\"POSITION\":0},\"indices\":1}]}],"
+      "\"accessors\":["
+      "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}"
+      ",";
+  const std::string tail =
+      "],\"bufferViews\":["
+      "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
+      "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":6}],"
+      "\"buffers\":[{\"byteLength\":48}]}";
+  REQUIRE((std::filesystem::exists("out") ||
+           std::filesystem::create_directories("out")));
+
+  kenshin::assets::MeshData mesh;
+  kenshin::assets::GltfImage albedo;
+  std::string log;
+  writeGlb(head +
+               "{\"bufferView\":1,\"componentType\":5123,\"count\":3,"
+               "\"type\":\"SCALAR\"}" +
+               tail,
+           bin, "out/hostile_idx.glb");
+  REQUIRE_FALSE(
+      kenshin::assets::loadGltf("out/hostile_idx.glb", mesh, &albedo, log));
+  REQUIRE(log.find("vertex range") != std::string::npos);
+  std::remove("out/hostile_idx.glb");
+
+  // Node mesh index 4294967295 against a 1-entry meshes array.
+  const std::string badMeshJson =
+      "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+      "\"scenes\":[{\"nodes\":[0]}],"
+      "\"nodes\":[{\"mesh\":4294967295}],"
+      "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+      "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,"
+      "\"count\":3,\"type\":\"VEC3\"}],"
+      "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36}],"
+      "\"buffers\":[{\"byteLength\":36}]}";
+  writeGlb(badMeshJson,
+           std::vector<kenshin::u8>((const kenshin::u8*)pos,
+                                    (const kenshin::u8*)pos + sizeof(pos)),
+           "out/hostile_mesh.glb");
+  REQUIRE_FALSE(
+      kenshin::assets::loadGltf("out/hostile_mesh.glb", mesh, &albedo, log));
+  std::remove("out/hostile_mesh.glb");
+
+  // Image bufferView with byteOffset 0xFFFFFFF0 + length 0x40: the
+  // u32 add wraps to 48 and would pass a 32-bit bounds check.
+  const std::string wrapJson =
+      "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+      "\"scenes\":[{\"nodes\":[0]}],"
+      "\"nodes\":[{\"mesh\":0}],"
+      "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},"
+      "\"material\":0}]}],"
+      "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":"
+      "{\"index\":0}}}],"
+      "\"textures\":[{\"source\":0}],"
+      "\"images\":[{\"bufferView\":1,\"mimeType\":\"image/bmp\"}],"
+      "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,"
+      "\"count\":3,\"type\":\"VEC3\"}],"
+      "\"bufferViews\":["
+      "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
+      "{\"buffer\":0,\"byteOffset\":4294967280,\"byteLength\":64}],"
+      "\"buffers\":[{\"byteLength\":48}]}";
+  writeGlb(wrapJson,
+           std::vector<kenshin::u8>((const kenshin::u8*)pos,
+                                    (const kenshin::u8*)pos + sizeof(pos)),
+           "out/hostile_wrap.glb");
+  // Image failures are SOFT by design (an untextured model still
+  // loads) - the assertion is that the wrap was CAUGHT, not that the
+  // whole load died: no OOB read may happen either way.
+  (void)kenshin::assets::loadGltf("out/hostile_wrap.glb", mesh, &albedo, log);
+  REQUIRE(log.find("out of bounds") != std::string::npos);
+  REQUIRE(albedo.width == 0);  // nothing decoded from the bogus view
+  std::remove("out/hostile_wrap.glb");
+}
+
+TEST_CASE("gltf loader: rejects garbage and missing buffers",
+          "[assets][gltf]") {
+  kenshin::assets::MeshData mesh;
+  kenshin::assets::GltfImage albedo;
+  std::string log;
+  REQUIRE((std::filesystem::exists("out") ||
+           std::filesystem::create_directories("out")));
+  {
+    FILE* f = nullptr;
+    REQUIRE(fopen_s(&f, "out/bad.glb", "wb") == 0);
+    const char junk[] = "not a gltf at all";
+    std::fwrite(junk, 1, sizeof(junk), f);
+    std::fclose(f);
+  }
+  REQUIRE_FALSE(kenshin::assets::loadGltf("out/bad.glb", mesh, &albedo, log));
+  INFO("log: " << log);
+  REQUIRE_FALSE(log.empty());
+  std::remove("out/bad.glb");
+
+  // A .gltf whose buffer 0 is a data URI: loud v1 rejection.
+  {
+    FILE* f = nullptr;
+    REQUIRE(fopen_s(&f, "out/datauri.gltf", "wb") == 0);
+    const char json[] =
+        "{\"asset\":{\"version\":\"2.0\"},\"scenes\":[{\"nodes\":[0]}],"
+        "\"nodes\":[{\"mesh\":0}],\"meshes\":[{\"primitives\":[{\"attributes\":"
+        "{"
+        "\"POSITION\":0}}]}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,"
+        "\"count\":3,\"type\":\"VEC3\"}],"
+        "\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36}],"
+        "\"buffers\":[{\"uri\":\"data:application/"
+        "octet-stream;base64,AAAA\"}]}";
+    std::fwrite(json, 1, sizeof(json) - 1, f);
+    std::fclose(f);
+  }
+  REQUIRE_FALSE(
+      kenshin::assets::loadGltf("out/datauri.gltf", mesh, &albedo, log));
+  INFO("log: " << log);
+  REQUIRE(log.find("data-uri") != std::string::npos);
+  std::remove("out/datauri.gltf");
 }

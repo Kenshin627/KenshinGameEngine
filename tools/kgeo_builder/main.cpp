@@ -12,7 +12,11 @@
 #include <vector>
 
 #include "kenshin/Version.h"
+#include "kenshin/assets/GltfLoader.h"
 #include "kenshin/assets/MeshData.h"
+#include "kenshin/util/BmpWriter.h"
+
+namespace fsg = std::filesystem;
 #include "kenshin/assets/ObjLoader.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/geometry/ClusterDag.h"
@@ -90,10 +94,42 @@ int main(int argc, char** argv) {
       kenshin::log::shutdown();
       return 1;
     }
-  } else if (!kenshin::assets::loadObj(input, mesh, log)) {
-    KENSHIN_ERROR("load failed: {}", log);
-    kenshin::log::shutdown();
-    return 1;
+  } else {
+    std::string inExt = fsg::path(input).extension().string();
+    for (char& c : inExt) c = char(tolower(unsigned(c)));
+    if (inExt == ".glb" || inExt == ".gltf") {
+      kenshin::assets::GltfImage albedo;
+      if (!kenshin::assets::loadGltf(input, mesh, &albedo, log)) {
+        KENSHIN_ERROR("glTF load failed: {}", log);
+        kenshin::log::shutdown();
+        return 1;
+      }
+      if (!log.empty()) KENSHIN_WARN("[builder] gltf notes: {}", log);
+      if (albedo.width > 0) {
+        // Re-encode the embedded/decoded albedo as a BMP next to the
+        // OUTPUT (the .kgeo's texture reference is a bare file name -
+        // the pair travels together like an --albedo copy).
+        const fsg::path outDir = fsg::path(output).parent_path();
+        const std::string stem = albedo.name.empty()
+                                     ? fsg::path(input).stem().string()
+                                     : albedo.name;
+        const fsg::path bmp = outDir / (stem + "_albedo.bmp");
+        if (!kenshin::util::writeBmp24(bmp.string(), albedo.rgba,
+                                       kenshin::u32(albedo.width),
+                                       kenshin::u32(albedo.height))) {
+          KENSHIN_ERROR("[builder] albedo re-encode failed: {}", bmp.string());
+          kenshin::log::shutdown();
+          return 1;
+        }
+        mesh.material.diffuseTexture = bmp.string();
+        KENSHIN_INFO("[builder] gltf albedo {}x{} -> {}", albedo.width,
+                     albedo.height, bmp.string());
+      }
+    } else if (!kenshin::assets::loadObj(input, mesh, log)) {
+      KENSHIN_ERROR("load failed: {}", log);
+      kenshin::log::shutdown();
+      return 1;
+    }
   }
   KENSHIN_INFO("[builder] mesh: {} verts / {} tris", mesh.vertexCount(),
                mesh.triangleCount());
@@ -137,8 +173,14 @@ int main(int argc, char** argv) {
       mat.kd[1] = kd[1];
       mat.kd[2] = kd[2];
     }
-    if (rough >= 0.0f) mat.roughness = rough;
-    if (metal >= 0.0f) mat.metallic = metal;
+    if (rough >= 0.0f)
+      mat.roughness = rough;
+    else if (mesh.material.roughness != 0.5f)
+      mat.roughness = mesh.material.roughness;
+    if (metal >= 0.0f)
+      mat.metallic = metal;
+    else if (mesh.material.metallic != 0.0f)
+      mat.metallic = mesh.material.metallic;
     if (!albedo.empty())
       albedoSrc = albedo;
     else if (!mesh.material.diffuseTexture.empty())
@@ -319,13 +361,17 @@ int main(int argc, char** argv) {
       return 1;
     }
     const fs::path dst = fs::path(output).parent_path() / src.filename();
-    if (!fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec)) {
-      KENSHIN_ERROR("[builder] albedo copy failed: {} -> {} ({})", src.string(),
-                    dst.string(), ec.message());
-      kenshin::log::shutdown();
-      return 1;
+    // The glTF path may have written the BMP straight into the output
+    // dir already - copying onto itself fails on Windows.
+    if (fs::weakly_canonical(src, ec) != fs::weakly_canonical(dst, ec)) {
+      if (!fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec)) {
+        KENSHIN_ERROR("[builder] albedo copy failed: {} -> {} ({})",
+                      src.string(), dst.string(), ec.message());
+        kenshin::log::shutdown();
+        return 1;
+      }
+      KENSHIN_INFO("[builder] albedo: {} -> {}", src.string(), dst.string());
     }
-    KENSHIN_INFO("[builder] albedo: {} -> {}", src.string(), dst.string());
   }
   KENSHIN_INFO("[builder] written (v7 paged, materials: {}): {}",
                dag.materials.size(), output);

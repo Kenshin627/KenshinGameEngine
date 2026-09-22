@@ -19,6 +19,7 @@ if(NOT KENSHIN_GIT_SHA)
 endif()
 
 add_library(kenshin_engine STATIC
+    src/assets/GltfLoader.cpp
     src/assets/ObjLoader.cpp
     src/geometry/ClusterDag.cpp
     src/geometry/ClusterQuant.cpp
@@ -155,7 +156,11 @@ set_source_files_properties(${KENSHIN_MEMOPT_SOURCES} PROPERTIES COMPILE_OPTIONS
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_win32.cpp
+    ${CMAKE_SOURCE_DIR}/ThirdParty/stb/stb_image_impl.cpp
     PROPERTIES COMPILE_OPTIONS "/W0")
+# Vendored stb_image (glTF albedo decode; the BmpReader stays for the
+# engine's own write-format roundtrips).
+target_sources(kenshin_engine PRIVATE ${CMAKE_SOURCE_DIR}/ThirdParty/stb/stb_image_impl.cpp)
 target_compile_definitions(kenshin_engine PRIVATE
     IMGUI_IMPL_VULKAN_USE_VOLK   # vk entry points via volk's loaded pointers
 )
