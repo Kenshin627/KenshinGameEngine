@@ -53,7 +53,13 @@ class DebugOverlay {
   const glm::vec2& viewportSize() const { return m_viewportSize; }
   bool viewportHovered() const { return m_viewportHovered; }
 
+  /// The app calls this when no imgui.ini existed at startup (the
+  /// first-run dock layout below then applies; a saved layout wins).
+  void markFirstRun() { m_firstRun = true; }
+
  private:
+  bool m_dockLayoutBuilt = false;  // first-run dock build guard
+  bool m_firstRun = false;        // set by the app when no imgui.ini existed
   void drawViewportPanel(void* viewportTexture);
   void drawStatsPanel(core::FrameStats<240>& stats);
   void drawCameraPanel(scene::Camera& camera,

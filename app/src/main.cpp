@@ -139,6 +139,8 @@ struct Args {
   bool rasterBase = false;      // A/B: force the baseline walk (mode 0)
   bool rasterProbe = false;     // coverage histogram probe ([rasthist])
   bool noShadows = false;       // M9.1 A/B: disable the shadow map
+  std::string ground;           // M9.1: a ground-plane .kgeo whose
+                                // instances receive the shadows
   bool multi = false;           // S4.6 acceptance: near/mid/far instances
   bool dense = false;           // M3.4 acceptance: front-back occluders
   int grid = 0;                 // --grid N: N-instance occlusion carpet
@@ -210,6 +212,8 @@ Args parseArgs(int argc, char** argv) {
       args.rasterProbe = true;
     else if (std::strcmp(argv[i], "--no-shadows") == 0)
       args.noShadows = true;
+    else if (std::strcmp(argv[i], "--ground") == 0 && i + 1 < argc)
+      args.ground = argv[++i];
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
@@ -296,7 +300,7 @@ struct VgDebugState {
   // M8.3: the hemisphere ambient's two poles + tonemap operator.
   glm::vec3 skyColor{0.65f, 0.75f, 0.95f};
   glm::vec3 groundColor{0.28f, 0.25f, 0.22f};
-  int tonemapMode = 1;  // 0 Reinhard, 1 ACES
+  int tonemapMode = 2;  // 0 Reinhard, 1 ACES(Narkowicz), 2 Filmic(UE)
   bool shadows = true;  // M9.1: the directional light's shadow map
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
@@ -383,6 +387,17 @@ int main(int argc, char** argv) {
   auto& textureManager =
       engine.registerSubsystem<kenshin::manager::TextureManager>();
   auto& overlay = engine.registerSubsystem<kenshin::DebugOverlay>();
+  // First-run docking: if no imgui.ini sits next to the EXE (the path
+  // ImGui actually reads - a CWD-relative check sees stray files and
+  // skips the build), the overlay builds a default layout; a saved
+  // arrangement always wins.
+  {
+    char exePath[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    const std::filesystem::path ini =
+        std::filesystem::path(exePath).parent_path() / "imgui.ini";
+    if (!std::filesystem::exists(ini)) overlay.markFirstRun();
+  }
 
   // ---- demo scene (S2.2): one instance of every shape on the X axis;
   // --mesh <name> picks one, --kgeo switches to the LOD preview instead.
@@ -463,6 +478,32 @@ int main(int argc, char** argv) {
             "kgeo_builder",
             args.kgeo);
         return 1;
+      }
+      // M9.1: an optional ground-plane asset (a second paged mesh;
+      // its clusters stamp material id 0 which indexes the FIRST
+      // mesh's material - the plane wears the knot's checker here,
+      // fine for the shadow demo; the rebasing is the documented v1
+      // multi-mesh limitation).
+      kenshin::u32 groundMeshId = 0xFFFFFFFFu;
+      if (!args.ground.empty()) {
+        demo::KgeoPreview groundPreview;
+        std::string groundLog;
+        if (demo::loadKgeo(args.ground, groundPreview, groundLog)) {
+          if (groundPreview.dag.paged)
+            groundMeshId = vgScene.addMeshPaged(groundPreview.dag);
+          else
+            groundMeshId = vgScene.addMesh(groundPreview.dag);
+          if (groundMeshId == 0xFFFFFFFFu) {
+            KENSHIN_ERROR("[main] ground asset rejected: rebuild {}",
+                          args.ground);
+            return 1;
+          }
+          KENSHIN_INFO("[main] ground mesh loaded: {} clusters",
+                       groundPreview.dag.clusters.size());
+        } else {
+          KENSHIN_ERROR("[main] ground load failed: {}", groundLog);
+          return 1;
+        }
       }
       const kenshin::u32 slotCap =
           pagedAsset && args.streamBudgetMb > 0
@@ -588,11 +629,27 @@ int main(int argc, char** argv) {
             chainInstances.push_back(makeInst(m));
             vgInsts.push_back({m, vgMeshId});
           }
+          if (groundMeshId != 0xFFFFFFFFu) {
+            // Centered between the default camera target (origin) and
+            // the mid instance - the 40m span covers everything the
+            // default and acceptance views look at.
+            const glm::mat4 gm =
+                glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, -1.5f, 0.0f));
+            chainInstances.push_back(makeInst(gm));
+            vgInsts.push_back({gm, groundMeshId});
+          }
           vgScene.setInstances(vgInsts);
         } else {
           chainInstances = {makeInst(glm::mat4(1.0f))};
-          vgScene.setInstances(
-              {kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}});
+          std::vector<kenshin::renderer::VgInstance> vgInsts = {
+              kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}};
+          if (groundMeshId != 0xFFFFFFFFu) {
+            const glm::mat4 gm =
+                glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -1.5f, 0.0f));
+            chainInstances.push_back(makeInst(gm));
+            vgInsts.push_back({gm, groundMeshId});
+          }
+          vgScene.setInstances(vgInsts);
         }
         for (kenshin::u32 i = 0; i < chainInstances.size(); ++i)
           chainMeshRanges.push_back({mesh.clusterBegin, mesh.clusterEnd});

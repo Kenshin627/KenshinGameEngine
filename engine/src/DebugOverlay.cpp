@@ -12,6 +12,7 @@
 #pragma warning(push, 0)
 #include <imgui.h>
 #include <imgui_impl_win32.h>  // after Windows.h: backend expects HWND declared
+#include <imgui_internal.h>  // DockBuilder (first-run layout)
 #pragma warning(pop)
 
 // imgui_impl_win32.h intentionally wraps the WndProcHandler declaration in
@@ -72,10 +73,46 @@ void DebugOverlay::shutdown() { ImGui::DestroyContext(); }
 void DebugOverlay::draw(void* viewportTexture, core::FrameStats<240>& stats,
                         scene::Camera& camera,
                         scene::CameraController& controller) {
-  // Full-window dockspace host: every panel (viewport included) can be
-  // dragged out, docked, split; layout persists across sessions.
-  ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(),
-                               ImGuiDockNodeFlags_PassthruCentralNode);
+  // Full-window dockspace host (the ImGui demo's manual host-window
+  // pattern, not DockSpaceOverViewport): every panel - viewport
+  // included - can be dragged out, docked, split; layout persists.
+  // The ID is derived from a fixed seed so the first-run DockBuilder
+  // pass below can address the node BEFORE the DockSpace submits.
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  ImGui::SetNextWindowPos(vp->WorkPos);
+  ImGui::SetNextWindowSize(vp->WorkSize);
+  ImGui::SetNextWindowViewport(vp->ID);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::Begin("KENSHIN Dock Host", nullptr,
+               ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
+                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                   ImGuiWindowFlags_NoMove |
+                   ImGuiWindowFlags_NoBringToFrontOnFocus |
+                   ImGuiWindowFlags_NoNavFocus);
+  ImGui::PopStyleVar(3);
+  const ImGuiID dockId = ImGui::GetID("KENSHINDockSpace");
+  // First-run default layout (the app checked for imgui.ini BEFORE
+  // ImGui loaded it - a saved arrangement always wins): without this a
+  // fresh checkout floats every panel and the viewport lands in a
+  // small corner window that reads as "nothing renders". Built BEFORE
+  // the DockSpace submits (the demo's ordering).
+  if (m_firstRun && !m_dockLayoutBuilt) {
+    m_dockLayoutBuilt = true;
+    ImGui::DockBuilderRemoveNode(dockId);
+    ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockId, vp->WorkSize);
+    ImGuiID left = 0, main = 0;
+    ImGui::DockBuilderSplitNode(dockId, ImGuiDir_Left, 0.26f, &left, &main);
+    ImGui::DockBuilderDockWindow("Frame Stats", left);
+    ImGui::DockBuilderDockWindow("Camera", left);
+    ImGui::DockBuilderDockWindow("Virtual Geometry", left);
+    ImGui::DockBuilderDockWindow("Viewport", main);
+    ImGui::DockBuilderFinish(dockId);
+  }
+  ImGui::DockSpace(dockId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
+  ImGui::End();
 
   drawViewportPanel(viewportTexture);
   drawStatsPanel(stats);
@@ -85,8 +122,11 @@ void DebugOverlay::draw(void* viewportTexture, core::FrameStats<240>& stats,
 
 void DebugOverlay::drawViewportPanel(void* viewportTexture) {
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-  ImGui::SetNextWindowPos(ImVec2(60.0f, 60.0f), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(640.0f, 480.0f), ImGuiCond_FirstUseEver);
+  // Size seed (ignored when docked - the dock node owns size then).
+  // Without it a first-ever frame renders zero content and the window
+  // auto-fits collapsed to a 32x13 title bar; the first-run layout
+  // then docks that collapsed window and the 3D view "disappears".
+  ImGui::SetNextWindowSize(ImVec2(1152.0f, 830.0f), ImGuiCond_FirstUseEver);
   ImGui::Begin("Viewport");
   const ImVec2 avail = ImGui::GetContentRegionAvail();
   if (avail.x >= 1.0f && avail.y >= 1.0f)

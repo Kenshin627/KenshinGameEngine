@@ -96,10 +96,14 @@ VSOut vsMain(uint id : SV_VertexID)
     return o;
 }
 
-/// PCF 3x3 over the shadow map in LIGHT clip space. `sp` rows: the
+/// PCF 3x3 over the shadow map in LIGHT clip space (2026-09-25 UE
+/// cross-check vs ShadowFilteringCommon.ush): each tap compares through
+/// a SOFT transition ramp saturate((stored - receiver)*scale + 1)
+/// rather than a binary <=; the depth bias is constant + SLOPE-scaled
+/// (slope = tan of the angle to the light, clamped). `sp` rows: the
 /// light viewProj columns; params = (mapSize, bias, texelWorld,
 /// enabled). Returns 1 = lit, 0 = shadowed.
-float shadowFactor(float3 worldPos, float3 nrm)
+float shadowFactor(float3 worldPos, float3 nrm, float ndl)
 {
     const float4 p4 = shadowParams[4];
     if (p4.w < 0.5) return 1.0;  // shadows disabled
@@ -111,15 +115,25 @@ float shadowFactor(float3 worldPos, float3 nrm)
         clip.z > 1.0)
         return 1.0;  // outside the shadow frustum: unshadowed
     // Normal-offset bias: lift the sample point along the surface
-    // normal by a couple of world texels (cheap acne fix; the map's
-    // world texel size rides the params).
-    const float3 lifted =
-        worldPos + nrm * (p4.z * 2.0);
+    // normal by a couple of world texels (acne fix; UE's VSM analog
+    // scales with camera distance instead - ours is a fixed ortho map).
+    const float3 lifted = worldPos + nrm * (p4.z * 2.0);
     const float4 clipN = lvp[0] * lifted.x + lvp[1] * lifted.y +
                          lvp[2] * lifted.z + lvp[3];
     const float2 uv = clipN.xy * 0.5 + 0.5;
-    const float depth = clipN.z;
+    // UE ComputeDepthBiasDirectionalSpot: slope = tan(angle to light)
+    // = sqrt(1-NoL^2)/NoL clamped; bias = constant + slopeScale*slope,
+    // applied to the OCCLUDER side (equivalently subtracted from the
+    // receiver here).
+    const float slope =
+        clamp(sqrt(saturate(1.0 - ndl * ndl)) / max(ndl, 1e-4), 0.0, 1.0);
+    const float bias = p4.y + slope * 0.01;
+    const float depth = clipN.z - bias;
     const float texel = 1.0 / p4.x;
+    // Soft transition: the ramp spans 1/transitionScale of normalized
+    // depth (UE r.Shadow.TransitionScale=60 over subject ranges far
+    // larger than our 40m box; 400 keeps a comparable world width).
+    const float transitionScale = 400.0;
     float lit = 0.0;
     for (int dy = -1; dy <= 1; ++dy)
         for (int dx = -1; dx <= 1; ++dx)
@@ -127,7 +141,7 @@ float shadowFactor(float3 worldPos, float3 nrm)
             const float s = shadowMap.SampleLevel(
                 clamp(uv + float2(float(dx), float(dy)) * texel,
                       float2(0.0), float2(1.0)), 0.0).r;
-            lit += (depth - p4.y) <= s ? 1.0 : 0.0;
+            lit += saturate((s - depth) * transitionScale + 1.0);
         }
     return lit / 9.0;
 }
@@ -143,16 +157,24 @@ float distributionGGX(float ndh, float rough)
     const float d = ndh * ndh * (a2 - 1.0) + 1.0;
     return a2 / max(3.14159265 * d * d, 1e-7);
 }
-float geometrySmith(float ndv, float ndl, float rough)
+/// Heitz 2014 joint-Smith APPROXIMATION - UE's Vis_SmithJointApprox
+/// (BRDF.ush:373). Includes the 1/(4 NoV NoL) denominator (the file
+/// convention note below) - do NOT divide by it again at the use site.
+/// `a2` = roughness^4 (the GGX alpha squared).
+float visSmithJointApprox(float a2, float ndv, float ndl)
 {
-    const float k = (rough + 1.0) * (rough + 1.0) / 8.0;
-    const float gv = ndv / (ndv * (1.0 - k) + k);
-    const float gl = ndl / (ndl * (1.0 - k) + k);
-    return gv * gl;
+    const float a = sqrt(a2);
+    const float v = ndl * (ndv * (1.0 - a) + a);
+    const float l = ndv * (ndl * (1.0 - a) + a);
+    return 0.5 / max(v + l, 1e-7);
 }
 float3 fresnelSchlick(float ct, float3 f0)
 {
-    return f0 + (float3(1.0, 1.0, 1.0) - f0) * pow(1.0 - ct, 5.0);
+    // UE's micro-occlusion form (BRDF.ush:403): anything below ~2%
+    // reflectance is treated as shadowing - the whole lobe collapses
+    // (matters for metallic-dark albedos; identical at f0 = 0.04).
+    const float fc = pow(1.0 - ct, 5.0);
+    return saturate(50.0 * f0.g) * fc + (1.0 - fc) * f0;
 }
 
 [shader("fragment")]
@@ -190,7 +212,9 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const float3 worldPos = camPos + ray * a.w;
 
     const float3 viewDir = normalize(camPos - worldPos);
-    const float ndv = max(dot(nrm, viewDir), 0.0);
+    // UE ShadingModels.ush:252 - abs + epsilon keeps saturate(dot)
+    // finite at silhouette edges.
+    const float ndv = saturate(abs(dot(nrm, viewDir)) + 1e-5);
     const float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, rm.y);
 
     float3 lo = float3(0.0, 0.0, 0.0);
@@ -201,8 +225,10 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         const float4 radiance = lights[i].b;
         float3 l;
         float3 li = radiance.rgb;
+        const float3 h = normalize(viewDir + l);
+        const float ndlRaw = max(dot(nrm, l), 0.0);
         const float shadow =
-            (meta.w < 0.5) ? shadowFactor(worldPos, nrm) : 1.0;
+            (meta.w < 0.5) ? shadowFactor(worldPos, nrm, ndlRaw) : 1.0;
         if (meta.w < 0.5)
         {
             l = normalize(meta.xyz);  // directional: TO light
@@ -219,16 +245,21 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
                 : 1.0;
             li *= att / max(distL * distL, 1e-4);
         }
-        const float3 h = normalize(viewDir + l);
         const float ndl = max(dot(nrm, l), 0.0);
         const float ndh = max(dot(nrm, h), 0.0);
         const float3 f = fresnelSchlick(max(dot(h, viewDir), 0.0), f0);
-        const float ndf = distributionGGX(ndh, rm.x);
-        const float g = geometrySmith(ndv, max(ndl, 1e-4), rm.x);
-        const float3 spec =
-            (ndf * g * f) / max(4.0 * ndv * max(ndl, 1e-4), 1e-4);
-        const float3 kd = (float3(1.0, 1.0, 1.0) - f) * (1.0 - rm.y);
-        lo += (kd * albedo / 3.14159265 + spec) * li * ndl * shadow;
+        // UE DefaultLitBxDF (ShadingModels.ush:180): specular = D * Vis
+        // * F with Vis carrying the 1/(4 NoV NoL); roughness clamped to
+        // the view MinRoughness (0.02). Diffuse is UE-legacy WITHOUT
+        // the (1-F) energy-conservation factor (USE_ENERGY_CONSERVATION
+        // off unless Substrate) - albedo * (1-metallic) / PI.
+        const float rough = max(rm.x, 0.02);
+        const float a2 = rough * rough * rough * rough;
+        const float ndf = distributionGGX(ndh, rough);
+        const float vis = visSmithJointApprox(a2, ndv, max(ndl, 1e-4));
+        const float3 spec = ndf * vis * f;
+        const float3 kd = albedo * (1.0 - rm.y);
+        lo += (kd / 3.14159265 + spec) * li * ndl * shadow;
     }
 
     // Hemisphere ambient (M8.3): sky from above, ground from below -
