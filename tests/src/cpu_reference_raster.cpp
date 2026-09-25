@@ -160,11 +160,11 @@ struct CpuRaster {
     const i64 maxSubY = std::max({Y0, Y1, Y2});
     int x0 =
         std::max<int>(int(std::ceil((float(minSubX) - 128.0f) / 256.0f)), 0);
-    int x1 = std::min<int>(int(std::floor((float(maxSubX) - 128.0f) / 256.0f)),
+    int x1 = std::min<int>(int(std::floor((float(maxSubX) - 129.0f) / 256.0f)),
                            int(frame.width) - 1);
     int y0 =
         std::max<int>(int(std::ceil((float(minSubY) - 128.0f) / 256.0f)), 0);
-    int y1 = std::min<int>(int(std::floor((float(maxSubY) - 128.0f) / 256.0f)),
+    int y1 = std::min<int>(int(std::floor((float(maxSubY) - 129.0f) / 256.0f)),
                            int(frame.height) - 1);
     if (x0 > x1 || y0 > y1) return;
 

@@ -253,10 +253,15 @@ uint rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
     const int64_t maxSubX = max(max(X0, X1), X2);
     const int64_t minSubY = min(min(Y0, Y1), Y2);
     const int64_t maxSubY = max(max(Y0, Y1), Y2);
+    // UE 2026-09-25 cross-check: MinPixel = ceil((min-128)/256) matches
+    // UE exactly; MaxPixel = floor((max-129)/256) is UE's tighter bound
+    // (floor((Max-129)/256)) - it drops the pixel whose center subpixel
+    // equals MaxSubpixel exactly (a bbox-corner tie the fill rule
+    // rejects on bottom/right edges; UE excludes it on all edges).
     int x0 = int(ceil((float(minSubX) - 128.0) / 256.0));
-    int x1 = int(floor((float(maxSubX) - 128.0) / 256.0));
+    int x1 = int(floor((float(maxSubX) - 129.0) / 256.0));
     int y0 = int(ceil((float(minSubY) - 128.0) / 256.0));
-    int y1 = int(floor((float(maxSubY) - 128.0) / 256.0));
+    int y1 = int(floor((float(maxSubY) - 129.0) / 256.0));
     x0 = max(x0, 0);
     y0 = max(y0, 0);
     x1 = min(x1, int(widthHeight.x) - 1);

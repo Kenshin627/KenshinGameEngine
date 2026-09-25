@@ -286,11 +286,11 @@ TEST_CASE("quantized-vs-true raster occupancy (bigknot, user cam)",
           int x0 = std::max(
               int(std::ceil((float(minSubX) - 128.0f) / 256.0f)), 0);
           int x1 = std::min(
-              int(std::floor((float(maxSubX) - 128.0f) / 256.0f)), int(W) - 1);
+              int(std::floor((float(maxSubX) - 129.0f) / 256.0f)), int(W) - 1);
           int y0 = std::max(
               int(std::ceil((float(minSubY) - 128.0f) / 256.0f)), 0);
           int y1 = std::min(
-              int(std::floor((float(maxSubY) - 128.0f) / 256.0f)), int(H) - 1);
+              int(std::floor((float(maxSubY) - 129.0f) / 256.0f)), int(H) - 1);
           if (x0 > x1 || y0 > y1) continue;
           u32 hits = 0;
           for (int y = y0; y <= y1; ++y) {
