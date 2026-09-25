@@ -41,7 +41,7 @@ bool LightingPass::init(backend::IRenderBackend& backend,
   desc.debugName = "env-table";
   m_envBuffer = backend.createBuffer(desc);
   // M9.1: the shadow parameter block (binding 6).
-  desc.size = 5 * sizeof(glm::vec4);
+  desc.size = 20 * sizeof(glm::vec4);
   desc.debugName = "shadow-params";
   m_shadowParams = backend.createBuffer(desc);
   // The 1-entry default material table (v2 path binds this - the
@@ -72,10 +72,9 @@ void LightingPass::draw(backend::IRenderBackend& backend,
                         std::span<const GpuLightC> lights, u32 materialTable,
                         u32 materialCount, const glm::vec4& clearColor,
                         float ambient, const glm::vec3& skyColor,
-                        const glm::vec3& groundColor,
-                        const glm::mat4& lightViewProj, float shadowBias,
-                        float shadowTexelWorld, bool shadowsEnabled, u32 width,
-                        u32 height) {
+                        const glm::vec3& groundColor, const ShadowLevel* levels,
+                        u32 levelCount, float extent0, const glm::vec3& origin,
+                        u32 width, u32 height) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   const u32 count =
       static_cast<u32>(std::min<usize>(lights.size(), kMaxLights));
@@ -106,13 +105,27 @@ void LightingPass::draw(backend::IRenderBackend& backend,
   auto* env = static_cast<glm::vec4*>(backend.mappedPtr(m_envBuffer));
   env[0] = glm::vec4(skyColor, 0.0f);
   env[1] = glm::vec4(groundColor, 0.0f);
+  // shadowParams layout (lighting.slang's header comment): [0]
+  // header, [1] origin, level L at 2 + 6*L: [base] pad, [base+1]
+  // (mapSize, bias, texelWorld, enabled), [base+2..5] viewProj cols.
   auto* sp = static_cast<glm::vec4*>(backend.mappedPtr(m_shadowParams));
-  sp[0] = lightViewProj[0];
-  sp[1] = lightViewProj[1];
-  sp[2] = lightViewProj[2];
-  sp[3] = lightViewProj[3];
-  sp[4] = glm::vec4(2048.0f, shadowBias, shadowTexelWorld,
-                    shadowsEnabled ? 1.0f : 0.0f);
+  const u32 shadowCount = std::min(levelCount, 3u);
+  sp[0] = glm::vec4(std::log2(extent0), static_cast<f32>(shadowCount),
+                    shadowCount > 0 ? 1.0f : 0.0f, 0.0f);
+  sp[1] = glm::vec4(origin, 0.0f);
+  for (u32 l = 0; l < 3; ++l) {
+    glm::vec4* base = sp + 2 + usize(l) * 6;
+    if (l < shadowCount) {
+      base[0] = glm::vec4(0.0f);
+      base[1] = glm::vec4(2048.0f, levels[l].bias, levels[l].texelWorld, 1.0f);
+      base[2] = levels[l].viewProj[0];
+      base[3] = levels[l].viewProj[1];
+      base[4] = levels[l].viewProj[2];
+      base[5] = levels[l].viewProj[3];
+    } else {
+      for (u32 w = 0; w < 6; ++w) base[w] = glm::vec4(0.0f);
+    }
+  }
   const u32 buffers[4] = {m_lightBuffer,
                           usingDummy ? m_materialDummy : materialTable,
                           m_envBuffer, m_shadowParams};

@@ -55,10 +55,17 @@ bool MaterialDecodePass::init(backend::IRenderBackend& backend,
   }
   info.fsSpirv = fsS.data();
   info.fsBytes = fsS.size() * sizeof(u32);
-  m_shadowPipeline = backend.createShadowDecodePipeline(info);
-  if (m_shadowPipeline == backend::IRenderBackend::kInvalidPipelineHandle) {
-    KENSHIN_ERROR("[decode] shadow pipeline creation failed");
-    return false;
+  // One pipeline INSTANCE per clipmap level: the levels' decodes run
+  // in the SAME frame sharing this pass's per-slot descriptor set - a
+  // second update would invalidate the first decode's still-recording
+  // command buffer (the M3.3 same-frame double-update violation).
+  for (int lv = 0; lv < 3; ++lv) {
+    m_shadowPipeline[lv] = backend.createShadowDecodePipeline(info);
+    if (m_shadowPipeline[lv] ==
+        backend::IRenderBackend::kInvalidPipelineHandle) {
+      KENSHIN_ERROR("[decode] shadow pipeline creation failed");
+      return false;
+    }
   }
   // M6.3/M6.4: the mode-switch buffer (binding 11: [0].x paged flag,
   // [0].y/.z pool element totals - the clamp bounds; [1].x pair
@@ -94,18 +101,16 @@ bool MaterialDecodePass::init(backend::IRenderBackend& backend,
 /// Shared recorder: pool bindings 3..6 = `pool` (the v2 scene pools or
 /// the slot pool), paged tables 8..10, the mode buffer 11, the pair
 /// tables 12/13 (the payload indirection).
-static void recordDecode(backend::IRenderBackend& backend, u32 pipeline,
-                         u32 decodeParams, int mode, const glm::mat4& viewProj,
-                         u32 visHandle, u32 clusterBuffer, u32 instanceBuffer,
-                         u32 groupBuffer, u32 poolPos, u32 poolNrm, u32 poolUv,
-                         u32 poolIdx, u32 clusterPage, u32 pageTable,
-                         u32 pageHeader, bool paged, u32 slotU32Total,
-                         u32 clusterMeta, u32 pairs, u32 hwPairs, u32 postPairs,
-                         u32 pairCapacity, const DecodeParams& params,
-                         u32 clusterCount, u32 groupCount, u32 instanceCount,
-                         u32 maxLodLevel, u32 width, u32 height,
-                         u32 materialTable, u32 materialCount,
-                         u32 albedoTexture, bool shadowEnabled) {
+static void recordDecode(
+    backend::IRenderBackend& backend, u32 pipeline, u32 decodeParams, int mode,
+    const glm::mat4& viewProj, u32 visHandle, u32 clusterBuffer,
+    u32 instanceBuffer, u32 groupBuffer, u32 poolPos, u32 poolNrm, u32 poolUv,
+    u32 poolIdx, u32 clusterPage, u32 pageTable, u32 pageHeader, bool paged,
+    u32 slotU32Total, u32 clusterMeta, u32 pairs, u32 hwPairs, u32 postPairs,
+    u32 pairCapacity, const DecodeParams& params, u32 clusterCount,
+    u32 groupCount, u32 instanceCount, u32 maxLodLevel, u32 width, u32 height,
+    u32 materialTable, u32 materialCount, u32 albedoTexture, u32 shadowLevel,
+    bool shadowEnabled) {
   // mode: 0 = final color, 1 = GBuffer MRT, 2 = shadow depth.
   // The push block (decode_material.slang's DecodePush, packed
   // identically - glm raw).
@@ -147,7 +152,7 @@ static void recordDecode(backend::IRenderBackend& backend, u32 pipeline,
       break;
     case 2:
       backend.drawShadowDecode(pipeline, handles, 17, &push, sizeof(push),
-                               width, height, shadowEnabled);
+                               width, height, shadowLevel, shadowEnabled);
       break;
     default:
       backend.drawFullscreen(pipeline, handles, 16, &push, sizeof(push));
@@ -175,7 +180,7 @@ void MaterialDecodePass::draw(backend::IRenderBackend& backend,
                m_dummyU32[0], pairs, hwPairs, postPairs, pairCapacity, params,
                scene.clusterCount(), scene.groupCount(), scene.instanceCount(),
                scene.maxLodLevel(), width, height, m_dummyMaterial, 0,
-               backend::IRenderBackend::kInvalidTextureHandle, false);
+               backend::IRenderBackend::kInvalidTextureHandle, 0, false);
 }
 
 void MaterialDecodePass::drawGBuffer(backend::IRenderBackend& backend,
@@ -197,7 +202,7 @@ void MaterialDecodePass::drawGBuffer(backend::IRenderBackend& backend,
                m_dummyU32[0], pairs, hwPairs, postPairs, pairCapacity, params,
                scene.clusterCount(), scene.groupCount(), scene.instanceCount(),
                scene.maxLodLevel(), width, height, m_dummyMaterial, 0,
-               albedoTexture, false);
+               albedoTexture, 0, false);
 }
 
 void MaterialDecodePass::drawGBufferPaged(
@@ -209,15 +214,16 @@ void MaterialDecodePass::drawGBufferPaged(
   if (visHandle == backend::IRenderBackend::kInvalidBufferHandle) return;
   if (backend.bufferSize(visHandle) != usize(width) * height * sizeof(u64))
     return;
-  recordDecode(
-      backend, m_gbufferPipeline, m_decodeParams, true, viewProj, visHandle,
-      scene.clusterBuffer(), scene.instanceBuffer(), scene.groupBuffer(),
-      paged.slotPool, paged.slotPool, paged.slotPool, paged.slotPool,
-      paged.clusterPage, paged.pageTable, paged.pageHeader, true,
-      paged.slotU32Total, paged.clusterMeta, pairs, hwPairs, postPairs,
-      pairCapacity, params, scene.clusterCount(), scene.groupCount(),
-      scene.instanceCount(), scene.maxLodLevel(), width, height,
-      scene.materialTableBuffer(), scene.materialCount(), albedoTexture, false);
+  recordDecode(backend, m_gbufferPipeline, m_decodeParams, true, viewProj,
+               visHandle, scene.clusterBuffer(), scene.instanceBuffer(),
+               scene.groupBuffer(), paged.slotPool, paged.slotPool,
+               paged.slotPool, paged.slotPool, paged.clusterPage,
+               paged.pageTable, paged.pageHeader, true, paged.slotU32Total,
+               paged.clusterMeta, pairs, hwPairs, postPairs, pairCapacity,
+               params, scene.clusterCount(), scene.groupCount(),
+               scene.instanceCount(), scene.maxLodLevel(), width, height,
+               scene.materialTableBuffer(), scene.materialCount(),
+               albedoTexture, 0, false);
 }
 
 void MaterialDecodePass::drawPaged(
@@ -238,55 +244,60 @@ void MaterialDecodePass::drawPaged(
                params, scene.clusterCount(), scene.groupCount(),
                scene.instanceCount(), scene.maxLodLevel(), width, height,
                scene.materialTableBuffer(), scene.materialCount(),
-               backend::IRenderBackend::kInvalidTextureHandle, false);
+               backend::IRenderBackend::kInvalidTextureHandle, 0, false);
 }
 
 void MaterialDecodePass::drawShadowPaged(
     backend::IRenderBackend& backend, const glm::mat4& viewProj,
     const VirtualGeometryScene& scene, const DecodeParams& params, u32 width,
     u32 height, u32 visHandle, const DecodePagedInputs& paged, u32 pairs,
-    u32 hwPairs, u32 postPairs, u32 pairCapacity, bool shadowEnabled) {
-  if (m_shadowPipeline == ~0u || width == 0 || height == 0) return;
+    u32 hwPairs, u32 postPairs, u32 pairCapacity, u32 shadowLevel,
+    bool shadowEnabled) {
+  if (shadowLevel >= 3 || m_shadowPipeline[shadowLevel] == ~0u || width == 0 ||
+      height == 0)
+    return;
   // The DISABLED path (clear-to-one) has no VisBuffer to guard on.
   if (shadowEnabled) {
     if (visHandle == backend::IRenderBackend::kInvalidBufferHandle) return;
     if (backend.bufferSize(visHandle) != usize(width) * height * sizeof(u64))
       return;
   }
-  recordDecode(backend, m_shadowPipeline, m_decodeParams, 2, viewProj,
-               visHandle, scene.clusterBuffer(), scene.instanceBuffer(),
-               scene.groupBuffer(), paged.slotPool, paged.slotPool,
-               paged.slotPool, paged.slotPool, paged.clusterPage,
-               paged.pageTable, paged.pageHeader, true, paged.slotU32Total,
-               paged.clusterMeta, pairs, hwPairs, postPairs, pairCapacity,
-               params, scene.clusterCount(), scene.groupCount(),
+  recordDecode(backend, m_shadowPipeline[shadowLevel], m_decodeParams, 2,
+               viewProj, visHandle, scene.clusterBuffer(),
+               scene.instanceBuffer(), scene.groupBuffer(), paged.slotPool,
+               paged.slotPool, paged.slotPool, paged.slotPool,
+               paged.clusterPage, paged.pageTable, paged.pageHeader, true,
+               paged.slotU32Total, paged.clusterMeta, pairs, hwPairs, postPairs,
+               pairCapacity, params, scene.clusterCount(), scene.groupCount(),
                scene.instanceCount(), scene.maxLodLevel(), width, height,
                scene.materialTableBuffer(), scene.materialCount(),
-               backend::IRenderBackend::kInvalidTextureHandle, shadowEnabled);
+               backend::IRenderBackend::kInvalidTextureHandle, shadowLevel,
+               shadowEnabled);
 }
 
-void MaterialDecodePass::drawShadow(backend::IRenderBackend& backend,
-                                    const glm::mat4& viewProj,
-                                    const VirtualGeometryScene& scene,
-                                    const DecodeParams& params, u32 width,
-                                    u32 height, u32 visHandle, u32 pairs,
-                                    u32 hwPairs, u32 postPairs,
-                                    u32 pairCapacity, bool shadowEnabled) {
-  if (m_shadowPipeline == ~0u || width == 0 || height == 0) return;
+void MaterialDecodePass::drawShadow(
+    backend::IRenderBackend& backend, const glm::mat4& viewProj,
+    const VirtualGeometryScene& scene, const DecodeParams& params, u32 width,
+    u32 height, u32 visHandle, u32 pairs, u32 hwPairs, u32 postPairs,
+    u32 pairCapacity, u32 shadowLevel, bool shadowEnabled) {
+  if (shadowLevel >= 3 || m_shadowPipeline[shadowLevel] == ~0u || width == 0 ||
+      height == 0)
+    return;
   if (shadowEnabled) {
     if (visHandle == backend::IRenderBackend::kInvalidBufferHandle) return;
     if (backend.bufferSize(visHandle) != usize(width) * height * sizeof(u64))
       return;
   }
-  recordDecode(backend, m_shadowPipeline, m_decodeParams, 2, viewProj,
-               visHandle, scene.clusterBuffer(), scene.instanceBuffer(),
-               scene.groupBuffer(), scene.positionBuffer(),
-               scene.normalBuffer(), scene.uvBuffer(), scene.indexBuffer(),
-               m_dummyU32[0], m_dummyU32[1], m_dummyPageHeader, false, 0,
-               m_dummyU32[0], pairs, hwPairs, postPairs, pairCapacity, params,
-               scene.clusterCount(), scene.groupCount(), scene.instanceCount(),
-               scene.maxLodLevel(), width, height, m_dummyMaterial, 0,
-               backend::IRenderBackend::kInvalidTextureHandle, shadowEnabled);
+  recordDecode(
+      backend, m_shadowPipeline[shadowLevel], m_decodeParams, 2, viewProj,
+      visHandle, scene.clusterBuffer(), scene.instanceBuffer(),
+      scene.groupBuffer(), scene.positionBuffer(), scene.normalBuffer(),
+      scene.uvBuffer(), scene.indexBuffer(), m_dummyU32[0], m_dummyU32[1],
+      m_dummyPageHeader, false, 0, m_dummyU32[0], pairs, hwPairs, postPairs,
+      pairCapacity, params, scene.clusterCount(), scene.groupCount(),
+      scene.instanceCount(), scene.maxLodLevel(), width, height,
+      m_dummyMaterial, 0, backend::IRenderBackend::kInvalidTextureHandle,
+      shadowLevel, shadowEnabled);
 }
 
 void MaterialDecodePass::onShutdown(backend::IRenderBackend& backend) {
@@ -300,8 +311,8 @@ void MaterialDecodePass::onShutdown(backend::IRenderBackend& backend) {
   m_decodeParams = m_dummyPageHeader = m_dummyMaterial = ~0u;
   m_dummyU32[0] = m_dummyU32[1] = ~0u;
   m_dummyPairs[0] = m_dummyPairs[1] = ~0u;
-  m_pipeline = m_gbufferPipeline = m_shadowPipeline =
-      ~0u;  // pipelines die with PipelineStore
+  m_pipeline = m_gbufferPipeline = ~0u;  // pipelines die with PipelineStore
+  for (int lv = 0; lv < 3; ++lv) m_shadowPipeline[lv] = ~0u;
 }
 
 }  // namespace renderer

@@ -72,8 +72,15 @@ struct GpuLight
 // bindings after the GBuffer pair) + the shadow parameter block
 // ([0..3] the light viewProj columns, [4] = mapSize, bias, texelWorld,
 // enabled).
-[[vk::binding(5)]] Sampler2D shadowMap;
-[[vk::binding(6)]] StructuredBuffer<float4> shadowParams;
+// M9.1 Stage B: the clipmap levels (0 = finest, extent0 radius;
+// each coarser level doubles extent AND texel size - the same
+// texel-density-per-distance calibration as UE's clipmaps). The
+// sampling side picks the level by distance (log2) with a
+// coarse-fallback when the pixel falls outside a level's box.
+[[vk::binding(5)]] Sampler2D shadowMap0;
+[[vk::binding(6)]] Sampler2D shadowMap1;
+[[vk::binding(7)]] Sampler2D shadowMap2;
+[[vk::binding(8)]] StructuredBuffer<float4> shadowParams;
 
 // NOTE on matrices: glm stores column-major and Slang's mul reads
 // buffer vec4s as rows - every transform below is an explicit linear
@@ -103,47 +110,85 @@ VSOut vsMain(uint id : SV_VertexID)
 /// (slope = tan of the angle to the light, clamped). `sp` rows: the
 /// light viewProj columns; params = (mapSize, bias, texelWorld,
 /// enabled). Returns 1 = lit, 0 = shadowed.
-float shadowFactor(float3 worldPos, float3 nrm, float ndl)
+// Level L block at base = 2 + 6*L: [base] = pad, [base+1] =
+// (mapSize, bias, texelWorld, enabled), [base+2..base+5] = the
+// level's light viewProj columns. Header: [0] = (log2Extent0,
+// levelCount, globalEnable, pad); [1] = clipmap origin.xyz, pad.
+// Level selection: UE's CalcAbsoluteClipmapLevel = log2(distance)
+// biased by the extent calibration - ours is floor(log2(d) - log2(
+// extent0)) clamped, the same shape with firstLevel folded in. A
+// pixel outside its level's box falls back to COARSER levels (the
+// single-level ancestor returned lit outside; the clipmap tries the
+// bigger box - UE's LODOffset fallback in spirit). Returns -1.0 from
+// a level = outside, try coarser.
+float shadowFactorLevel(float3 worldPos, float3 nrm, float ndl, uint base,
+                        Sampler2D map0, Sampler2D map1, Sampler2D map2,
+                        uint level)
 {
-    const float4 p4 = shadowParams[4];
-    if (p4.w < 0.5) return 1.0;  // shadows disabled
-    const float4x4 lvp = float4x4(shadowParams[0], shadowParams[1],
-                                  shadowParams[2], shadowParams[3]);
+    const float4 p4 = shadowParams[base + 1u];
+    if (p4.w < 0.5) return -1.0;  // level disabled
+    const float4x4 lvp = float4x4(shadowParams[base + 2u],
+                                  shadowParams[base + 3u],
+                                  shadowParams[base + 4u],
+                                  shadowParams[base + 5u]);
     const float4 clip = lvp[0] * worldPos.x + lvp[1] * worldPos.y +
                         lvp[2] * worldPos.z + lvp[3];
     if (abs(clip.x) > 1.0 || abs(clip.y) > 1.0 || clip.z < 0.0 ||
         clip.z > 1.0)
-        return 1.0;  // outside the shadow frustum: unshadowed
-    // Normal-offset bias: lift the sample point along the surface
-    // normal by a couple of world texels (acne fix; UE's VSM analog
-    // scales with camera distance instead - ours is a fixed ortho map).
+        return -1.0;  // outside this level's frustum: try coarser
+    // Normal-offset bias: lift along the normal by two world texels
+    // (texelWorld rides the level, so coarser levels lift more -
+    // UE's per-level bias scaling).
     const float3 lifted = worldPos + nrm * (p4.z * 2.0);
     const float4 clipN = lvp[0] * lifted.x + lvp[1] * lifted.y +
                          lvp[2] * lifted.z + lvp[3];
     const float2 uv = clipN.xy * 0.5 + 0.5;
     // UE ComputeDepthBiasDirectionalSpot: slope = tan(angle to light)
-    // = sqrt(1-NoL^2)/NoL clamped; bias = constant + slopeScale*slope,
-    // applied to the OCCLUDER side (equivalently subtracted from the
-    // receiver here).
+    // = sqrt(1-NoL^2)/NoL clamped; bias = constant + slopeScale*slope.
     const float slope =
         clamp(sqrt(saturate(1.0 - ndl * ndl)) / max(ndl, 1e-4), 0.0, 1.0);
     const float bias = p4.y + slope * 0.01;
     const float depth = clipN.z - bias;
     const float texel = 1.0 / p4.x;
-    // Soft transition: the ramp spans 1/transitionScale of normalized
-    // depth (UE r.Shadow.TransitionScale=60 over subject ranges far
-    // larger than our 40m box; 400 keeps a comparable world width).
     const float transitionScale = 400.0;
+    float sv = 1.0;
     float lit = 0.0;
     for (int dy = -1; dy <= 1; ++dy)
         for (int dx = -1; dx <= 1; ++dx)
         {
-            const float s = shadowMap.SampleLevel(
-                clamp(uv + float2(float(dx), float(dy)) * texel,
-                      float2(0.0), float2(1.0)), 0.0).r;
-            lit += saturate((s - depth) * transitionScale + 1.0);
+            const float2 suv = clamp(
+                uv + float2(float(dx), float(dy)) * texel,
+                float2(0.0), float2(1.0));
+            // Sampler bindings are not indexable - pick the map once
+            // per tap through an if-chain (3-deep, uniform per pixel).
+            if (level == 0u)
+                sv = map0.SampleLevel(suv, 0.0).r;
+            else if (level == 1u)
+                sv = map1.SampleLevel(suv, 0.0).r;
+            else
+                sv = map2.SampleLevel(suv, 0.0).r;
+            lit += saturate((sv - depth) * transitionScale + 1.0);
         }
     return lit / 9.0;
+}
+
+float shadowFactor(float3 worldPos, float3 nrm, float ndl)
+{
+    const float4 header = shadowParams[0];
+    if (header.z < 0.5) return 1.0;  // shadows disabled
+    const uint count = uint(header.y);
+    const float3 origin = shadowParams[1].xyz;
+    const float d = max(length(worldPos - origin), 1e-4);
+    int level = int(floor(log2(d) - header.x));  // header.x = log2(extent0)
+    level = clamp(level, 0, int(count) - 1);
+    for (uint lv = uint(level); lv < count; ++lv)
+    {
+        const float f = shadowFactorLevel(worldPos, nrm, ndl, 2u + lv * 6u,
+                                          shadowMap0, shadowMap1, shadowMap2,
+                                          lv);
+        if (f >= 0.0) return f;
+    }
+    return 1.0;
 }
 
 // GGX terms (minimal PBR; roughness/metallic come from the material

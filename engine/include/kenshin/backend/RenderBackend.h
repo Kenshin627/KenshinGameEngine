@@ -313,7 +313,7 @@ class IRenderBackend {
   virtual void drawShadowDecode(u32 pipeline, const u32* bufferHandles,
                                 u32 bufferCount, const void* push,
                                 usize pushBytes, u32 width, u32 height,
-                                bool shadowEnabled) = 0;
+                                u32 level, bool shadowEnabled) = 0;
   /// M4.2 hardware raster path: VS+FS with ZERO attachments (the PS
   /// writes the VisBuffer SSBO atomically). Same info shape as the
   /// fullscreen pipeline (vsMain/psMain from one .slang file).
