@@ -280,6 +280,7 @@ std::string findShaderRoot() {
 struct VgDebugState {
   int viewMode = 0;  // DecodeView as int (0..6)
   kenshin::u32 visibleClusters = 0, cutTris = 0, pxWrites = 0;
+  kenshin::u32 bfCulls = 0, nearClips = 0;  // M9.1 Stage B ground debug
   kenshin::u32 occCulled = 0;
   kenshin::u32 revived = 0;
   kenshin::u32 hwClusters = 0;
@@ -486,13 +487,15 @@ int main(int argc, char** argv) {
       // fine for the shadow demo; the rebasing is the documented v1
       // multi-mesh limitation).
       kenshin::u32 groundMeshId = 0xFFFFFFFFu;
+      bool groundPaged = false;
       if (!args.ground.empty()) {
         demo::KgeoPreview groundPreview;
         std::string groundLog;
         if (demo::loadKgeo(args.ground, groundPreview, groundLog)) {
-          if (groundPreview.dag.paged)
+          if (groundPreview.dag.paged) {
             groundMeshId = vgScene.addMeshPaged(groundPreview.dag);
-          else
+            groundPaged = true;
+          } else
             groundMeshId = vgScene.addMesh(groundPreview.dag);
           if (groundMeshId == 0xFFFFFFFFu) {
             KENSHIN_ERROR("[main] ground asset rejected: rebuild {}",
@@ -530,6 +533,12 @@ int main(int argc, char** argv) {
           return 1;
         }
         streamer->addAsset(vgMeshId, args.kgeo);
+        // The ground mesh's pages stream from ITS file too - without
+        // the asset entry the streamer marks its pages wanted but can
+        // never read them (clusters skip-resident forever, the M9.1
+        // ground-invisible bug).
+        if (groundMeshId != 0xFFFFFFFFu && groundPaged)
+          streamer->addAsset(groundMeshId, args.ground);
         // First frame coarse: the leading (coarsest) pages resident
         // before the loop starts - no black flash while the async
         // thread spins up.
@@ -543,10 +552,15 @@ int main(int argc, char** argv) {
       // logged no-op for old scripts).
       {
         const kenshin::renderer::VgMeshRange& mesh = vgScene.meshes()[vgMeshId];
-        const auto makeInst = [&](const glm::mat4& model) {
+        // meshId + mesh bounds must come from the INSTANCE'S mesh - the
+        // ground uses groundMeshId; a hardcoded vgMeshId renders a
+        // second copy of the first mesh instead (the M9.1 ground bug).
+        const auto makeInstFor = [&](kenshin::u32 id, const glm::mat4& model) {
+          const kenshin::renderer::VgMeshRange& m =
+              vgScene.meshes()[id];
           kenshin::renderer::CullGpuInstance inst;
           inst.model = model;
-          inst.meshId = vgMeshId;
+          inst.meshId = id;
           // WORLD bounds sphere (the cull input): center transformed,
           // radius scaled by the max column length - the same derivation
           // VirtualGeometryScene::setInstances applies. Without this the
@@ -558,11 +572,14 @@ int main(int argc, char** argv) {
               std::max({glm::length(model[0]), glm::length(model[1]),
                         glm::length(model[2])});
           inst.bounds =
-              glm::vec4(glm::vec3(model * glm::vec4(mesh.boundsSphere.x,
-                                                    mesh.boundsSphere.y,
-                                                    mesh.boundsSphere.z, 1.0f)),
-                        mesh.boundsSphere.w * scale);
+              glm::vec4(glm::vec3(model * glm::vec4(m.boundsSphere.x,
+                                                    m.boundsSphere.y,
+                                                    m.boundsSphere.z, 1.0f)),
+                        m.boundsSphere.w * scale);
           return inst;
+        };
+        const auto makeInst = [&](const glm::mat4& model) {
+          return makeInstFor(vgMeshId, model);
         };
         if (args.wall) {
           // Big-occluder scene (the UE5-faithful occlusion demo): one
@@ -633,10 +650,11 @@ int main(int argc, char** argv) {
           if (groundMeshId != 0xFFFFFFFFu) {
             // Centered between the default camera target (origin) and
             // the mid instance - the 40m span covers everything the
-            // default and acceptance views look at.
+            // default and acceptance views look at. Z-up drop like the
+            // default branch.
             const glm::mat4 gm =
-                glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, -1.5f, 0.0f));
-            chainInstances.push_back(makeInst(gm));
+                glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 0.0f, -1.5f));
+            chainInstances.push_back(makeInstFor(groundMeshId, gm));
             vgInsts.push_back({gm, groundMeshId});
           }
           vgScene.setInstances(vgInsts);
@@ -645,9 +663,11 @@ int main(int argc, char** argv) {
           std::vector<kenshin::renderer::VgInstance> vgInsts = {
               kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}};
           if (groundMeshId != 0xFFFFFFFFu) {
+            // Z-up: ground_z.kgeo is a z=0 plane; drop it below the
+            // knot (radius ~1.5) so the knot sits on it.
             const glm::mat4 gm =
-                glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -1.5f, 0.0f));
-            chainInstances.push_back(makeInst(gm));
+                glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -1.5f));
+            chainInstances.push_back(makeInstFor(groundMeshId, gm));
             vgInsts.push_back({gm, groundMeshId});
           }
           vgScene.setInstances(vgInsts);
@@ -997,6 +1017,8 @@ int main(int argc, char** argv) {
             vgDebug.occCulled = cs[8];
             vgDebug.revived = cs[9];
             vgDebug.hwClusters = cs[12];
+            vgDebug.bfCulls = cs[6];
+            vgDebug.nearClips = cs[7];
             vgDebug.workItems = cs[1];
             vgDebug.tooCoarse = cs[3];
             vgDebug.srcTooCoarse = cs[4];
@@ -1042,14 +1064,22 @@ int main(int argc, char** argv) {
                                  args.hasCam ? args.camTarget[2] : 0.0f);
           constexpr float kExtent0 = 12.0f;
           constexpr float kDepth = 40.0f;
+          // Z-up world: the light view's up rides the Z axis (a
+          // horizontal up sits near-parallel to L for low lights).
           const glm::vec3 up =
-              std::abs(L.y) > 0.95f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+              std::abs(L.z) > 0.95f ? glm::vec3(1, 0, 0) : glm::vec3(0, 0, 1);
           shadowLevelCount = kenshin::u32(vgDebug.shadowLevels);
           shadowOrigin = center;
           for (kenshin::u32 lv = 0; lv < shadowLevelCount; ++lv) {
             const float extent = kExtent0 * float(1 << lv);
+            // The light eye rides the LIGHT'S side of the scene (+L):
+            // from the far side (-L) the single-sided ground is
+            // backface-culled out of the shadow map AND every occluder
+            // above it is farther from the eye than the ground itself -
+            // the ground can never test as shadowed (the M9.1 missing
+            // ground shadow).
             const glm::mat4 lightView =
-                glm::lookAtRH(center - L * (kDepth * 0.5f), center, up);
+                glm::lookAtRH(center + L * (kDepth * 0.5f), center, up);
             glm::mat4 lightProj =
                 glm::orthoRH_ZO(-extent, extent, -extent, extent, 0.1f, kDepth);
             lightProj[1][1] *= -1.0f;  // the engine's Y-flip convention
@@ -1242,9 +1272,10 @@ int main(int argc, char** argv) {
       if (probeValid)
         KENSHIN_INFO(
             "[rasthist] b0 {} b1 {} b2_4 {} b5_16 {} b17_64 {} b64p {} "
-            "pix {} tris {}",
+            "pix {} tris {} bfcull {} nearclip {}",
             probeHist[0], probeHist[1], probeHist[2], probeHist[3],
-            probeHist[4], probeHist[5], probeHist[6], probeHist[7]);
+            probeHist[4], probeHist[5], probeHist[6], probeHist[7],
+            vgDebug.bfCulls, vgDebug.nearClips);
     }
 
     if (exiting) {

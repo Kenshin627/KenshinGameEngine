@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
   std::string albedo;  // --albedo <path>: 24-bit BMP, copied next to -o
   float kd[3] = {-1.0f, -1.0f, -1.0f};  // --kd r g b
   float rough = -1.0f, metal = -1.0f;   // --rough f / --metal f
+  bool debugDump = false;               // --debug-dump: per-level DAG stats
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
       output = argv[++i];
@@ -54,6 +55,8 @@ int main(int argc, char** argv) {
       rough = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--metal") == 0 && i + 1 < argc)
       metal = std::atof(argv[++i]);
+    else if (std::strcmp(argv[i], "--debug-dump") == 0)
+      debugDump = true;
     else
       input = argv[i];
   }
@@ -155,6 +158,60 @@ int main(int argc, char** argv) {
     kenshin::log::shutdown();
     return 1;
   }
+  if (debugDump) {
+    // Per-level winding/size census: cross((v1-v0),(v2-v0)) sign tells
+    // whether each triangle's geometric winding faces +Z or -Z; a flat
+    // z=0 plane must be 100% one sign per consistently-wound input.
+    const int maxLevel = 64;
+    std::vector<kenshin::u32> cl(maxLevel, 0), tr(maxLevel, 0),
+        up(maxLevel, 0), dn(maxLevel, 0), dg(maxLevel, 0);
+    std::vector<double> maxEdge(maxLevel, 0.0), sumEdge(maxLevel, 0.0);
+    for (kenshin::u32 ci = 0; ci < dag.clusters.size(); ++ci) {
+      const auto& c = dag.clusters[ci];
+      const int lvl = std::clamp(dag.groups[c.group].lodLevel, 0, maxLevel - 1);
+      ++cl[lvl];
+      for (kenshin::u32 t = 0; t + 2 < c.indexCount; t += 3) {
+        const kenshin::u32 i0 = dag.indices[c.indexOffset + t],
+                           i1 = dag.indices[c.indexOffset + t + 1],
+                           i2 = dag.indices[c.indexOffset + t + 2];
+        // indices are cluster-local; add the cluster's vertex slice base
+        const glm::vec3 p0(
+            dag.positions[size_t(c.vertexOffset + i0) * 3 + 0],
+            dag.positions[size_t(c.vertexOffset + i0) * 3 + 1],
+            dag.positions[size_t(c.vertexOffset + i0) * 3 + 2]);
+        const glm::vec3 p1(
+            dag.positions[size_t(c.vertexOffset + i1) * 3 + 0],
+            dag.positions[size_t(c.vertexOffset + i1) * 3 + 1],
+            dag.positions[size_t(c.vertexOffset + i1) * 3 + 2]);
+        const glm::vec3 p2(
+            dag.positions[size_t(c.vertexOffset + i2) * 3 + 0],
+            dag.positions[size_t(c.vertexOffset + i2) * 3 + 1],
+            dag.positions[size_t(c.vertexOffset + i2) * 3 + 2]);
+        const glm::vec3 n = glm::cross(p1 - p0, p2 - p0);
+        const float area2 = glm::length(n);
+        ++tr[lvl];
+        if (area2 < 1e-9f)
+          ++dg[lvl];
+        else if (n.z > 0)
+          ++up[lvl];
+        else
+          ++dn[lvl];
+        const float e01 = glm::length(p1 - p0), e12 = glm::length(p2 - p1),
+                    e20 = glm::length(p0 - p2);
+        const float em = std::max(e01, std::max(e12, e20));
+        maxEdge[lvl] = std::max(maxEdge[lvl], double(em));
+        sumEdge[lvl] += (e01 + e12 + e20) / 3.0;
+      }
+    }
+    KENSHIN_INFO("[dbg] level clusters tris upPct dnPct degPct maxEdge avgEdge");
+    for (int l = 0; l < maxLevel; ++l)
+      if (tr[l] > 0)
+        KENSHIN_INFO("[dbg] {:>5} {:>8} {:>7} {:>5.1f} {:>5.1f} {:>5.1f} "
+                     "{:>9.2f} {:>8.3f}",
+                     l, cl[l], tr[l], 100.0 * up[l] / tr[l],
+                     100.0 * dn[l] / tr[l], 100.0 * dg[l] / tr[l], maxEdge[l],
+                     sumEdge[l] / tr[l]);
+  }
   // M8.2: the single-material table (v1). OBJ/MTL provides the
   // defaults; the CLI overrides win. The albedo reference is stored as
   // a bare FILE NAME - the runtime resolves it against the .kgeo's
@@ -214,7 +271,7 @@ int main(int argc, char** argv) {
       const auto pct = [&](double p) {
         return spans.empty() ? 0
                              : spans[std::min<usize>(spans.size() - 1,
-                                                     usize(p * spans.size()))];
+                                                     size_t(p * spans.size()))];
       };
       usize over31 = 0;
       for (u32 s : spans) over31 += s > 31;
@@ -243,7 +300,7 @@ int main(int argc, char** argv) {
       std::vector<u32> morton(n), remap(n), inv(n);
       glm::vec3 mn(FLT_MAX), mx(-FLT_MAX);
       for (u32 v = 0; v < n; ++v) {
-        const f32* p = dag.positions.data() + usize(cl.vertexOffset + v) * 3;
+        const f32* p = dag.positions.data() + size_t(cl.vertexOffset + v) * 3;
         mn = glm::min(mn, glm::vec3(p[0], p[1], p[2]));
         mx = glm::max(mx, glm::vec3(p[0], p[1], p[2]));
       }
@@ -262,7 +319,7 @@ int main(int argc, char** argv) {
       };
       for (u32 v = 0; v < n; ++v) {
         morton[v] =
-            mortonOf(dag.positions.data() + usize(cl.vertexOffset + v) * 3);
+            mortonOf(dag.positions.data() + size_t(cl.vertexOffset + v) * 3);
         remap[v] = v;
       }
       std::sort(remap.begin(), remap.end(),
@@ -273,12 +330,12 @@ int main(int argc, char** argv) {
       // numbering - renumbers connectivity along a spatial walk.
       std::vector<u32> triOrder(triN), tMorton(triN), invT(n);
       for (u32 t = 0; t < triN; ++t) {
-        const u32 i0 = dag.indices[usize(cl.indexOffset) + t * 3 + 0];
-        const u32 i1 = dag.indices[usize(cl.indexOffset) + t * 3 + 1];
-        const u32 i2 = dag.indices[usize(cl.indexOffset) + t * 3 + 2];
+        const u32 i0 = dag.indices[size_t(cl.indexOffset) + t * 3 + 0];
+        const u32 i1 = dag.indices[size_t(cl.indexOffset) + t * 3 + 1];
+        const u32 i2 = dag.indices[size_t(cl.indexOffset) + t * 3 + 2];
         glm::vec3 c(0.0f);
         for (u32 i : {i0, i1, i2}) {
-          const f32* p = dag.positions.data() + usize(cl.vertexOffset + i) * 3;
+          const f32* p = dag.positions.data() + size_t(cl.vertexOffset + i) * 3;
           c += glm::vec3(p[0], p[1], p[2]);
         }
         const glm::vec3 ctr = c / 3.0f;
@@ -291,7 +348,7 @@ int main(int argc, char** argv) {
         u32 next = 0;
         for (u32 t : triOrder)
           for (int k = 0; k < 3; ++k) {
-            const u32 i = dag.indices[usize(cl.indexOffset) + t * 3 + k];
+            const u32 i = dag.indices[size_t(cl.indexOffset) + t * 3 + k];
             if (invT[i] == 0u) {
               // 0 is ambiguous as "unassigned"; use +1 sentinel.
               invT[i] = next + 1;
@@ -303,9 +360,9 @@ int main(int argc, char** argv) {
 
       u32 worst = 0, worstM = 0, worstT = 0;
       for (u32 t = 0; t + 2 < cl.indexCount; t += 3) {
-        const u32 i0 = dag.indices[usize(cl.indexOffset) + t + 0];
-        const u32 i1 = dag.indices[usize(cl.indexOffset) + t + 1];
-        const u32 i2 = dag.indices[usize(cl.indexOffset) + t + 2];
+        const u32 i0 = dag.indices[size_t(cl.indexOffset) + t + 0];
+        const u32 i1 = dag.indices[size_t(cl.indexOffset) + t + 1];
+        const u32 i2 = dag.indices[size_t(cl.indexOffset) + t + 2];
         const u32 s = std::max({i0, i1, i2}) - std::min({i0, i1, i2});
         spans.push_back(s);
         worst = std::max(worst, s);

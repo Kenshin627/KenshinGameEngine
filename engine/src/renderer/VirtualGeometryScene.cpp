@@ -23,11 +23,16 @@ namespace {
 // (in setInstances) writes 80B: mat4 + meshId + 12B pad. The S4.2+
 // shaders mirror these layouts - single declaration point is the header.
 
-void appendGpuCluster(std::vector<u8>& out, const geometry::DagCluster& c) {
-  packGpuCluster(out, c.group, c.boundsSphere.x, c.boundsSphere.y,
+// groupBase rebases the dag-local group ids into the shared group
+// table: the shader's fireable() reads clusters[c].group and
+// .refinedGroup as GLOBAL indices (multi-mesh LOD correctness).
+void appendGpuCluster(std::vector<u8>& out, const geometry::DagCluster& c,
+                      u32 groupBase) {
+  packGpuCluster(out, c.group + groupBase, c.boundsSphere.x, c.boundsSphere.y,
                  c.boundsSphere.z, c.boundsSphere.w, c.error, c.parentError,
                  c.vertexOffset, c.vertexCount, c.indexOffset, c.indexCount,
-                 c.refinedGroup);
+                 c.refinedGroup < 0 ? c.refinedGroup
+                                    : i32(u32(c.refinedGroup) + groupBase));
 }
 
 void appendGpuGroup(std::vector<u8>& out, const geometry::DagGroup& g,
@@ -36,6 +41,28 @@ void appendGpuGroup(std::vector<u8>& out, const geometry::DagGroup& g,
   packGpuGroup(out, g.boundsSphere.x, g.boundsSphere.y, g.boundsSphere.z,
                g.boundsSphere.w, g.maxError, g.simplifyError,
                static_cast<u32>(g.lodLevel));
+}
+
+/// M5.2: append one dag's group BVH8 with its dag-local references
+/// rebased into the shared tables - internal children are node indices
+/// (+nodeBase), leaf children[0] is a group index (+groupBegin). A raw
+/// copy would make mesh 1+'s traversal descend into mesh 0's subtree
+/// (LOD decisions from the wrong hierarchy - under-selection, the
+/// multi-mesh ground bug).
+void appendHierarchy(std::vector<u8>& out,
+                     const std::vector<geometry::DagHierarchyNode>& nodes,
+                     u32 nodeBase, u32 groupBegin) {
+  for (const auto& n : nodes) {
+    geometry::DagHierarchyNode rebased = n;
+    if (n.childCount == 0)
+      rebased.children[0] += groupBegin;
+    else
+      for (u32 k = 0; k < n.childCount && k < 8; ++k)
+        rebased.children[k] += nodeBase;
+    out.insert(out.end(), reinterpret_cast<const u8*>(&rebased),
+               reinterpret_cast<const u8*>(&rebased) +
+                   sizeof(geometry::DagHierarchyNode));
+  }
 }
 
 /// Upload (or replace) one pool buffer; verify with a CRC round trip.
@@ -106,24 +133,22 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
     geometry::DagCluster rebased = cluster;
     rebased.vertexOffset += vertexBase;
     rebased.indexOffset += indexBase;
-    appendGpuCluster(m_clusterData, rebased);
+    appendGpuCluster(m_clusterData, rebased, range.groupBegin);
   }
   m_clusterCount += static_cast<u32>(dag.clusters.size());
   range.clusterEnd = m_clusterCount;
 
-  // M5.2: the group BVH8 (built in M5.1) - flat 64B nodes appended to
-  // the shared hierarchy pool; the mesh's root is rebased by the node
-  // base. Group -> cluster spans come from the contiguity invariant
-  // (verifyDagInvariants enforces it; the traversal never needs the
-  // member indices). Cluster indices rebased into the shared pool.
+  // M5.2: the group BVH8 (built in M5.1) - nodes appended to the shared
+  // hierarchy pool with dag-local children/group refs rebased; the
+  // mesh's root is rebased by the node base. Group -> cluster spans
+  // come from the contiguity invariant (verifyDagInvariants enforces
+  // it; the traversal never needs the member indices). Cluster indices
+  // rebased into the shared pool.
   if (!dag.hierarchyNodes.empty()) {
     const u32 nodeBase = static_cast<u32>(m_hierarchyData.size() /
                                           sizeof(geometry::DagHierarchyNode));
-    m_hierarchyData.insert(
-        m_hierarchyData.end(),
-        reinterpret_cast<const u8*>(dag.hierarchyNodes.data()),
-        reinterpret_cast<const u8*>(dag.hierarchyNodes.data()) +
-            dag.hierarchyNodes.size() * sizeof(geometry::DagHierarchyNode));
+    appendHierarchy(m_hierarchyData, dag.hierarchyNodes, nodeBase,
+                    range.groupBegin);
     range.hierarchyRoot = dag.hierarchyRoot == 0xFFFFFFFFu
                               ? 0xFFFFFFFFu
                               : dag.hierarchyRoot + nodeBase;
@@ -218,8 +243,10 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
 
   // Cluster table: offsets stay page-local (the shaders add the page's
   // slot-strided section base). clusterPage rebases by the page base.
+  // Group ids rebase into the shared group table (fireable reads them
+  // as global indices).
   for (const auto& cluster : dag.clusters)
-    appendGpuCluster(m_clusterData, cluster);
+    appendGpuCluster(m_clusterData, cluster, range.groupBegin);
   m_clusterCount += static_cast<u32>(dag.clusters.size());
   range.clusterEnd = m_clusterCount;
   const u32 pageBase = m_pageCount;
@@ -260,11 +287,8 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   if (!dag.hierarchyNodes.empty()) {
     const u32 nodeBase = static_cast<u32>(m_hierarchyData.size() /
                                           sizeof(geometry::DagHierarchyNode));
-    m_hierarchyData.insert(
-        m_hierarchyData.end(),
-        reinterpret_cast<const u8*>(dag.hierarchyNodes.data()),
-        reinterpret_cast<const u8*>(dag.hierarchyNodes.data()) +
-            dag.hierarchyNodes.size() * sizeof(geometry::DagHierarchyNode));
+    appendHierarchy(m_hierarchyData, dag.hierarchyNodes, nodeBase,
+                    range.groupBegin);
     range.hierarchyRoot = dag.hierarchyRoot == 0xFFFFFFFFu
                               ? 0xFFFFFFFFu
                               : dag.hierarchyRoot + nodeBase;
