@@ -813,6 +813,23 @@ int main(int argc, char** argv) {
   // M4.3 fallback).
   kenshin::renderer::VisBufferChain shadowChains[3];  // M9.1 Stage B
   bool shadowChainReady = false;
+  // M9.1 Stage C pre-work: the shadow CONTENT cache key (UE's
+  // FClipmapCacheKey semantics - VirtualShadowMapCacheManager.h: a
+  // directional light's clipmap invalidates on light-direction/level
+  // changes, plus primitive-visibility transitions). Our analogue of
+  // the primitive trigger is streaming residency (a newly resident
+  // page can close holes in the cached maps); the LOD threshold rides
+  // along because our cut is threshold-driven (UE's page LOD is not).
+  // While the key is unchanged the clipmap chains + decodes are
+  // skipped entirely - the persistent R32F maps carry the content.
+  struct ShadowCacheKey {
+    glm::vec3 L{0.0f, 0.0f, -2.0f};  // impossible direction = dirty
+    kenshin::f32 threshold = -1.0f;
+    kenshin::u32 levels = 0, residentPages = 0xFFFFFFFFu;
+    kenshin::u32 cullMode = 0xFFFFFFFFu, hwMode = 0xFFFFFFFFu;
+    bool valid = false;
+  } shadowKey;
+  kenshin::u32 shadowChainStats[3][16] = {};
   bool chainReady = false;
   bool decodeReady = false;  // pipeline is lazy: needs the swapchain format
   // Coverage histogram state (only with --raster-probe; the snapshot
@@ -1070,6 +1087,19 @@ int main(int argc, char** argv) {
               std::abs(L.z) > 0.95f ? glm::vec3(1, 0, 0) : glm::vec3(0, 0, 1);
           shadowLevelCount = kenshin::u32(vgDebug.shadowLevels);
           shadowOrigin = center;
+          // UE FClipmapCacheKey: light direction + level count, plus
+          // our primitive-visibility analogues (streaming residency)
+          // and the LOD threshold. Unchanged key = the cached R32F
+          // maps stay valid; skip the chains + decodes wholesale.
+          const kenshin::u32 residentNow =
+              streamer ? streamer->residentPages() : 0xFFFFFFFFu;
+          const bool shadowDirty =
+              !shadowKey.valid ||
+              glm::distance(L, shadowKey.L) > 1e-4f ||
+              vgDebug.pixelThreshold != shadowKey.threshold ||
+              shadowLevelCount != shadowKey.levels ||
+              residentNow != shadowKey.residentPages ||
+              ci.cullMode != shadowKey.cullMode || ci.hwMode != shadowKey.hwMode;
           for (kenshin::u32 lv = 0; lv < shadowLevelCount; ++lv) {
             const float extent = kExtent0 * float(1 << lv);
             // The light eye rides the LIGHT'S side of the scene (+L):
@@ -1086,11 +1116,18 @@ int main(int argc, char** argv) {
             shadowLevels[lv].viewProj = lightProj * lightView;
             shadowLevels[lv].texelWorld = (2.0f * extent) / 2048.0f;
 
+            if (!shadowDirty) continue;  // cached maps carry the content
+
             kenshin::renderer::ChainInputs si{};
             si.view = lightView;
             si.proj = lightProj;
             si.nearZ = 0.1f;
-            si.camPos = center;
+            // The EYE, not the look-at center: the routing guard and the
+            // LOD distances measure from camPos - with the center, every
+            // cluster near the target has its bounds sphere containing
+            // camPos (dist clamps to 0.1) and the HW near-guard rejects
+            // it (the shadow hw=0 case).
+            si.camPos = center + L * (kDepth * 0.5f);
             si.pixelThreshold = vgDebug.pixelThreshold * 2.0f;  // D11.5 bias
             si.worldPerPixel = (2.0f * extent) / 2048.0f;
             si.width = 2048;
@@ -1098,7 +1135,13 @@ int main(int argc, char** argv) {
             kenshin::renderer::extractFrustumPlanes(shadowLevels[lv].viewProj,
                                                     si.planes);
             si.occlusionEnabled = false;  // HZB is main-view; shadows skip
-            si.hwMode = 0;
+            // UE-faithful routing: UE's DepthOnly/shadow raster runs the
+            // dual path with routing (NaniteCullRaster: HardwareThen-
+            // Software for shadow maps), so giant occluder triangles go
+            // to HW instead of SW-scanning the whole 2048^2 map. The
+            // main chain keeps its all-SW default; --no-hw / --force-hw
+            // keep their A/B meaning here.
+            si.hwMode = args.noHw ? 0u : (args.forceHw ? 2u : 1u);
             si.cullMode = ci.cullMode;
             si.rasterMode = 1;
             shadowChains[lv].execute(*vgBackend, si);
@@ -1125,9 +1168,20 @@ int main(int argc, char** argv) {
                   shadowChains[lv].maxPairs(), lv, true);
             }
           }
+          if (shadowDirty) {
+            shadowKey.L = L;
+            shadowKey.threshold = vgDebug.pixelThreshold;
+            shadowKey.levels = shadowLevelCount;
+            shadowKey.residentPages = residentNow;
+            shadowKey.cullMode = ci.cullMode;
+            shadowKey.hwMode = ci.hwMode;
+            shadowKey.valid = true;
+          }
         } else if (shadowPhase) {
           // Disabled this frame: still touch a target so lighting's
-          // sampling reads a fully-lit map (clear-to-one path).
+          // sampling reads a fully-lit map (clear-to-one path). The
+          // clear destroys the cached content - re-render on toggle-on.
+          shadowKey.valid = false;
           decodePass.drawShadow(*vgBackend, glm::mat4(1.0f), *vgScene, {}, 16,
                                 16, 0, 0, 0, 0, 0, 0, false);
         }
@@ -1276,6 +1330,26 @@ int main(int argc, char** argv) {
             probeHist[0], probeHist[1], probeHist[2], probeHist[3],
             probeHist[4], probeHist[5], probeHist[6], probeHist[7],
             vgDebug.bfCulls, vgDebug.nearClips);
+      // Shadow clipmap content stats (Stage C pre-work): per level the
+      // cut triangles + pixel writes of the LAST render; while cached
+      // the values are stale by design - that is the cache working.
+      if (chainReady && shadowChainReady) {
+        for (kenshin::u32 lv = 0; lv < 3; ++lv)
+          if (!shadowChains[lv].readStatsMapped(*vgBackend,
+                                                shadowChainStats[lv]))
+            break;
+        KENSHIN_INFO(
+            "[shadowstats] cached {} lv0 tris {} px {} hw {} pend {} | "
+            "lv1 tris {} px {} pend {} | lv2 tris {} px {} pend {}",
+            shadowKey.valid ? 1 : 0, shadowChainStats[0][11],
+            shadowChainStats[0][5] + shadowChainStats[0][10],
+            shadowChainStats[0][12], shadowChainStats[0][15],
+            shadowChainStats[1][11],
+            shadowChainStats[1][5] + shadowChainStats[1][10],
+            shadowChainStats[1][15], shadowChainStats[2][11],
+            shadowChainStats[2][5] + shadowChainStats[2][10],
+            shadowChainStats[2][15]);
+      }
     }
 
     if (exiting) {

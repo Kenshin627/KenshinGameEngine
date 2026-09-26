@@ -206,7 +206,13 @@ void emitCluster(uint2 item, float4x4 model) {
       const float sphereR = cluster.bounds.w * maxScale;
       const float dist = max(distance(c, params[0].xyz) - sphereR, 0.1);
       if (dist < sphereR + params[1].z) hw = false;
-      const float pxPerUnit = (params[6].z * 0.5) / (max(params[6].w, 1e-6) * dist);
+      // [6].w > 0 = perspective tanHalf; < 0 = -extentY for ortho
+      // chains (shadow clipmaps) - px/unit is distance-free there
+      // (dividing by dist never routed: the M9.1 shadow hw=0 case).
+      const float pxPerUnit =
+          params[6].w > 0.0
+              ? (params[6].z * 0.5) / (max(params[6].w, 1e-6) * dist)
+              : (params[6].z * 0.5) / max(-params[6].w, 1e-6);
       const float edgePx = aabbs[3u * item.y + 2u].x * maxScale * pxPerUnit;
       hw = hw && edgePx >= params[7].y;
     }

@@ -509,9 +509,16 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   for (int c = 0; c < 4; ++c)
     cullParams[2 + c] =
         occActive ? m_prevVP[prevSlot][c] : glm::vec4(c == 0 ? 1.0f : 0.0f);
+  // [6].w sign picks the routing test's px/unit formula: positive =
+  // perspective tanHalf (scales with 1/dist), negative = -extentY for
+  // ORTHO chains (the M9.1 shadow clipmaps) where px/unit is
+  // distance-free. params[6].w is read ONLY by that test, so the sign
+  // encoding is contained (perspective writes stay bit-identical).
+  const bool orthoProj = in.proj[2][3] == 0.0f;  // GLM: w-row only in
+                                                 // perspective
   cullParams[6] =
       glm::vec4(occActive ? 1.0f : 0.0f, f32(in.width), f32(in.height),
-                1.0f / std::abs(in.proj[1][1]));  // tanHalf
+                (orthoProj ? -1.0f : 1.0f) / std::abs(in.proj[1][1]));
   cullParams[7] = glm::vec4(f32(in.hwMode), in.hwThresholdPx, 0.0f, 0.0f);
   std::memcpy(backend.mappedPtr(m_cullParams[slot]), cullParams,
               sizeof(cullParams));

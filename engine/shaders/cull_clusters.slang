@@ -262,8 +262,14 @@ bool occluded(uint2 item, float4x4 model)
       // varyings go NaN on w<=0 corners and its PS drops the whole
       // triangle (holes at close range).
       if (dist < sphereR + params[1].z) hw = false;
+      // [6].w > 0 = perspective tanHalf (px/unit falls with distance);
+      // < 0 = -extentY for ortho chains (shadow clipmaps) - px/unit is
+      // distance-free there; dividing by dist under-estimated edgePx
+      // ~dist-fold and never routed (the M9.1 shadow hw=0 case).
       const float pxPerUnit =
-          (params[6].z * 0.5) / (max(params[6].w, 1e-6) * dist);
+          params[6].w > 0.0
+              ? (params[6].z * 0.5) / (max(params[6].w, 1e-6) * dist)
+              : (params[6].z * 0.5) / max(-params[6].w, 1e-6);
       const float edgePx =
           aabbs[3u * item.y + 2u].x * maxScale * pxPerUnit;
       hw = hw && edgePx >= params[7].y;
