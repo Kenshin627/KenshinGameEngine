@@ -58,7 +58,8 @@ class VulkanBackend final : public IRenderBackend {
   u32 createShadowDecodePipeline(const FullscreenPipelineInfo& info) override;
   void drawShadowDecode(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                         const void* push, usize pushBytes, u32 width,
-                        u32 height, u32 level, bool shadowEnabled) override;
+                        u32 height, u32 level, bool shadowEnabled,
+                        const u32 scissorRect[4] = nullptr) override;
   u32 createNullPipeline(const FullscreenPipelineInfo& info) override;
   void destroyNullPipeline(u32 pipeline) override;
   void drawNullIndirect(u32 pipeline, const u32* bufferHandles, u32 bufferCount,

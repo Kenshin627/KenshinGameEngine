@@ -310,10 +310,14 @@ class IRenderBackend {
   /// so lighting reads a cleared-to-one map (fully lit).
   virtual u32 createShadowDecodePipeline(
       const FullscreenPipelineInfo& info) = 0;
+  /// scissorRect = inclusive pixel bounds [x0,y0,x1,y1] limiting the
+  /// rewrite (Stage C page cache: outside LOADs its prior content);
+  /// nullptr = the whole target, CLEARed to far (1.0).
   virtual void drawShadowDecode(u32 pipeline, const u32* bufferHandles,
                                 u32 bufferCount, const void* push,
                                 usize pushBytes, u32 width, u32 height,
-                                u32 level, bool shadowEnabled) = 0;
+                                u32 level, bool shadowEnabled,
+                                const u32 scissorRect[4] = nullptr) = 0;
   /// M4.2 hardware raster path: VS+FS with ZERO attachments (the PS
   /// writes the VisBuffer SSBO atomically). Same info shape as the
   /// fullscreen pipeline (vsMain/psMain from one .slang file).

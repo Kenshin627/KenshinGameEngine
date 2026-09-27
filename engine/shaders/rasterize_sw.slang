@@ -203,7 +203,8 @@ int64_t floorDivPos(int64_t a, int64_t b)  // b > 0
 
 uint rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
                        float z0, float z1, float z2,
-                       uint2 widthHeight, uint pairIdx, uint triIdx)
+                       uint2 widthHeight, int4 scissor, uint pairIdx,
+                       uint triIdx)
 {
     // Quantize to subpixel fixed point (floor - the DX spec's x.8 snap).
     const int64_t X0 = int64_t(int(floor(s0f.x * float(SUBPIXEL))));
@@ -266,6 +267,12 @@ uint rasterizeTriangle(float2 s0f, float2 s1f, float2 s2f,
     y0 = max(y0, 0);
     x1 = min(x1, int(widthHeight.x) - 1);
     y1 = min(y1, int(widthHeight.y) - 1);
+    // Stage C scissor ([11].zw, inclusive pixel bounds): the dirty-page
+    // region; the host's full-rect default keeps writes bit-identical.
+    x0 = max(x0, scissor.x);
+    y0 = max(y0, scissor.y);
+    x1 = min(x1, scissor.z);
+    y1 = min(y1, scissor.w);
     if (x0 > x1 || y0 > y1) return 0u;
 
     // Screen-space affine depth through the QUANTIZED corners (floats
@@ -614,6 +621,12 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     if (polyN < 3) return;
 
     const uint2 widthHeightU = uint2(uint(widthHeight.x), uint(widthHeight.y));
+    // Stage C scissor: 11-bit halves packed as (x<<11)|y into [11].zw
+    // (22 bits = exactly representable in f32; the uint round-trip of
+    // the exact integer float is exact).
+    const uint2 scPacked = uint2(uint(params[11].z), uint(params[11].w));
+    const int4 scissor = int4(int(scPacked.x >> 11u), int(scPacked.x & 2047u),
+                              int(scPacked.y >> 11u), int(scPacked.y & 2047u));
 
     const float2 wh = widthHeight;
     const uint2 whU = widthHeightU;
@@ -630,7 +643,7 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
                           ndcZOf(pa, vpC0, vpC1, vpC2, vpC3),
                           ndcZOf(pb, vpC0, vpC1, vpC2, vpC3),
                           ndcZOf(pc, vpC0, vpC1, vpC2, vpC3),
-                          whU, pairIdx, gtid.x);
+                          whU, scissor, pairIdx, gtid.x);
     }
     else  // quad (near-plane crossing): fan (0,1,2) + (0,2,3)
     {
@@ -643,8 +656,10 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
         const float zb = ndcZOf(pb, vpC0, vpC1, vpC2, vpC3);
         const float zc = ndcZOf(pc, vpC0, vpC1, vpC2, vpC3);
         const float zd = ndcZOf(pd, vpC0, vpC1, vpC2, vpC3);
-        localPix = rasterizeTriangle(sa, sb, sc, za, zb, zc, whU, pairIdx, gtid.x)
-                 + rasterizeTriangle(sa, sc, sd, za, zc, zd, whU, pairIdx, gtid.x);
+        localPix = rasterizeTriangle(sa, sb, sc, za, zb, zc, whU, scissor,
+                                     pairIdx, gtid.x)
+                 + rasterizeTriangle(sa, sc, sd, za, zc, zd, whU, scissor,
+                                     pairIdx, gtid.x);
     }
 
     // Mode 1: one aggregated pixel-write counter add per thread instead

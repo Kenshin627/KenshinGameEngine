@@ -1794,7 +1794,8 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
 void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
                                      u32 bufferCount, const void* push,
                                      usize pushBytes, u32 width, u32 height,
-                                     u32 level, bool shadowEnabled) {
+                                     u32 level, bool shadowEnabled,
+                                     const u32 scissorRect[4]) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
       pipeline > impl.pipelines.fullscreenCount())
@@ -1822,6 +1823,23 @@ void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
                     reinterpret_cast<uint64_t>(impl.shadowMap[level].image),
                     "shadow-map");
     impl.shadowMapLayout[level] = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Region-limited rewrites (the page cache) LOAD the prior content;
+    // a fresh target must start "far" (= 1.0, no occluder -> lit) so
+    // never-rendered tiles sample lit, matching the clear-to-far path.
+    {
+      CommandContext::pipelineBarrier(
+          impl.cmd.cmd(),
+          CommandContext::imageBarrier(
+              impl.shadowMap[level].image, VK_IMAGE_LAYOUT_UNDEFINED,
+              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+      impl.cmd.beginColorPass(impl.shadowMap[level].view, width, height,
+                              VK_ATTACHMENT_LOAD_OP_CLEAR,
+                              VkRect2D{{0, 0}, {width, height}}, 1.0f);
+      impl.cmd.endPass();
+      impl.shadowMapLayout[level] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
   }
 
   std::vector<VkDescriptorBufferInfo> infos(bufferCount);
@@ -1845,7 +1863,19 @@ void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
     {
       const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "shadow-decode"};
-      impl.cmd.beginColorPass(impl.shadowMap[level].view, width, height);
+      // Stage C page cache: a scissor limits the rewrite to the dirty
+      // region; everything else LOADs its cached content. Null rect =
+      // full target (CLEAR-to-far keeps the old whole-map semantics -
+      // the disabled/toggle path relies on it).
+      const bool full = scissorRect == nullptr;
+      const VkAttachmentLoadOp loadOp =
+          full ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+      const VkRect2D rect{
+          {full ? 0 : int(scissorRect[0]), full ? 0 : int(scissorRect[1])},
+          {full ? width : scissorRect[2] - scissorRect[0],
+           full ? height : scissorRect[3] - scissorRect[1]}};
+      impl.cmd.beginColorPass(impl.shadowMap[level].view, width, height,
+                              loadOp, rect, 1.0f);
 
       const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
       std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);

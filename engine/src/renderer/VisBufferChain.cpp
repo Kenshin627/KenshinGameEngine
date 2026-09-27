@@ -588,15 +588,26 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     for (int c = 0; c < 4; ++c) p[c] = in.view[c];
     for (int c = 0; c < 4; ++c) p[4 + c] = in.proj[c];
     p[8] = glm::vec4(f32(in.width), f32(in.height), 0.0f, in.nearZ);
+    // Stage C scissor: clamp the sentinel to the viewport and pack the
+    // inclusive rect as 11-bit halves into [11].zw (x<<11 | y). 22 bits
+    // stay exactly representable in f32 - a 16-bit-half packing hits
+    // the 24-bit mantissa and rounds the bit pattern (garbled rects).
+    const u32 sx1 = (std::min)(in.scissorRect[2], in.width - 1u);
+    const u32 sy1 = (std::min)(in.scissorRect[3], in.height - 1u);
+    const u32 sx0 = (std::min)(in.scissorRect[0], sx1);
+    const u32 sy0 = (std::min)(in.scissorRect[1], sy1);
+    const f32 scLo = f32((sx0 << 11) | sy0);
+    const f32 scHi = f32((sx1 << 11) | sy1);
     p[9] = glm::vec4(1.0f, m_paged ? 1.0f : 0.0f, 0.0f, f32(m_maxPairs));
     // [10] = the pool u32 capacities (the v5 clamp discipline: every
     // meta/bit/word read in the paged branch is min-clamped against
     // these; v2 gets the raw pool sizes - its float4 reads scale x4).
     p[10] = glm::vec4(f32(m_positionCount), f32(m_indexCount), 0.0f, 0.0f);
     // [11].x = rasterMode (the bit-identical optimized scheduling),
-    // [11].y = the coverage-probe flag. The post copy below inherits
-    // both (its loop copies all 12 words).
-    p[11] = glm::vec4(f32(in.rasterMode), f32(in.rasterProbe), 0.0f, 0.0f);
+    // [11].y = the coverage-probe flag, [11].zw = the packed scissor
+    // (16-bit halves, inclusive). The post copy below inherits all of
+    // them (its loop copies all 12 words).
+    p[11] = glm::vec4(f32(in.rasterMode), f32(in.rasterProbe), scLo, scHi);
     glm::vec4* pp =
         static_cast<glm::vec4*>(backend.mappedPtr(m_postRasterParams[slot]));
     for (int c = 0; c < 12; ++c) pp[c] = p[c];

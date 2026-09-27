@@ -44,6 +44,11 @@ struct ChainInputs {
   f32 worldPerPixel = 0.001f;
   u32 width = 0;
   u32 height = 0;
+  /// M9.1 Stage C: inclusive pixel bounds [x0,y0,x1,y1] clamping the SW
+  /// raster's bounding-box loops (the page-cache dirty region). The
+  /// sentinel below = the full viewport, so every existing caller keeps
+  /// bit-identical behavior; the shadow clipmaps pass live tile rects.
+  u32 scissorRect[4] = {0, 0, 0xFFFFFFFFu, 0xFFFFFFFFu};
   glm::vec4 planes[6]{};
   bool occlusionEnabled = true;  // A/B + first-run safety toggle
   u32 hwMode = 0;                // M4.2: 0 = all SW (the default since

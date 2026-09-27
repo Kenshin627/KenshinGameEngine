@@ -42,6 +42,11 @@ class CommandContext {
   /// HDR chain's sentinel background; the tonemap pass fully overwrites
   /// its target so DONT_CARE would also do - keep the uniform shape).
   void beginColorPass(VkImageView color, u32 width, u32 height);
+  /// Scissor/load variant (the shadow maps' region-limited rewrites:
+  /// LOAD keeps the pass's scissor-outside content - the page cache).
+  void beginColorPass(VkImageView color, u32 width, u32 height,
+                      VkAttachmentLoadOp loadOp, const VkRect2D& scissorRect,
+                      f32 clearValue);
   void beginGBufferPass(VkImageView colorA, VkImageView colorB, u32 width,
                         u32 height);
   /// Close the viewport scope (no-op when it never opened).

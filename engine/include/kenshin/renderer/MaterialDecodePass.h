@@ -115,12 +115,12 @@ class MaterialDecodePass {
                        const DecodeParams& params, u32 width, u32 height,
                        u32 visHandle, const DecodePagedInputs& paged, u32 pairs,
                        u32 hwPairs, u32 postPairs, u32 pairCapacity, u32 level,
-                       bool shadowEnabled);
+                       bool shadowEnabled, const u32 scissorRect[4] = nullptr);
   void drawShadow(backend::IRenderBackend& backend, const glm::mat4& viewProj,
                   const VirtualGeometryScene& scene, const DecodeParams& params,
                   u32 width, u32 height, u32 visHandle, u32 pairs, u32 hwPairs,
                   u32 postPairs, u32 pairCapacity, u32 level,
-                  bool shadowEnabled);
+                  bool shadowEnabled, const u32 scissorRect[4] = nullptr);
 
   void onShutdown(backend::IRenderBackend& backend);
 

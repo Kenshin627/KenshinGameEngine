@@ -248,6 +248,72 @@ constexpr kenshin::f32 kClearColor[4] = {14.0f / 255.0f, 16.0f / 255.0f,
 /// state, passed to the renderer as pure data each frame.
 constexpr kenshin::f32 kStudioLight[3] = {0.35f, 0.8f, 0.45f};
 
+/// M9.1 Stage C: which 512px tiles of a 2048^2 clipmap level the main
+/// view's frustum touches. UE marks pages from the receiver mask
+/// (GBuffer depth); this CPU v1 projects the frustum corners into the
+/// level's light clip, clamps to the box, takes the convex hull, and
+/// tests the 4x4 tile centers against it (inflated by half a tile so
+/// partial overlaps count) - conservative, zero plumbing. The GPU
+/// precise marking drops in at the same call site later.
+kenshin::u32 shadowTileMask(const glm::mat4& lightVP,
+                            const glm::mat4& invViewProj) {
+  glm::vec2 pts[8];
+  for (int i = 0; i < 8; ++i) {
+    const glm::vec4 ndc((i & 1) ? 1.0f : -1.0f, (i & 2) ? 1.0f : -1.0f,
+                        (i & 4) ? 1.0f : 0.0f, 1.0f);
+    const glm::vec4 clip = lightVP * (invViewProj * ndc);
+    pts[i] = glm::clamp(glm::vec2(clip.x, clip.y) * 0.5f + 0.5f,
+                        glm::vec2(0.0f), glm::vec2(1.0f));
+  }
+  // Convex hull (monotone chain, CCW).
+  std::sort(pts, pts + 8, [](const glm::vec2& a, const glm::vec2& b) {
+    return a.x < b.x || (a.x == b.x && a.y < b.y);
+  });
+  const auto cross = [](const glm::vec2& o, const glm::vec2& a,
+                        const glm::vec2& b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  };
+  glm::vec2 hull[8];
+  int n = 0;
+  for (int i = 0; i < 8; ++i) {
+    while (n >= 2 && cross(hull[n - 2], hull[n - 1], pts[i]) <= 0.0f) --n;
+    hull[n++] = pts[i];
+  }
+  const int lower = n + 1;
+  for (int i = 6; i >= 0; --i) {
+    while (n >= lower && cross(hull[n - 2], hull[n - 1], pts[i]) <= 0.0f) --n;
+    hull[n++] = pts[i];
+  }
+  if (n > 0) --n;  // the last point repeats the first
+  kenshin::u32 mask = 0;
+  if (n < 3) {
+    // Degenerate projection: fall back to the point bbox.
+    glm::vec2 mn(1.0f), mx(0.0f);
+    for (const auto& p : pts) {
+      mn = glm::min(mn, p);
+      mx = glm::max(mx, p);
+    }
+    if (mn.x > mx.x) return 0;
+    for (kenshin::u32 ty = kenshin::u32(mn.y * 4.0f);
+         ty <= kenshin::u32(mx.y * 4.0f) && ty < 4; ++ty)
+      for (kenshin::u32 tx = kenshin::u32(mn.x * 4.0f);
+           tx <= kenshin::u32(mx.x * 4.0f) && tx < 4; ++tx)
+        mask |= 1u << (ty * 4u + tx);
+    return mask;
+  }
+  // Tile centers vs the hull; the -0.18 margin (half a tile diagonal
+  // in cross units) admits centers whose TILE still overlaps the hull.
+  for (kenshin::u32 ty = 0; ty < 4; ++ty)
+    for (kenshin::u32 tx = 0; tx < 4; ++tx) {
+      const glm::vec2 c((tx + 0.5f) * 0.25f, (ty + 0.5f) * 0.25f);
+      bool inside = true;
+      for (int e = 0; e < n && inside; ++e)
+        inside = cross(hull[e], hull[(e + 1) % n], c) >= -0.18f;
+      if (inside) mask |= 1u << (ty * 4u + tx);
+    }
+  return mask;
+}
+
 // M8.1: the static point-light accents (deterministic - the render
 // regression depends on frame-to-frame stability). Bracketing the
 // --multi rig's mid instance (x=7, the regression camera's subject);
@@ -829,6 +895,13 @@ int main(int argc, char** argv) {
     kenshin::u32 cullMode = 0xFFFFFFFFu, hwMode = 0xFFFFFFFFu;
     bool valid = false;
   } shadowKey;
+  // Stage C: per-level dirty TILE masks (4x4 tiles of 512px over the
+  // 2048^2 map). A key change dirties everything; each frame re-renders
+  // only dirty tiles the main view NEEDS (the frustum-hull marking
+  // below) and clears those bits - the scissored raster + LOAD-op
+  // decode keep the rest of the map cached. UE's page semantics at
+  // tile granularity (a whole-map "page" per 512px).
+  kenshin::u32 shadowDirtyTiles[3] = {0u, 0u, 0u};
   kenshin::u32 shadowChainStats[3][16] = {};
   bool chainReady = false;
   bool decodeReady = false;  // pipeline is lazy: needs the swapchain format
@@ -1089,17 +1162,30 @@ int main(int argc, char** argv) {
           shadowOrigin = center;
           // UE FClipmapCacheKey: light direction + level count, plus
           // our primitive-visibility analogues (streaming residency)
-          // and the LOD threshold. Unchanged key = the cached R32F
-          // maps stay valid; skip the chains + decodes wholesale.
+          // and the LOD threshold. A key change dirties every TILE of
+          // every level; each frame then renders only dirty tiles the
+          // main view needs and clears those bits (Stage C).
           const kenshin::u32 residentNow =
               streamer ? streamer->residentPages() : 0xFFFFFFFFu;
-          const bool shadowDirty =
+          const bool keyChanged =
               !shadowKey.valid ||
               glm::distance(L, shadowKey.L) > 1e-4f ||
               vgDebug.pixelThreshold != shadowKey.threshold ||
               shadowLevelCount != shadowKey.levels ||
               residentNow != shadowKey.residentPages ||
               ci.cullMode != shadowKey.cullMode || ci.hwMode != shadowKey.hwMode;
+          if (keyChanged) {
+            shadowDirtyTiles[0] = shadowDirtyTiles[1] = shadowDirtyTiles[2] =
+                0xFFFFu;
+            shadowKey.L = L;
+            shadowKey.threshold = vgDebug.pixelThreshold;
+            shadowKey.levels = shadowLevelCount;
+            shadowKey.residentPages = residentNow;
+            shadowKey.cullMode = ci.cullMode;
+            shadowKey.hwMode = ci.hwMode;
+            shadowKey.valid = true;
+          }
+          const glm::mat4 invMainVP = glm::inverse(camera.viewProjMatrix());
           for (kenshin::u32 lv = 0; lv < shadowLevelCount; ++lv) {
             const float extent = kExtent0 * float(1 << lv);
             // The light eye rides the LIGHT'S side of the scene (+L):
@@ -1116,7 +1202,27 @@ int main(int argc, char** argv) {
             shadowLevels[lv].viewProj = lightProj * lightView;
             shadowLevels[lv].texelWorld = (2.0f * extent) / 2048.0f;
 
-            if (!shadowDirty) continue;  // cached maps carry the content
+            // Stage C: dirty tiles the main view needs. The bounding
+            // rect of the worked tiles scissors BOTH the chain raster
+            // and the decode (LOAD-op) - the rest of the map keeps its
+            // cached content.
+            const kenshin::u32 work =
+                shadowDirtyTiles[lv] &
+                shadowTileMask(shadowLevels[lv].viewProj, invMainVP);
+            if (work == 0u) continue;
+            kenshin::u32 tx0 = 4, ty0 = 4, tx1 = 0, ty1 = 0;
+            for (kenshin::u32 ty = 0; ty < 4; ++ty)
+              for (kenshin::u32 tx = 0; tx < 4; ++tx)
+                if (work & (1u << (ty * 4u + tx))) {
+                  tx0 = std::min(tx0, tx);
+                  ty0 = std::min(ty0, ty);
+                  tx1 = std::max(tx1, tx);
+                  ty1 = std::max(ty1, ty);
+                }
+            constexpr kenshin::u32 kTilePx = 2048 / 4;
+            const kenshin::u32 rect[4] = {tx0 * kTilePx, ty0 * kTilePx,
+                                          tx1 * kTilePx + kTilePx - 1,
+                                          ty1 * kTilePx + kTilePx - 1};
 
             kenshin::renderer::ChainInputs si{};
             si.view = lightView;
@@ -1128,6 +1234,10 @@ int main(int argc, char** argv) {
             // camPos (dist clamps to 0.1) and the HW near-guard rejects
             // it (the shadow hw=0 case).
             si.camPos = center + L * (kDepth * 0.5f);
+            si.scissorRect[0] = rect[0];
+            si.scissorRect[1] = rect[1];
+            si.scissorRect[2] = rect[2];
+            si.scissorRect[3] = rect[3];
             si.pixelThreshold = vgDebug.pixelThreshold * 2.0f;  // D11.5 bias
             si.worldPerPixel = (2.0f * extent) / 2048.0f;
             si.width = 2048;
@@ -1157,7 +1267,7 @@ int main(int argc, char** argv) {
                   shadowChains[lv].pairsCurrent(*vgBackend),
                   shadowChains[lv].hwPairsCurrent(*vgBackend),
                   shadowChains[lv].postPairsCurrent(*vgBackend),
-                  shadowChains[lv].maxPairs(), lv, true);
+                  shadowChains[lv].maxPairs(), lv, true, rect);
             } else {
               decodePass.drawShadow(
                   *vgBackend, shadowLevels[lv].viewProj, *vgScene, sp, 2048,
@@ -1165,17 +1275,9 @@ int main(int argc, char** argv) {
                   shadowChains[lv].pairsCurrent(*vgBackend),
                   shadowChains[lv].hwPairsCurrent(*vgBackend),
                   shadowChains[lv].postPairsCurrent(*vgBackend),
-                  shadowChains[lv].maxPairs(), lv, true);
+                  shadowChains[lv].maxPairs(), lv, true, rect);
             }
-          }
-          if (shadowDirty) {
-            shadowKey.L = L;
-            shadowKey.threshold = vgDebug.pixelThreshold;
-            shadowKey.levels = shadowLevelCount;
-            shadowKey.residentPages = residentNow;
-            shadowKey.cullMode = ci.cullMode;
-            shadowKey.hwMode = ci.hwMode;
-            shadowKey.valid = true;
+            shadowDirtyTiles[lv] &= ~work;
           }
         } else if (shadowPhase) {
           // Disabled this frame: still touch a target so lighting's
@@ -1339,9 +1441,12 @@ int main(int argc, char** argv) {
                                                 shadowChainStats[lv]))
             break;
         KENSHIN_INFO(
-            "[shadowstats] cached {} lv0 tris {} px {} hw {} pend {} | "
-            "lv1 tris {} px {} pend {} | lv2 tris {} px {} pend {}",
-            shadowKey.valid ? 1 : 0, shadowChainStats[0][11],
+            "[shadowstats] key {} dirty {:02x}/{:02x}/{:02x} | lv0 tris {} "
+            "px {} hw {} pend {} | lv1 tris {} px {} pend {} | lv2 tris {} "
+            "px {} pend {}",
+            shadowKey.valid ? 1 : 0, shadowDirtyTiles[0] & 0xFFFFu,
+            shadowDirtyTiles[1] & 0xFFFFu, shadowDirtyTiles[2] & 0xFFFFu,
+            shadowChainStats[0][11],
             shadowChainStats[0][5] + shadowChainStats[0][10],
             shadowChainStats[0][12], shadowChainStats[0][15],
             shadowChainStats[1][11],

@@ -110,7 +110,7 @@ static void recordDecode(
     u32 pairCapacity, const DecodeParams& params, u32 clusterCount,
     u32 groupCount, u32 instanceCount, u32 maxLodLevel, u32 width, u32 height,
     u32 materialTable, u32 materialCount, u32 albedoTexture, u32 shadowLevel,
-    bool shadowEnabled) {
+    bool shadowEnabled, const u32 scissorRect[4]) {
   // mode: 0 = final color, 1 = GBuffer MRT, 2 = shadow depth.
   // The push block (decode_material.slang's DecodePush, packed
   // identically - glm raw).
@@ -152,7 +152,8 @@ static void recordDecode(
       break;
     case 2:
       backend.drawShadowDecode(pipeline, handles, 17, &push, sizeof(push),
-                               width, height, shadowLevel, shadowEnabled);
+                               width, height, shadowLevel, shadowEnabled,
+                               scissorRect);
       break;
     default:
       backend.drawFullscreen(pipeline, handles, 16, &push, sizeof(push));
@@ -180,7 +181,8 @@ void MaterialDecodePass::draw(backend::IRenderBackend& backend,
                m_dummyU32[0], pairs, hwPairs, postPairs, pairCapacity, params,
                scene.clusterCount(), scene.groupCount(), scene.instanceCount(),
                scene.maxLodLevel(), width, height, m_dummyMaterial, 0,
-               backend::IRenderBackend::kInvalidTextureHandle, 0, false);
+               backend::IRenderBackend::kInvalidTextureHandle, 0, false,
+               nullptr);
 }
 
 void MaterialDecodePass::drawGBuffer(backend::IRenderBackend& backend,
@@ -202,7 +204,7 @@ void MaterialDecodePass::drawGBuffer(backend::IRenderBackend& backend,
                m_dummyU32[0], pairs, hwPairs, postPairs, pairCapacity, params,
                scene.clusterCount(), scene.groupCount(), scene.instanceCount(),
                scene.maxLodLevel(), width, height, m_dummyMaterial, 0,
-               albedoTexture, 0, false);
+               albedoTexture, 0, false, nullptr);
 }
 
 void MaterialDecodePass::drawGBufferPaged(
@@ -223,7 +225,7 @@ void MaterialDecodePass::drawGBufferPaged(
                params, scene.clusterCount(), scene.groupCount(),
                scene.instanceCount(), scene.maxLodLevel(), width, height,
                scene.materialTableBuffer(), scene.materialCount(),
-               albedoTexture, 0, false);
+               albedoTexture, 0, false, nullptr);
 }
 
 void MaterialDecodePass::drawPaged(
@@ -244,7 +246,8 @@ void MaterialDecodePass::drawPaged(
                params, scene.clusterCount(), scene.groupCount(),
                scene.instanceCount(), scene.maxLodLevel(), width, height,
                scene.materialTableBuffer(), scene.materialCount(),
-               backend::IRenderBackend::kInvalidTextureHandle, 0, false);
+               backend::IRenderBackend::kInvalidTextureHandle, 0, false,
+               nullptr);
 }
 
 void MaterialDecodePass::drawShadowPaged(
@@ -252,7 +255,7 @@ void MaterialDecodePass::drawShadowPaged(
     const VirtualGeometryScene& scene, const DecodeParams& params, u32 width,
     u32 height, u32 visHandle, const DecodePagedInputs& paged, u32 pairs,
     u32 hwPairs, u32 postPairs, u32 pairCapacity, u32 shadowLevel,
-    bool shadowEnabled) {
+    bool shadowEnabled, const u32 scissorRect[4]) {
   if (shadowLevel >= 3 || m_shadowPipeline[shadowLevel] == ~0u || width == 0 ||
       height == 0)
     return;
@@ -272,14 +275,15 @@ void MaterialDecodePass::drawShadowPaged(
                scene.instanceCount(), scene.maxLodLevel(), width, height,
                scene.materialTableBuffer(), scene.materialCount(),
                backend::IRenderBackend::kInvalidTextureHandle, shadowLevel,
-               shadowEnabled);
+               shadowEnabled, scissorRect);
 }
 
 void MaterialDecodePass::drawShadow(
     backend::IRenderBackend& backend, const glm::mat4& viewProj,
     const VirtualGeometryScene& scene, const DecodeParams& params, u32 width,
     u32 height, u32 visHandle, u32 pairs, u32 hwPairs, u32 postPairs,
-    u32 pairCapacity, u32 shadowLevel, bool shadowEnabled) {
+    u32 pairCapacity, u32 shadowLevel, bool shadowEnabled,
+    const u32 scissorRect[4]) {
   if (shadowLevel >= 3 || m_shadowPipeline[shadowLevel] == ~0u || width == 0 ||
       height == 0)
     return;
@@ -297,7 +301,7 @@ void MaterialDecodePass::drawShadow(
       pairCapacity, params, scene.clusterCount(), scene.groupCount(),
       scene.instanceCount(), scene.maxLodLevel(), width, height,
       m_dummyMaterial, 0, backend::IRenderBackend::kInvalidTextureHandle,
-      shadowLevel, shadowEnabled);
+      shadowLevel, shadowEnabled, scissorRect);
 }
 
 void MaterialDecodePass::onShutdown(backend::IRenderBackend& backend) {
