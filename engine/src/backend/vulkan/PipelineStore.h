@@ -95,6 +95,8 @@ class PipelineStore {
   /// slot's view to the reflected Sampler2D binding) and writes the
   /// final LDR into the frame color target (swapchain format, no
   /// depth).
+  u32 createTaa(VkDevice device,
+                const IRenderBackend::FullscreenPipelineInfo& info);
   u32 createTonemap(VkDevice device, VkFormat colorFormat,
                     const IRenderBackend::FullscreenPipelineInfo& info);
   /// M9.1 shadow depth decode: renders the fsShadowDepth entry into

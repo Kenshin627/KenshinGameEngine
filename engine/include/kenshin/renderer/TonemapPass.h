@@ -39,7 +39,8 @@ class TonemapPass {
   /// Record the fullscreen tonemap draw. Follows LightingPass::draw
   /// every deferred frame; reads this slot's HDR target implicitly.
   void draw(backend::IRenderBackend& backend, Operator op, float exposure,
-            const glm::vec4& clearColor, u32 width, u32 height);
+            const glm::vec4& clearColor, u32 width, u32 height,
+            bool fromTaa = false);
 
  private:
   u32 m_pipeline = ~0u;

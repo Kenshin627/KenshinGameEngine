@@ -54,7 +54,11 @@ class VulkanBackend final : public IRenderBackend {
                     u32 height) override;
   u32 createTonemapPipeline(const FullscreenPipelineInfo& info) override;
   void drawTonemap(u32 pipeline, const void* push, usize pushBytes, u32 width,
-                   u32 height) override;
+                   u32 height, bool fromTaa = false) override;
+  u32 createTaaPipeline(const FullscreenPipelineInfo& info) override;
+  void drawTaa(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
+               const void* push, usize pushBytes, u32 width,
+               u32 height) override;
   u32 createShadowDecodePipeline(const FullscreenPipelineInfo& info) override;
   void drawShadowDecode(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                         const void* push, usize pushBytes, u32 width,

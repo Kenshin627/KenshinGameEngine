@@ -521,6 +521,16 @@ u32 PipelineStore::createTonemap(
                                  VK_FORMAT_UNDEFINED, true);
 }
 
+u32 PipelineStore::createTaa(VkDevice device,
+                             const IRenderBackend::FullscreenPipelineInfo& info) {
+  // RGBA16F color (the resolve target), mixed sampler+SSBO layout
+  // (3 Sampler2D + the matrices SSBO - a push block would need 160B;
+  // the guaranteed push limit is 128).
+  static const VkFormat kFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  return createFullscreenVariant(device, info, &kFormat, 1,
+                                 VK_FORMAT_UNDEFINED, true);
+}
+
 u32 PipelineStore::createShadowDecode(
     VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
   static const VkFormat kFormat = VK_FORMAT_R32_SFLOAT;

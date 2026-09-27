@@ -52,6 +52,7 @@
 #include "kenshin/renderer/Renderer.h"
 #include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/StreamingManager.h"
+#include "kenshin/renderer/TaaPass.h"
 #include "kenshin/renderer/TonemapPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
@@ -138,6 +139,7 @@ struct Args {
                                 // the 2026-09-19 A/B (+82% pure-SW, bit-exact)
   bool rasterBase = false;      // A/B: force the baseline walk (mode 0)
   bool rasterProbe = false;     // coverage histogram probe ([rasthist])
+  bool noTaa = false;           // M9 A/B: disable temporal AA
   bool noShadows = false;       // M9.1 A/B: disable the shadow map
   std::string ground;           // M9.1: a ground-plane .kgeo whose
                                 // instances receive the shadows
@@ -212,6 +214,8 @@ Args parseArgs(int argc, char** argv) {
       args.rasterProbe = true;
     else if (std::strcmp(argv[i], "--no-shadows") == 0)
       args.noShadows = true;
+    else if (std::strcmp(argv[i], "--no-taa") == 0)
+      args.noTaa = true;
     else if (std::strcmp(argv[i], "--ground") == 0 && i + 1 < argc)
       args.ground = argv[++i];
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
@@ -314,6 +318,21 @@ kenshin::u32 shadowTileMask(const glm::mat4& lightVP,
   return mask;
 }
 
+/// M9 TAA jitter: Halton(2,3) - the standard low-discrepancy 8-phase
+/// subpixel sequence (UE's r.PostProcessing... TAA jitter twin).
+glm::vec2 halton23(int i) {
+  auto radical = [](int a, int base) {
+    float r = 0.0f, f = 1.0f;
+    while (a > 0) {
+      f /= float(base);
+      r += f * float(a % base);
+      a /= base;
+    }
+    return r;
+  };
+  return {radical(i + 1, 2), radical(i + 1, 3)};
+}
+
 // M8.1: the static point-light accents (deterministic - the render
 // regression depends on frame-to-frame stability). Bracketing the
 // --multi rig's mid instance (x=7, the regression camera's subject);
@@ -370,6 +389,13 @@ struct VgDebugState {
   int tonemapMode = 2;   // 0 Reinhard, 1 ACES(Narkowicz), 2 Filmic(UE)
   bool shadows = true;   // M9.1: the directional light's shadow map
   int shadowLevels = 3;  // Stage B clipmap level count (1..3)
+  // PARKED (M9, 2026-09-27): the resolve comes out black - the pass
+  // runs (proven via texel/blend viz), currentHdr at binding 0 works,
+  // but bindings 1/2 sample zeros for EVERY view tried (history,
+  // gbuffer A/B, even the proven hdr view). Suspect the mixed-pool
+  // set for >1 sampler binding on this pipeline; next step is a
+  // RenderDoc capture comparing against drawLighting's set flow.
+  bool taa = false;
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
                                        // (moved off KgeoPreview at the
@@ -482,6 +508,11 @@ int main(int argc, char** argv) {
   kenshin::renderer::LightingPass lightingPass;  // M8.1 deferred pair
   bool lightingReady = false;
   kenshin::renderer::TonemapPass tonemapPass;  // M8.3 HDR chain tail
+  kenshin::renderer::TaaPass taaPass;          // M9 temporal resolve
+  bool taaReady = false;
+  glm::mat4 taaPrevViewProj{1.0f};  // UNJITTERED previous frame VP
+  bool taaPrevValid = false;
+  int taaWarmup = 0;                // frames since (re)validation
   bool tonemapReady = false;
   kenshin::renderer::DecodeParams decodeParams;
   // M6.3: page-streaming driver (v3 assets; null otherwise).
@@ -775,6 +806,8 @@ int main(int argc, char** argv) {
             ImGui::SliderFloat("points", &vgDebug.pointIntensity, 0.0f, 30.0f,
                                "%.2f");
             ImGui::Checkbox("shadows", &vgDebug.shadows);
+            ImGui::SameLine();
+            ImGui::Checkbox("TAA", &vgDebug.taa);
             ImGui::SliderInt("shadow levels", &vgDebug.shadowLevels, 1, 3);
             ImGui::Combo("tonemap", &vgDebug.tonemapMode, "Reinhard\0ACES\0");
             ImGui::ColorEdit3("sky", &vgDebug.skyColor.x);
@@ -1053,7 +1086,19 @@ int main(int argc, char** argv) {
         // matrices cannot disagree anymore.
         kenshin::renderer::ChainInputs ci;
         ci.view = camera.viewMatrix();
-        ci.proj = camera.projMatrix();
+        // M9 TAA: subpixel NDC jitter (8-phase Halton(2,3)) rides the
+        // projection's [2][0]/[2][1] (clip.xy += jitter * clip.w); the
+        // resolve unprojects with the UNJITTERED pair so the jitter
+        // never leaks into reprojection.
+        const bool taaOn = vgDebug.taa && !args.noTaa;
+        glm::mat4 projJ = camera.projMatrix();
+        if (taaOn) {
+          const glm::vec2 h = halton23(int(frame) & 7);
+          projJ[2][0] += (h.x * 2.0f - 1.0f) / float(ci.width);
+          projJ[2][1] += (h.y * 2.0f - 1.0f) / float(ci.height);
+        }
+        const glm::mat4 viewProjJ = projJ * camera.viewMatrix();
+        ci.proj = projJ;
         ci.nearZ = camera.nearPlane();
         ci.camPos = camera.position();
         ci.pixelThreshold = vgDebug.pixelThreshold;
@@ -1062,8 +1107,7 @@ int main(int argc, char** argv) {
                            static_cast<kenshin::f32>(vp.y);
         ci.width = static_cast<kenshin::u32>(vp.x);
         ci.height = static_cast<kenshin::u32>(vp.y);
-        kenshin::renderer::extractFrustumPlanes(camera.viewProjMatrix(),
-                                                ci.planes);
+        kenshin::renderer::extractFrustumPlanes(viewProjJ, ci.planes);
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
         // Pure SW is the default since the 2026-09-19 threshold sweep:
         // mode-1 SW beat every routing configuration on all five scene
@@ -1307,7 +1351,7 @@ int main(int argc, char** argv) {
           pd.clusterMeta = vgScene->clusterMetaBuffer();
           if (finalView) {
             decodePass.drawGBufferPaged(
-                *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+                *vgBackend, viewProjJ, *vgScene, decodeParams,
                 ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
                 chain.pairsCurrent(*vgBackend),
                 chain.hwPairsCurrent(*vgBackend),
@@ -1315,7 +1359,7 @@ int main(int argc, char** argv) {
                 albedoTexture);
           } else {
             decodePass.drawPaged(
-                *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+                *vgBackend, viewProjJ, *vgScene, decodeParams,
                 ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
                 chain.pairsCurrent(*vgBackend),
                 chain.hwPairsCurrent(*vgBackend),
@@ -1323,7 +1367,7 @@ int main(int argc, char** argv) {
           }
         } else {
           if (finalView) {
-            decodePass.drawGBuffer(*vgBackend, camera.viewProjMatrix(),
+            decodePass.drawGBuffer(*vgBackend, viewProjJ,
                                    *vgScene, decodeParams, ci.width, ci.height,
                                    chain.visBufferCurrent(*vgBackend),
                                    chain.pairsCurrent(*vgBackend),
@@ -1332,7 +1376,7 @@ int main(int argc, char** argv) {
                                    chain.maxPairs(), albedoTexture);
           } else {
             decodePass.draw(
-                *vgBackend, camera.viewProjMatrix(), *vgScene, decodeParams,
+                *vgBackend, viewProjJ, *vgScene, decodeParams,
                 ci.width, ci.height, chain.visBufferCurrent(*vgBackend),
                 chain.pairsCurrent(*vgBackend),
                 chain.hwPairsCurrent(*vgBackend),
@@ -1355,7 +1399,7 @@ int main(int argc, char** argv) {
             lights.push_back(pt);
           }
           lightingPass.draw(
-              *vgBackend, glm::inverse(camera.viewProjMatrix()),
+              *vgBackend, glm::inverse(viewProjJ),
               camera.position(), lights,
               vgScene->paged()
                   ? vgScene->materialTableBuffer()
@@ -1366,6 +1410,22 @@ int main(int argc, char** argv) {
               shadowLevels,
               shadowsOn && vgDebug.viewMode == 0 ? shadowLevelCount : 0u, 12.0f,
               shadowOrigin, ci.width, ci.height);
+          // M9 TAA resolve (skip the first frames after (re)validation:
+          // the history is garbage until the ping-pong fills).
+          bool resolvedByTaa = false;
+          if (!taaReady) taaReady = taaPass.init(*vgBackend, shaders);
+          if (taaReady && taaOn) {
+            kenshin::renderer::TaaFrame tf;
+            tf.invViewProj = glm::inverse(camera.viewProjMatrix());
+            tf.prevViewProj = taaPrevViewProj;
+            tf.camPos = camera.position();
+            tf.blend = taaPrevValid && taaWarmup > 1 ? 0.9f : 0.0f;
+            taaPass.draw(*vgBackend, tf, ci.width, ci.height);
+            resolvedByTaa = true;
+          }
+          taaPrevViewProj = camera.viewProjMatrix();
+          taaPrevValid = true;
+          ++taaWarmup;
           if (tonemapReady)
             tonemapPass.draw(
                 *vgBackend,
@@ -1373,7 +1433,7 @@ int main(int argc, char** argv) {
                     vgDebug.tonemapMode),
                 vgDebug.exposure,
                 glm::vec4(kClearColor[0], kClearColor[1], kClearColor[2], 1.0f),
-                ci.width, ci.height);
+                ci.width, ci.height, resolvedByTaa);
         }
       }
     }
@@ -1477,6 +1537,7 @@ int main(int argc, char** argv) {
     decodePass.onShutdown(*vgBackend);
     if (lightingReady) lightingPass.onShutdown(*vgBackend);
     if (tonemapReady) tonemapPass.onShutdown(*vgBackend);
+    if (taaReady) taaPass.onShutdown(*vgBackend);
     if (chainReady) chain.onShutdown(*vgBackend);
   }
   // Reverse registration order: overlay context, mesh pool (all GPU

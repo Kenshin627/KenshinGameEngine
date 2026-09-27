@@ -34,7 +34,7 @@ bool TonemapPass::init(backend::IRenderBackend& backend,
 
 void TonemapPass::draw(backend::IRenderBackend& backend, Operator op,
                        float exposure, const glm::vec4& clearColor, u32 width,
-                       u32 height) {
+                       u32 height, bool fromTaa) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   // TonemapPush: tonemap.slang's TonemapPush, packed identically.
   struct TonemapPushC {
@@ -46,7 +46,8 @@ void TonemapPass::draw(backend::IRenderBackend& backend, Operator op,
   push.modeViewport = glm::vec4(static_cast<f32>(static_cast<int>(op)),
                                 1.0f / static_cast<f32>(width),
                                 1.0f / static_cast<f32>(height), 0.0f);
-  backend.drawTonemap(m_pipeline, &push, sizeof(push), width, height);
+  backend.drawTonemap(m_pipeline, &push, sizeof(push), width, height,
+                      fromTaa);
 }
 
 void TonemapPass::onShutdown(backend::IRenderBackend&) {

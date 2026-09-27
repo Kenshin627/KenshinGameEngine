@@ -138,6 +138,15 @@ struct VulkanBackend::Impl {
   VkSampler shadowSampler = VK_NULL_HANDLE;
   VkImageLayout shadowMapLayout[3] = {};
   u32 shadowMapSize = 2048;
+  // M9 TAA: the resolved-HDR ping-pong pair (viewport-sized, RGBA16F
+  // like the slot HDR targets). drawTaa writes taa[parity] and reads
+  // taa[parity ^ 1] as history; drawTonemap(fromTaa) samples the
+  // freshly written one.
+  GpuImage taa[2];
+  VkImageLayout taaLayout[2] = {};
+  u32 taaParity = 0;
+  u32 taaSize = 0;
+  bool taaActive = false;
   GpuImage dummyTexture;
   std::vector<GpuImage> textures;
   std::vector<bool> textureAlive;
@@ -434,6 +443,11 @@ void VulkanBackend::shutdown() {
   m_impl->staging.shutdown(m_impl->device.allocator);
   m_impl->descriptors.shutdown(m_impl->device.device);
   m_impl->readback.destroy(m_impl->device.allocator);
+  // M9 TAA ping-pong pair (created lazily; the shadow maps go the same
+  // way through their recreate path or leak into validation reports).
+  for (u32 i = 0; i < 2; ++i)
+    if (m_impl->taa[i].image != VK_NULL_HANDLE)
+      m_impl->taa[i].destroy(m_impl->device.allocator, m_impl->device.device);
   // Frame resources first: their command buffers still reference the
   // mesh/depth objects below (validation: objects stay "in use" until
   // the referencing command buffer is freed with its pool).
@@ -1629,6 +1643,10 @@ u32 VulkanBackend::createTonemapPipeline(const FullscreenPipelineInfo& info) {
                                          m_impl->swapchain.format, info);
 }
 
+u32 VulkanBackend::createTaaPipeline(const FullscreenPipelineInfo& info) {
+  return m_impl->pipelines.createTaa(m_impl->device.device, info);
+}
+
 u32 VulkanBackend::createShadowDecodePipeline(
     const FullscreenPipelineInfo& info) {
   return m_impl->pipelines.createShadowDecode(m_impl->device.device, info);
@@ -1946,8 +1964,155 @@ void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
 // COLOR_ATTACHMENT since beginFrame's clear (endFrame moves it to
 // SHADER_READ for the ImGui composite as before); the pass overwrites
 // every pixel, so the clear's contents are irrelevant here.
+void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
+                            u32 bufferCount, const void* push, usize pushBytes,
+                            u32 width, u32 height) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.fullscreenCount())
+    return;
+  const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
+  if (!fs.valid || fs.bindingCount == 0) return;
+  // The dense mixed layout leaves binding gaps as SSBO when SPIR-V
+  // dead-strips an unused sampler (the M7.2 reflection lesson); the
+  // full taa.slang always reflects exactly [3 samplers + 1 SSBO].
+  if (fs.bindingCount != 4) return;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (slot.hdr.view == VK_NULL_HANDLE ||
+      slot.gbuffer[0].view == VK_NULL_HANDLE)
+    return;
+  if (width == 0 || height == 0) return;
+
+  // (Re)create the ping-pong pair on size change; the fresh history is
+  // garbage either way - the app's blend ramp covers the first frames.
+  static const VkFormat kTaaFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  if (impl.taa[0].image == VK_NULL_HANDLE || impl.taaSize != width ||
+      impl.taa[1].image == VK_NULL_HANDLE) {
+    for (u32 i = 0; i < 2; ++i) {
+      if (impl.taa[i].image != VK_NULL_HANDLE)
+        impl.taa[i].destroy(impl.device.allocator, impl.device.device);
+      if (!impl.taa[i].create(impl.device.allocator, impl.device.device,
+                              width, height, kTaaFormat,
+                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                  VK_IMAGE_USAGE_SAMPLED_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+        KENSHIN_ERROR("[vulkan] taa target creation failed");
+        return;
+      }
+      vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE,
+                      reinterpret_cast<uint64_t>(impl.taa[i].image),
+                      i == 0 ? "taa-a" : "taa-b");
+      impl.taaLayout[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+    impl.taaSize = width;
+    impl.taaParity = 0;
+  }
+
+  impl.taaParity ^= 1u;
+  const u32 writeIdx = impl.taaParity;
+  const u32 histIdx = writeIdx ^ 1u;
+
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+
+  impl.cmd.endPass();
+  // history: park in SHADER_READ; the write target: -> COLOR_ATTACHMENT.
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(
+          impl.taa[histIdx].image, impl.taaLayout[histIdx],
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+          VK_ACCESS_2_SHADER_READ_BIT));
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(
+          impl.taa[writeIdx].image, impl.taaLayout[writeIdx],
+          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+  {
+    const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "taa"};
+    impl.cmd.beginColorPass(impl.taa[writeIdx].view, width, height);
+
+    const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+    const VkDescriptorImageInfo imageInfos[3] = {
+        VkDescriptorImageInfo{
+            .sampler = impl.linearSampler,
+            .imageView = slot.hdr.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkDescriptorImageInfo{
+            .sampler = impl.linearSampler,
+            .imageView = impl.taa[histIdx].view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkDescriptorImageInfo{
+            .sampler = impl.linearSampler,
+            .imageView = slot.gbuffer[0].view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+    };
+    std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
+    u32 nextImage = 0, nextBuffer = 0;
+    for (u32 b = 0; b < fs.bindingCount; ++b) {
+      if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        const u32 k = (std::min)(nextImage++, 2u);
+        writes[b] = VkWriteDescriptorSet{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = set,
+            .dstBinding = b,
+            .descriptorCount = 1,
+            .descriptorType = fs.bindingTypes[b],
+            .pImageInfo = &imageInfos[k],
+        };
+      } else {
+        if (nextBuffer >= bufferCount) continue;
+        const u32 k = nextBuffer++;
+        writes[b] = VkWriteDescriptorSet{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = set,
+            .dstBinding = b,
+            .descriptorCount = 1,
+            .descriptorType = fs.bindingTypes[b],
+            .pBufferInfo = &infos[k],
+        };
+      }
+    }
+    vkUpdateDescriptorSets(impl.device.device, fs.bindingCount, writes.data(),
+                           0, nullptr);
+    vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            fs.layout, 0, 1, &set, 0, nullptr);
+    vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      fs.pipeline);
+    if (pushBytes > 0)
+      vkCmdPushConstants(impl.cmd.cmd(), fs.layout,
+                         VK_SHADER_STAGE_VERTEX_BIT |
+                             VK_SHADER_STAGE_FRAGMENT_BIT,
+                         0, static_cast<u32>(pushBytes), push);
+    vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+  }
+  impl.cmd.endPass();
+  // The fresh resolve becomes the tonemap input (and next frame's
+  // history) - park it in SHADER_READ.
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(
+          impl.taa[writeIdx].image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+          VK_ACCESS_2_SHADER_READ_BIT));
+  impl.taaLayout[writeIdx] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  impl.taaLayout[histIdx] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  impl.taaActive = true;
+}
+
 void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
-                                u32 width, u32 height) {
+                                u32 width, u32 height, bool fromTaa) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
       pipeline > impl.pipelines.fullscreenCount())
@@ -1957,6 +2122,9 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
   if (slot.hdr.view == VK_NULL_HANDLE || slot.offscreen.view == VK_NULL_HANDLE)
     return;
+  // fromTaa: sample the freshly written resolve instead of the raw
+  // slot HDR (impl.taaParity points at it after drawTaa).
+  if (fromTaa && !impl.taaActive) return;
 
   impl.cmd.endPass();
   {
@@ -1966,7 +2134,7 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
     const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
     VkDescriptorImageInfo imageInfo{
         .sampler = impl.linearSampler,
-        .imageView = slot.hdr.view,
+        .imageView = fromTaa ? impl.taa[impl.taaParity].view : slot.hdr.view,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
     std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);

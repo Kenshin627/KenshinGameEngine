@@ -298,7 +298,16 @@ class IRenderBackend {
   /// depth-less color scope. Follows drawLighting every deferred frame.
   virtual u32 createTonemapPipeline(const FullscreenPipelineInfo& info) = 0;
   virtual void drawTonemap(u32 pipeline, const void* push, usize pushBytes,
-                           u32 width, u32 height) = 0;
+                           u32 width, u32 height, bool fromTaa = false) = 0;
+  /// M9 TAA resolve: samples this slot's HDR + GBuffer A + the history
+  /// ping-pong pair (all backend-internal) and writes the resolved
+  /// RGBA16F; the SSBO `bufferHandles` carry the matrices/blend block
+  /// (a push block would exceed the guaranteed 128B). The tonemap pass
+  /// that follows with fromTaa=true samples the fresh resolve.
+  virtual u32 createTaaPipeline(const FullscreenPipelineInfo& info) = 0;
+  virtual void drawTaa(u32 pipeline, const u32* bufferHandles,
+                       u32 bufferCount, const void* push, usize pushBytes,
+                       u32 width, u32 height) = 0;
   /// M9.1 shadow depth decode: the fsShadowDepth entry (the shadow
   /// chain's VisBuffer decoded from the light's view) rendered into the
   /// backend's persistent R32F shadow target (created on first use,
