@@ -58,8 +58,12 @@ bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log);
 /// v3 writer: `pg` from packPages over `dag` (whose pools must still be
 /// populated - the packer reads them; the file gets the page-local
 /// offsets).
+/// M7.2b: `compress` rides the meshopt codec over the page blobs on
+/// disk (v8; the reader transparently transcodes back to the v7 byte
+/// layout). A page the codec cannot shrink is stored raw.
 bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
-                     const PackedGeometry& pg, std::string& log);
+                     const PackedGeometry& pg, std::string& log,
+                     bool compress = true);
 
 /// On-demand page reader for v3 files (the streaming IO side). Holds
 /// the FILE* open; readPage seeks to the page's directory offset.
@@ -85,6 +89,8 @@ class KGeoPageReader {
   bool m_hasNormals = false;
   bool m_hasUvs = false;
   std::vector<u64> m_offsets;  // per page: fileOffset, byteLen pairs
+  std::vector<u64> m_rawLen;  // M7.2b: decoded length (v7: == byteLen)
+  bool m_compressed = false;
 };
 
 }  // namespace geometry

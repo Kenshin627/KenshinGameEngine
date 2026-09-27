@@ -623,10 +623,14 @@ void main(uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     const uint2 widthHeightU = uint2(uint(widthHeight.x), uint(widthHeight.y));
     // Stage C scissor: 11-bit halves packed as (x<<11)|y into [11].zw
     // (22 bits = exactly representable in f32; the uint round-trip of
-    // the exact integer float is exact).
+    // the exact integer float is exact). All-zero = no scissor (the
+    // full viewport) - a sane default for param fillers that predate
+    // the field (the CPU/GPU differential tests zero their params).
     const uint2 scPacked = uint2(uint(params[11].z), uint(params[11].w));
-    const int4 scissor = int4(int(scPacked.x >> 11u), int(scPacked.x & 2047u),
-                              int(scPacked.y >> 11u), int(scPacked.y & 2047u));
+    int4 scissor = int4(int(scPacked.x >> 11u), int(scPacked.x & 2047u),
+                        int(scPacked.y >> 11u), int(scPacked.y & 2047u));
+    if (scPacked.x == 0u && scPacked.y == 0u)
+        scissor = int4(0, 0, int(widthHeightU.x) - 1, int(widthHeightU.y) - 1);
 
     const float2 wh = widthHeight;
     const uint2 whU = widthHeightU;

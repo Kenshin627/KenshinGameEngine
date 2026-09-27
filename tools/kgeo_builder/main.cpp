@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
   float kd[3] = {-1.0f, -1.0f, -1.0f};  // --kd r g b
   float rough = -1.0f, metal = -1.0f;   // --rough f / --metal f
   bool debugDump = false;               // --debug-dump: per-level DAG stats
+  bool noCompress = false;              // --no-compress: emit v7 (raw pages)
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
       output = argv[++i];
@@ -57,6 +58,8 @@ int main(int argc, char** argv) {
       metal = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--debug-dump") == 0)
       debugDump = true;
+    else if (std::strcmp(argv[i], "--no-compress") == 0)
+      noCompress = true;
     else
       input = argv[i];
   }
@@ -400,10 +403,18 @@ int main(int argc, char** argv) {
     kenshin::log::shutdown();
     return 1;
   }
-  if (!kenshin::geometry::writeKGeoPaged(output, dag, packed, log)) {
+  if (!kenshin::geometry::writeKGeoPaged(output, dag, packed, log,
+                                         !noCompress)) {
     KENSHIN_ERROR("write failed: {}", log);
     kenshin::log::shutdown();
     return 1;
+  }
+  {
+    std::error_code ec;
+    const auto raw = std::filesystem::file_size(fsg::path(output), ec);
+    if (!ec)
+      KENSHIN_INFO("[builder] {} ({}; on-disk {})", output,
+                   noCompress ? "v7 raw pages" : "v8 codec pages", raw);
   }
   // The albedo travels WITH the asset (bare-name reference; the
   // runtime resolves against the .kgeo's directory).
