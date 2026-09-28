@@ -38,7 +38,10 @@ struct GpuInstance
 {
     float4x4 model;
     uint meshId;
-    uint _pad0; uint _pad1; uint _pad2;
+    uint materialBase;  // M8.2 v2: this mesh's offset into the
+                        // concatenated material table (per-cluster ids
+                        // are stamped per-DAG at pack time)
+    uint _pad1; uint _pad2;
     float4 bounds;
 };
 
@@ -844,7 +847,10 @@ GBufferOut fsGBuffer(float4 frag : SV_Position)
     if (paged)
     {
         const uint matCount = max(uint(decodeParams[1].y), 1u);
-        const uint matId = min((qm.widths >> 12) & 0xFFu, matCount - 1u);
+        const uint matId =
+            min(((qm.widths >> 12) & 0xFFu) +
+                    instances[instanceIdx].materialBase,
+                matCount - 1u);
         const GpuMaterial mat = materials[matId];
         matIdOut = float(matId) / 255.0;
         kd = mat.kdTex.rgb;

@@ -224,6 +224,7 @@ class VirtualGeometryScene {
       m_clusterMetaFlat;  // v5 per-cluster meta ordinals    // global cluster -> global page
   std::vector<f32> m_materialData;  // M8.2: 8-f32 GPU material records
   std::vector<std::string> m_materialTexPaths;  // disk-side albedo refs
+  std::vector<u32> m_meshMaterialBase;  // per mesh: first material index
   std::vector<u32> m_pageMetaFlat;              // 6 u32 per global page
   std::vector<glm::vec4> m_aabbs;  // paged: conservative sphere boxes
   u32 m_pageCount = 0;

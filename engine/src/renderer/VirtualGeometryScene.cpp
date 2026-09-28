@@ -192,6 +192,9 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
     range.boundsSphere = bounds;
   }
 
+  // Keep the per-mesh material base aligned for setInstances (unpaged
+  // dags carry no material table - the paged-only shader path).
+  m_meshMaterialBase.push_back(static_cast<u32>(m_materialData.size() / 8u));
   m_meshRanges.push_back(range);
   m_poolsDirty = true;
   return static_cast<u32>(m_meshRanges.size() - 1);
@@ -265,16 +268,12 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   // v7: the material table rides along (texture layers are resolved
   // by the app through the TextureManager BEFORE it calls this -
   // m_materialData entries are already GPU-ready 8-f32 records).
-  // V1 LIMIT: per-cluster ids are stamped per-DAG at pack time and
-  // index their OWN dag's table; with multiple paged meshes the
-  // concatenated table is NOT rebased - only single-mesh scenes are
-  // correct today (the app only ever adds one). Warn loudly.
-  if (!m_materialData.empty() && !dag.materials.empty()) {
-    KENSHIN_WARN(
-        "[vgscene] multi-mesh paged material tables concatenate without "
-        "id rebasing (v1 single-mesh limitation) - later meshes' ids "
-        "index the wrong entries");
-  }
+  // V2: per-cluster ids are stamped per-DAG at pack time; the mesh's
+  // offset into the concatenated table rides the GPU instance
+  // (GpuInstance.materialBase) and the decode adds it - multi-mesh
+  // scenes resolve their OWN materials.
+  m_meshMaterialBase.push_back(
+      static_cast<u32>(m_materialData.size() / 8u));
   for (const auto& mat : dag.materials) {
     f32 r[8] = {mat.kd[0],     mat.kd[1],    mat.kd[2], mat.texLayer,
                 mat.roughness, mat.metallic, 0.0f,      0.0f};
@@ -356,7 +355,11 @@ void VirtualGeometryScene::setInstances(
     u8* ptr = data.data() + i * 96;
     std::memcpy(ptr + 0, &instances[i].model, 64);
     std::memcpy(ptr + 64, &instances[i].meshId, 4);
-    std::memset(ptr + 68, 0, 12);
+    // M8.2 v2: the mesh's material-table offset (per-cluster ids are
+    // per-DAG; the decode adds this base - multi-mesh correctness).
+    const u32 matBase = m_meshMaterialBase[instances[i].meshId];
+    std::memcpy(ptr + 68, &matBase, 4);
+    std::memset(ptr + 72, 0, 8);
     glm::vec4 world = instances[i].boundsSphere;
     if (world.w < 0.0f) {
       const VgMeshRange& mesh = m_meshRanges[instances[i].meshId];

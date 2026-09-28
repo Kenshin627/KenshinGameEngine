@@ -143,6 +143,8 @@ struct Args {
   bool forceTaa = false;        // --taa: force ON over the parked default
   bool noShadows = false;       // M9.1 A/B: disable the shadow map
   std::string ground;           // M9.1: a ground-plane .kgeo whose
+  std::vector<std::string> meshes;  // --mesh <kgeo>: extra assets,
+                                    // instanced left-to-right
                                 // instances receive the shadows
   bool multi = false;           // S4.6 acceptance: near/mid/far instances
   bool dense = false;           // M3.4 acceptance: front-back occluders
@@ -183,8 +185,6 @@ Args parseArgs(int argc, char** argv) {
       args.frames = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc)
       sscanf_s(argv[++i], "%dx%d", &args.width, &args.height);
-    else if (std::strcmp(argv[i], "--mesh") == 0 && i + 1 < argc)
-      args.mesh = argv[++i];
     else if (std::strcmp(argv[i], "--kgeo") == 0 && i + 1 < argc)
       args.kgeo = argv[++i];
     else if (std::strcmp(argv[i], "--lod-threshold") == 0 && i + 1 < argc)
@@ -221,6 +221,8 @@ Args parseArgs(int argc, char** argv) {
       args.forceTaa = true;
     else if (std::strcmp(argv[i], "--ground") == 0 && i + 1 < argc)
       args.ground = argv[++i];
+    else if (std::strcmp(argv[i], "--mesh") == 0 && i + 1 < argc)
+      args.meshes.push_back(argv[++i]);
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
       args.viewMode = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--multi") == 0)
@@ -604,6 +606,50 @@ int main(int argc, char** argv) {
           return 1;
         }
       }
+      // --mesh: extra assets (the real-content gallery). Materials
+      // resolve like the primary's; the scene's per-mesh material base
+      // handles the table rebasing (M8.2 v2).
+      std::vector<kenshin::u32> extraMeshIds;
+      std::vector<std::string> extraTexPaths;
+      for (const auto& path : args.meshes) {
+        demo::KgeoPreview mp;
+        std::string mlog;
+        if (!demo::loadKgeo(path, mp, mlog)) {
+          KENSHIN_ERROR("[main] --mesh load failed: {} ({})", path, mlog);
+          return 1;
+        }
+        if (!mp.dag.paged) {
+          KENSHIN_ERROR("[main] --mesh {} is not a paged asset; rebuild it",
+                        path);
+          return 1;
+        }
+        if (!mp.dag.materials.empty()) {
+          const auto dir = std::filesystem::path(path).parent_path();
+          for (auto& mat : mp.dag.materials) {
+            if (mat.texPath.empty()) continue;
+            const auto resolved =
+                mat.texPath.find(':') == std::string::npos &&
+                        !std::filesystem::exists(dir / mat.texPath)
+                    ? std::filesystem::path(mat.texPath)
+                    : (dir / mat.texPath);
+            const kenshin::u32 layer =
+                textureManager.load(resolved.string());
+            if (layer != kenshin::manager::TextureManager::kInvalidLayer)
+              mat.texLayer = static_cast<kenshin::f32>(layer);
+          }
+          albedoTexture = textureManager.textureArray();
+        }
+        const kenshin::u32 id = vgScene.addMeshPaged(mp.dag);
+        if (id == 0xFFFFFFFFu) {
+          KENSHIN_ERROR("[main] --mesh {} rejected (rebuild with the "
+                        "current kgeo_builder)", path);
+          return 1;
+        }
+        extraMeshIds.push_back(id);
+        extraTexPaths.push_back(path);
+        KENSHIN_INFO("[main] extra mesh {}: {} ({} clusters)", extraMeshIds.size() - 1,
+                     path, mp.dag.clusters.size());
+      }
       const kenshin::u32 slotCap =
           pagedAsset && args.streamBudgetMb > 0
               ? kenshin::u32((kenshin::u64(args.streamBudgetMb) * 1024 * 1024) /
@@ -634,6 +680,8 @@ int main(int argc, char** argv) {
         // ground-invisible bug).
         if (groundMeshId != 0xFFFFFFFFu && groundPaged)
           streamer->addAsset(groundMeshId, args.ground);
+        for (kenshin::u32 e = 0; e < extraMeshIds.size(); ++e)
+          streamer->addAsset(extraMeshIds[e], extraTexPaths[e]);
         // First frame coarse: the leading (coarsest) pages resident
         // before the loop starts - no black flash while the async
         // thread spins up.
@@ -764,6 +812,14 @@ int main(int argc, char** argv) {
                 glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -1.5f));
             chainInstances.push_back(makeInstFor(groundMeshId, gm));
             vgInsts.push_back({gm, groundMeshId});
+          }
+          // --mesh gallery: spaced along -x (the default camera's view
+          // axis from its +x+y orbit), sitting on the same ground.
+          for (kenshin::u32 e = 0; e < extraMeshIds.size(); ++e) {
+            const glm::vec3 o(-2.5f - 3.0f * float(e), 0.0f, 0.0f);
+            const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
+            chainInstances.push_back(makeInstFor(extraMeshIds[e], m));
+            vgInsts.push_back({m, extraMeshIds[e]});
           }
           vgScene.setInstances(vgInsts);
         }
