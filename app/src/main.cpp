@@ -140,6 +140,7 @@ struct Args {
   bool rasterBase = false;      // A/B: force the baseline walk (mode 0)
   bool rasterProbe = false;     // coverage histogram probe ([rasthist])
   bool noTaa = false;           // M9 A/B: disable temporal AA
+  bool forceTaa = false;        // --taa: force ON over the parked default
   bool noShadows = false;       // M9.1 A/B: disable the shadow map
   std::string ground;           // M9.1: a ground-plane .kgeo whose
                                 // instances receive the shadows
@@ -216,6 +217,8 @@ Args parseArgs(int argc, char** argv) {
       args.noShadows = true;
     else if (std::strcmp(argv[i], "--no-taa") == 0)
       args.noTaa = true;
+    else if (std::strcmp(argv[i], "--taa") == 0)
+      args.forceTaa = true;
     else if (std::strcmp(argv[i], "--ground") == 0 && i + 1 < argc)
       args.ground = argv[++i];
     else if (std::strcmp(argv[i], "--view") == 0 && i + 1 < argc)
@@ -389,13 +392,7 @@ struct VgDebugState {
   int tonemapMode = 2;   // 0 Reinhard, 1 ACES(Narkowicz), 2 Filmic(UE)
   bool shadows = true;   // M9.1: the directional light's shadow map
   int shadowLevels = 3;  // Stage B clipmap level count (1..3)
-  // PARKED (M9, 2026-09-27): the resolve comes out black - the pass
-  // runs (proven via texel/blend viz), currentHdr at binding 0 works,
-  // but bindings 1/2 sample zeros for EVERY view tried (history,
-  // gbuffer A/B, even the proven hdr view). Suspect the mixed-pool
-  // set for >1 sampler binding on this pipeline; next step is a
-  // RenderDoc capture comparing against drawLighting's set flow.
-  bool taa = false;
+  bool taa = true;  // M9 temporal AA (jitter + history resolve)
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
                                        // (moved off KgeoPreview at the
@@ -1081,6 +1078,7 @@ int main(int argc, char** argv) {
       // brace-less if above would re-create the pipeline stack every
       // frame - the review's catch).
       if (!tonemapReady) tonemapReady = tonemapPass.init(*vgBackend, shaders);
+      // DEBUG: init fully disabled
       if (chainReady && decodeReady) {
         // Same camera, same frame: the chain's inputs and the decode's
         // matrices cannot disagree anymore.
@@ -1090,12 +1088,18 @@ int main(int argc, char** argv) {
         // projection's [2][0]/[2][1] (clip.xy += jitter * clip.w); the
         // resolve unprojects with the UNJITTERED pair so the jitter
         // never leaks into reprojection.
-        const bool taaOn = vgDebug.taa && !args.noTaa;
+        const bool taaOn = (vgDebug.taa || args.forceTaa) && !args.noTaa;
         glm::mat4 projJ = camera.projMatrix();
         if (taaOn) {
+          // NOTE: ci.width is assigned AFTER this block (from vp) - the
+          // divisor MUST be vp.x/vp.y. Dividing by the still-zero
+          // ci.width produced an inf jitter that garbage'd the whole
+          // projection (the chain culled to zero clusters - THE TAA
+          // black-screen root cause; the pass/descriptor stack was
+          // never broken).
           const glm::vec2 h = halton23(int(frame) & 7);
-          projJ[2][0] += (h.x * 2.0f - 1.0f) / float(ci.width);
-          projJ[2][1] += (h.y * 2.0f - 1.0f) / float(ci.height);
+          projJ[2][0] += (h.x * 2.0f - 1.0f) / vp.x;
+          projJ[2][1] += (h.y * 2.0f - 1.0f) / vp.y;
         }
         const glm::mat4 viewProjJ = projJ * camera.viewMatrix();
         ci.proj = projJ;
@@ -1413,7 +1417,6 @@ int main(int argc, char** argv) {
           // M9 TAA resolve (skip the first frames after (re)validation:
           // the history is garbage until the ping-pong fills).
           bool resolvedByTaa = false;
-          if (!taaReady) taaReady = taaPass.init(*vgBackend, shaders);
           if (taaReady && taaOn) {
             kenshin::renderer::TaaFrame tf;
             tf.invViewProj = glm::inverse(camera.viewProjMatrix());

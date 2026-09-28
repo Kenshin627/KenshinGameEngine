@@ -1974,9 +1974,10 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
   const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
   if (!fs.valid || fs.bindingCount == 0) return;
   // The dense mixed layout leaves binding gaps as SSBO when SPIR-V
-  // dead-strips an unused sampler (the M7.2 reflection lesson); the
-  // full taa.slang always reflects exactly [3 samplers + 1 SSBO].
-  if (fs.bindingCount != 4) return;
+  // dead-strips an unused sampler (the M7.2 reflection lesson) - the
+  // binding loop clamps instead of skipping so every write stays
+  // valid whatever the reflection produced.
+  if (fs.bindingCount < 1) return;
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
   if (slot.hdr.view == VK_NULL_HANDLE ||
       slot.gbuffer[0].view == VK_NULL_HANDLE)
@@ -2071,8 +2072,7 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
             .pImageInfo = &imageInfos[k],
         };
       } else {
-        if (nextBuffer >= bufferCount) continue;
-        const u32 k = nextBuffer++;
+        const u32 k = bufferCount == 0 ? 0 : (std::min)(nextBuffer++, bufferCount - 1u);
         writes[b] = VkWriteDescriptorSet{
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = set,
