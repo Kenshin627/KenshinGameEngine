@@ -76,8 +76,10 @@ struct GpuGroup {
 struct GpuInstance {
   float4x4 model;
   uint meshId;
-  uint _pad0;
-  uint _pad1;
+  uint _pad0;        // 68 (materialBase lives in the SCENE's decode
+                    // instance struct; the chain buffer keeps it pad)
+  uint castShadows;  // 72: receiver-only instances (the ground) never
+                     // enter the shadow maps
   uint _pad2;
   float4 bounds;
 };
@@ -209,6 +211,11 @@ bool occluded(uint2 item, float4x4 model)
   if (tid >= counters[3] || tid >= uint(params[1].w)) return;
 
   const uint2 item = workItems[tid];
+  // M9.1: shadow chains (params[7].z) skip receiver-only instances -
+  // a ground plane in its own map self-receives at minified sampling
+  // (moire bands no bias clears; it occludes nothing above it in a
+  // directional light anyway).
+  if (params[1].z > 0.5 && instances[item.x].castShadows == 0u) return;
   const GpuCluster cluster = clusters[item.y];
   const float4x4 model = instances[item.x].model;
 

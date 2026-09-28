@@ -51,6 +51,9 @@ struct ChainInputs {
   u32 scissorRect[4] = {0, 0, 0xFFFFFFFFu, 0xFFFFFFFFu};
   glm::vec4 planes[6]{};
   bool occlusionEnabled = true;  // A/B + first-run safety toggle
+  /// M9.1: shadow chains set this to skip receiver-only instances
+  /// (castShadows == 0 in the chain's instance buffer) at emit time.
+  u32 cullNonCasters = 0;
   u32 hwMode = 0;                // M4.2: 0 = all SW (the default since
                                  // the 2026-09-19 threshold sweep - the
                                  // mode-1 rasterizer beat every routing

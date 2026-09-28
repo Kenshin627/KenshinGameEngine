@@ -505,7 +505,11 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   glm::vec4 cullParams[8];
   cullParams[0] = glm::vec4(in.camPos, in.pixelThreshold);
-  cullParams[1] = glm::vec4(in.worldPerPixel, 0.0f, in.nearZ, f32(m_maxPairs));
+  // [1].z: the receiver-only skip flag (free in BOTH param spaces -
+  // the hier params override only [1].y/.w and [7].z/.w; [7].z was a
+  // trap: it carries clusterCount in the hierarchy shaders).
+  cullParams[1] = glm::vec4(in.worldPerPixel, 0.0f, f32(in.cullNonCasters),
+                            f32(m_maxPairs));
   for (int c = 0; c < 4; ++c)
     cullParams[2 + c] =
         occActive ? m_prevVP[prevSlot][c] : glm::vec4(c == 0 ? 1.0f : 0.0f);

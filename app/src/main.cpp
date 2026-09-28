@@ -698,12 +698,14 @@ int main(int argc, char** argv) {
         // meshId + mesh bounds must come from the INSTANCE'S mesh - the
         // ground uses groundMeshId; a hardcoded vgMeshId renders a
         // second copy of the first mesh instead (the M9.1 ground bug).
-        const auto makeInstFor = [&](kenshin::u32 id, const glm::mat4& model) {
+        const auto makeInstFor = [&](kenshin::u32 id, const glm::mat4& model,
+                                     kenshin::u32 casts = 1u) {
           const kenshin::renderer::VgMeshRange& m =
               vgScene.meshes()[id];
           kenshin::renderer::CullGpuInstance inst;
           inst.model = model;
           inst.meshId = id;
+          inst.pad[1] = casts;  // 72: castShadows (receiver-only = 0)
           // WORLD bounds sphere (the cull input): center transformed,
           // radius scaled by the max column length - the same derivation
           // VirtualGeometryScene::setInstances applies. Without this the
@@ -810,7 +812,7 @@ int main(int argc, char** argv) {
             // knot (radius ~1.5) so the knot sits on it.
             const glm::mat4 gm =
                 glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -1.5f));
-            chainInstances.push_back(makeInstFor(groundMeshId, gm));
+            chainInstances.push_back(makeInstFor(groundMeshId, gm, 0u));
             vgInsts.push_back({gm, groundMeshId});
           }
           // --mesh gallery: spaced along -x (the default camera's view
@@ -1112,13 +1114,36 @@ int main(int argc, char** argv) {
         // forever - the M8.3 review's brace-less-if lesson).
         if (!shadowChainReady) {
           shadowChainReady = true;
+          // Receiver-only instances (castShadows == 0, the ground) get a
+          // ZERO transform in the shadow chains: degenerate bounds
+          // frustum-cull them in EVERY cull mode, the index space stays
+          // aligned with the scene's decode buffer, and no pairs exist
+          // for the decode to touch. A ground plane in its own map
+          // self-receives at minified sampling (the moire band artifact
+          // no bias clears) and occludes nothing above it in a
+          // directional light anyway.
+          std::vector<kenshin::renderer::CullGpuInstance> shadowInsts =
+              chainInstances;
+          for (auto& si2 : shadowInsts)
+            if (si2.pad[1] == 0u) {
+              // Park the bounds sphere FAR outside every frustum: the
+              // zero-transform alone leaves the instance at the origin
+              // (inside the light box) and its CLUSTER bounds still
+              // pass the cluster-level tests.
+              si2.model = glm::mat4(0.0f);
+              si2.bounds = glm::vec4(1e9f, 1e9f, 1e9f, 0.0f);
+            }
+          KENSHIN_INFO("[dbg] shadowInsts: {} entries, b1=({},{},{},{})",
+                       shadowInsts.size(), shadowInsts[1].bounds.x,
+                       shadowInsts[1].bounds.y, shadowInsts[1].bounds.z,
+                       shadowInsts[1].bounds.w);
           for (int lv = 0; lv < 3; ++lv)
             shadowChainReady =
                 shadowChains[lv].init(
                     *vgBackend, shaders, vgScene->positions4(),
                     vgScene->indices(), vgScene->clusterData(),
                     vgScene->groupData(), vgScene->hierarchyData(),
-                    vgScene->groupRanges(), meshHierRoots, chainInstances,
+                    vgScene->groupRanges(), meshHierRoots, shadowInsts,
                     chainMeshRanges, chain.maxPairs(), vgScene->clusterAabbs(),
                     pagedPtr, 2048, 2048) &&
                 shadowChainReady;
@@ -1363,7 +1388,8 @@ int main(int argc, char** argv) {
             // main chain keeps its all-SW default; --no-hw / --force-hw
             // keep their A/B meaning here.
             si.hwMode = args.noHw ? 0u : (args.forceHw ? 2u : 1u);
-            si.cullMode = ci.cullMode;
+            si.cullNonCasters = 1u;  // belt: the host also zero-scales
+                                     // non-casters in the shadow chains
             si.rasterMode = 1;
             shadowChains[lv].execute(*vgBackend, si);
 

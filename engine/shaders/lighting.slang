@@ -131,18 +131,24 @@ float shadowFactorLevel(float3 worldPos, float3 nrm, float ndl, uint base,
                                   shadowParams[base + 3u],
                                   shadowParams[base + 4u],
                                   shadowParams[base + 5u]);
-    const float4 clip = lvp[0] * worldPos.x + lvp[1] * worldPos.y +
-                        lvp[2] * worldPos.z + lvp[3];
-    if (abs(clip.x) > 1.0 || abs(clip.y) > 1.0 || clip.z < 0.0 ||
-        clip.z > 1.0)
+    const float4 clip0 = lvp[0] * worldPos.x + lvp[1] * worldPos.y +
+                         lvp[2] * worldPos.z + lvp[3];
+    if (abs(clip0.x) > 1.0 || abs(clip0.y) > 1.0 || clip0.z < 0.0 ||
+        clip0.z > 1.0)
         return -1.0;  // outside this level's frustum: try coarser
     // Normal-offset bias: lift along the normal by two world texels
     // (texelWorld rides the level, so coarser levels lift more -
-    // UE's per-level bias scaling).
+    // UE's per-level bias scaling). The uv SAMPLES the UN-lifted
+    // position and only the COMPARE depth uses the lift: at coarse
+    // levels the lift's horizontal projection exceeds a texel, and
+    // sampling the shifted uv reads a NEIGHBOR texel's staircase
+    // depth (the diagonal band artifact).
+    const float4 clip = lvp[0] * worldPos.x + lvp[1] * worldPos.y +
+                        lvp[2] * worldPos.z + lvp[3];
     const float3 lifted = worldPos + nrm * (p4.z * 2.0);
     const float4 clipN = lvp[0] * lifted.x + lvp[1] * lifted.y +
                          lvp[2] * lifted.z + lvp[3];
-    const float2 uv = clipN.xy * 0.5 + 0.5;
+    const float2 uv = clip0.xy * 0.5 + 0.5;
     // UE ComputeDepthBiasDirectionalSpot: slope = tan(angle to light)
     // = sqrt(1-NoL^2)/NoL clamped; bias = constant + slopeScale*slope.
     const float slope =

@@ -72,8 +72,10 @@ struct GpuGroup {
 struct GpuInstance {
   float4x4 model;
   uint meshId;
-  uint _pad0;
-  uint _pad1;
+  uint _pad0;        // 68 (materialBase lives in the SCENE's decode
+                    // instance struct; the chain buffer keeps it pad)
+  uint castShadows;  // 72: receiver-only instances (the ground) never
+                     // enter the shadow maps
   uint _pad2;
   float4 bounds;
 };
@@ -196,6 +198,11 @@ bool occluded(uint2 item, float4x4 model) {
 /// The cull_clusters.slang per-cluster body, VERBATIM (identical
 /// counters/pairs semantics - the dual-mode differential pins this).
 void emitCluster(uint2 item, float4x4 model) {
+  // params[7].z (shadow chains): receiver-only instances never emit -
+  // a ground plane in its own map self-receives at minified sampling
+  // (moire bands no bias can clear; it occludes nothing above it in a
+  // directional light anyway).
+  if (params[1].z > 0.5 && instances[item.x].castShadows == 0u) return;
   const GpuCluster cluster = clusters[item.y];
 
   if (!fireable(cluster.group, model)) {
