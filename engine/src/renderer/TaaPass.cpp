@@ -53,7 +53,7 @@ void TaaPass::draw(backend::IRenderBackend& backend, const TaaFrame& frame,
   for (int r = 0; r < 4; ++r) p[4 + r] = prev[r];
   p[8] = glm::vec4(frame.camPos, frame.blend);
   p[9] = glm::vec4(1.0f / static_cast<f32>(width),
-                   1.0f / static_cast<f32>(height), 0.0f, 0.0f);
+                   1.0f / static_cast<f32>(height), 0.0f, frame.sharpen);
   p[10] = glm::vec4(frame.jitter, 0.0f, 0.0f);
   const u32 handles[1] = {m_params};
   backend.drawTaa(m_pipeline, handles, 1, nullptr, 0, width, height);

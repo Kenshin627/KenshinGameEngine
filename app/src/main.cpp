@@ -393,6 +393,7 @@ struct VgDebugState {
   bool shadows = true;   // M9.1: the directional light's shadow map
   int shadowLevels = 3;  // Stage B clipmap level count (1..3)
   bool taa = true;  // M9 temporal AA (jitter + history resolve)
+  kenshin::f32 taaSharpen = 0.3f;  // post-resolve unsharp (0 = off)
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
                                        // (moved off KgeoPreview at the
@@ -805,6 +806,8 @@ int main(int argc, char** argv) {
             ImGui::Checkbox("shadows", &vgDebug.shadows);
             ImGui::SameLine();
             ImGui::Checkbox("TAA", &vgDebug.taa);
+            if (vgDebug.taa)
+              ImGui::SliderFloat("sharpen", &vgDebug.taaSharpen, 0.0f, 1.0f);
             ImGui::SliderInt("shadow levels", &vgDebug.shadowLevels, 1, 3);
             ImGui::Combo("tonemap", &vgDebug.tonemapMode, "Reinhard\0ACES\0");
             ImGui::ColorEdit3("sky", &vgDebug.skyColor.x);
@@ -1426,8 +1429,9 @@ int main(int argc, char** argv) {
             tf.invViewProj = glm::inverse(camera.viewProjMatrix());
             tf.prevViewProj = taaPrevViewProj;
             tf.camPos = camera.position();
-            tf.blend = taaPrevValid && taaWarmup > 1 ? 0.96f : 0.0f;
+            tf.blend = taaPrevValid && taaWarmup > 1 ? 0.93f : 0.0f;
             tf.jitter = taaJitterUV;
+            tf.sharpen = vgDebug.taaSharpen;
             taaPass.draw(*vgBackend, tf, ci.width, ci.height);
             resolvedByTaa = true;
           }

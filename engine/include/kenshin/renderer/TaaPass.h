@@ -30,6 +30,7 @@ struct TaaFrame {
   glm::vec3 camPos{0.0f};
   float blend = 0.9f;           // 0 = no history (first frame/resize)
   glm::vec2 jitter{0.0f};       // THIS frame's jitter in UV units
+  float sharpen = 0.3f;         // post-resolve unsharp strength
 };
 
 class TaaPass {
