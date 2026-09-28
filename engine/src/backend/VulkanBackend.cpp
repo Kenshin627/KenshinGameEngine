@@ -317,8 +317,14 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
     if ((fp.optimalTilingFeatures & need) == need) {
       const VkSamplerCreateInfo samplerInfo{
           .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-          .magFilter = VK_FILTER_NEAREST,
-          .minFilter = VK_FILTER_NEAREST,
+          // LINEAR: the receiver-side compare samples DEPTH manually
+          // (not a PCF compare sampler) - filtering the value before
+          // the compare is what kills the minification moire bands on
+          // grazing receivers (the cube's side faces, the far ground):
+          // NEAREST row-snaps the depth a fore-shortened face spans
+          // (each map row = a world-horizontal line).
+          .magFilter = VK_FILTER_LINEAR,
+          .minFilter = VK_FILTER_LINEAR,
           .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
           .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
           .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
