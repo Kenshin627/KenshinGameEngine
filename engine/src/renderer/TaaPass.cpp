@@ -28,7 +28,7 @@ bool TaaPass::init(backend::IRenderBackend& backend,
     return false;
   }
   backend::IRenderBackend::BufferDesc desc;
-  desc.size = 160;  // 2 mat4 + 2 vec4, std430-friendly
+  desc.size = 176;  // 2 mat4 + 3 vec4 + pad, std430-friendly
   desc.usage = backend::IRenderBackend::BufferStorage |
                backend::IRenderBackend::BufferHostVisible;
   desc.initialData = nullptr;
@@ -54,6 +54,7 @@ void TaaPass::draw(backend::IRenderBackend& backend, const TaaFrame& frame,
   p[8] = glm::vec4(frame.camPos, frame.blend);
   p[9] = glm::vec4(1.0f / static_cast<f32>(width),
                    1.0f / static_cast<f32>(height), 0.0f, 0.0f);
+  p[10] = glm::vec4(frame.jitter, 0.0f, 0.0f);
   const u32 handles[1] = {m_params};
   backend.drawTaa(m_pipeline, handles, 1, nullptr, 0, width, height);
 }

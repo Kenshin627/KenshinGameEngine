@@ -1078,7 +1078,7 @@ int main(int argc, char** argv) {
       // brace-less if above would re-create the pipeline stack every
       // frame - the review's catch).
       if (!tonemapReady) tonemapReady = tonemapPass.init(*vgBackend, shaders);
-      // DEBUG: init fully disabled
+      if (!taaReady) taaReady = taaPass.init(*vgBackend, shaders);
       if (chainReady && decodeReady) {
         // Same camera, same frame: the chain's inputs and the decode's
         // matrices cannot disagree anymore.
@@ -1090,6 +1090,7 @@ int main(int argc, char** argv) {
         // never leaks into reprojection.
         const bool taaOn = (vgDebug.taa || args.forceTaa) && !args.noTaa;
         glm::mat4 projJ = camera.projMatrix();
+        glm::vec2 taaJitterUV(0.0f);
         if (taaOn) {
           // NOTE: ci.width is assigned AFTER this block (from vp) - the
           // divisor MUST be vp.x/vp.y. Dividing by the still-zero
@@ -1098,8 +1099,11 @@ int main(int argc, char** argv) {
           // black-screen root cause; the pass/descriptor stack was
           // never broken).
           const glm::vec2 h = halton23(int(frame) & 7);
-          projJ[2][0] += (h.x * 2.0f - 1.0f) / vp.x;
-          projJ[2][1] += (h.y * 2.0f - 1.0f) / vp.y;
+          const glm::vec2 jn((h.x * 2.0f - 1.0f) / vp.x,
+                             (h.y * 2.0f - 1.0f) / vp.y);
+          projJ[2][0] += jn.x;
+          projJ[2][1] += jn.y;
+          taaJitterUV = jn * 0.5f;  // NDC -> UV for the resolve
         }
         const glm::mat4 viewProjJ = projJ * camera.viewMatrix();
         ci.proj = projJ;
@@ -1422,7 +1426,8 @@ int main(int argc, char** argv) {
             tf.invViewProj = glm::inverse(camera.viewProjMatrix());
             tf.prevViewProj = taaPrevViewProj;
             tf.camPos = camera.position();
-            tf.blend = taaPrevValid && taaWarmup > 1 ? 0.9f : 0.0f;
+            tf.blend = taaPrevValid && taaWarmup > 1 ? 0.96f : 0.0f;
+            tf.jitter = taaJitterUV;
             taaPass.draw(*vgBackend, tf, ci.width, ci.height);
             resolvedByTaa = true;
           }

@@ -2,14 +2,15 @@
 // geometry passes render with a per-frame subpixel jitter (Halton
 // (2,3), applied to the projection's NDC offsets in main.cpp); this
 // pass reprojects the PREVIOUS resolved frame onto the current one
-// and blends (UE's accumulate-and-clamp shape, minus the v2 niceties
-// like nearest-depth disocclusion or velocity dilation - v1).
+// and blends (UE's accumulate-and-clamp shape, v1.5: jitter-
+// compensated current fetch + a motion-adaptive weight in place of a
+// velocity buffer).
 //
 // Reprojection: GBuffer A's alpha is the EUCLIDEAN view-ray distance
 // (decode_material.slang fsGBuffer's contract), so the world position
 // is camPos + normalize(far - near) * dist with the two unprojected
 // NDC-z corners of the pixel's ray. The matrices are the UNJITTERED
-// pair on purpose: jitter must never leak into the reprojection.
+// pair on purpose: jitter must never leak into reprojection.
 //
 // Background (dist == 0) bypasses history: the regression net's
 // byte-exact background contract rides the raw current sample.
@@ -18,8 +19,9 @@
 //   0..2: Sampler2D currentHdr / history / gbufferA (bound by the
 //         backend in this order - slot HDR, the ping-pong history,
 //         the slot's GBuffer A view)
-//   3: SSBO taaParams - the two matrices + camera/blend/texel (a
-//      push block would need 160B; the guaranteed push limit is 128)
+//   3: SSBO taaParams - the two matrices + camera/blend/texel/jitter
+//      (a push block would need 160B+; the guaranteed push limit is
+//      128)
 
 struct TaaParams
 {
@@ -32,6 +34,9 @@ struct TaaParams
     float4 camBlend;   // xyz camera position, w = history blend weight
                        // (0 = no history: first frames / resize / toggle)
     float4 texel;      // xy = 1/w, 1/h, zw scratch
+    float4 jitter;     // xy = THIS frame's jitter in UV units (ndc/2):
+                       // the render shifted content to +j, so the
+                       // resolve reads it at uv - j
 };
 
 [[vk::binding(0)]] Sampler2D currentHdr;
@@ -65,13 +70,12 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
 {
     const TaaParams tp = taaParams[0];
     const float2 uv = frag.xy * tp.texel.xy;
-    const float3 cur = currentHdr.Sample(uv).rgb;
-    // Keep every sampler load live through real branches, then viz cur.
-    if (tp.texel.x < -1.0) return 0.xxxx;
-    if (history.Sample(uv).r < -1.0) return 0.xxxx;
-    if (cur.r < -1.0) return 0.xxxx;
-    const float distV = gbufferA.Sample(uv).a;  // DEBUG dist viz
-    return float4(distV * 0.05, distV * 0.001, 0.0, 1.0);
+    // Jitter-compensated current fetch: the render shifted content to
+    // +j; sampling at uv - j reads it aligned (without this the raw
+    // per-phase wobble leaks through the clamp - the perceptible
+    // shimmer on high-frequency content).
+    const float2 cuv = uv - tp.jitter.xy;
+    const float3 cur = currentHdr.Sample(cuv).rgb;
     const float dist = gbufferA.Sample(uv).a;
     const float blend = tp.camBlend.w;
     if (dist <= 0.0 || blend <= 0.0)
@@ -91,8 +95,18 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     if (puv.x < 0.0 || puv.y < 0.0 || puv.x > 1.0 || puv.y > 1.0)
         return float4(cur, 1.0);  // left the frame: treat as disocclusion
 
-    // Neighborhood clamp: the current 3x3 AABB guards ghosting; the
-    // clamp is soft (0.25 AABB inflation) to keep some sharpening.
+    // Motion-adaptive weight (no velocity buffer in v1): the history
+    // is only trustworthy where it lands close to this pixel; large
+    // reprojected displacement (camera drag) drops the blend fast -
+    // kills the smear/dizziness, keeps full accumulation when static.
+    const float2 dpx = (puv - uv) / tp.texel.xy;
+    const float blendM = blend / (1.0 + dot(dpx, dpx) * 0.25);
+
+    // Neighborhood clamp: the current 3x3 AABB (sampled at the SAME
+    // jitter-compensated position as cur - mixing spaces feeds the
+    // phase wobble straight through the clamp) guards ghosting; kept
+    // tight (0.05 inflation) so the history resists the residual
+    // wobble of aliased content.
     float3 mn = cur, mx = cur;
     [unroll]
     for (int dy = -1; dy <= 1; ++dy)
@@ -101,15 +115,15 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
         {
             if (dx == 0 && dy == 0) continue;
             const float3 c =
-                currentHdr.Sample(uv + float2(dx, dy) * tp.texel.xy).rgb;
+                currentHdr.Sample(cuv + float2(dx, dy) * tp.texel.xy).rgb;
             mn = min(mn, c);
             mx = max(mx, c);
         }
     const float3 center = (mn + mx) * 0.5;
-    const float3 extents = (mx - mn) * (0.5 + 0.25);
+    const float3 extents = (mx - mn) * (0.5 + 0.05);
     mn = center - extents;
     mx = center + extents;
     float3 h = history.Sample(puv).rgb;
     h = clamp(h, mn, mx);
-    return float4(lerp(cur, h, blend), 1.0);
+    return float4(lerp(cur, h, blendM), 1.0);
 }

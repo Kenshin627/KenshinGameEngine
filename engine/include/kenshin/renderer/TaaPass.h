@@ -29,6 +29,7 @@ struct TaaFrame {
   glm::mat4 prevViewProj{1.0f}; // previous UNJITTERED
   glm::vec3 camPos{0.0f};
   float blend = 0.9f;           // 0 = no history (first frame/resize)
+  glm::vec2 jitter{0.0f};       // THIS frame's jitter in UV units
 };
 
 class TaaPass {
