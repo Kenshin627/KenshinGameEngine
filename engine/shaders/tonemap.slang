@@ -30,7 +30,7 @@
 //
 // Push (32B):
 //   float4 clearColorExp - rgb the frame's clear color, a exposure
-//   float4 modeViewport  - x operator, yz = 1/w, 1/h, w scratch
+//   float4 modeViewport  - x operator, yz = 1/w, 1/h, w = TAA sharpen
 
 struct TonemapPush
 {
@@ -213,7 +213,28 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     // black lit pixels).
     if (hdr4.a <= 0.0)
         return float4(push.clearColorExp.rgb, 1.0);
-    const float3 mapped = hdr4.rgb * push.clearColorExp.a;
+    // TAA sharpen (modeViewport.w): the temporal accumulation costs
+    // roughly half a pixel of softness; a small unsharp over the
+    // RESOLVED frame claws it back. Applied HERE - never inside the
+    // resolve, whose output is the next frame's history (a baked-in
+    // unsharp re-applies itself every frame = exponential ringing).
+    float3 hdr = hdr4.rgb;
+    if (push.modeViewport.w > 0.0)
+    {
+        const float2 t = push.modeViewport.yz;
+        float3 nb = float3(0.0);
+        nb += hdrTex.SampleLevel(uv + float2(-t.x, 0.0), 0.0).rgb;
+        nb += hdrTex.SampleLevel(uv + float2(t.x, 0.0), 0.0).rgb;
+        nb += hdrTex.SampleLevel(uv + float2(0.0, -t.y), 0.0).rgb;
+        nb += hdrTex.SampleLevel(uv + float2(0.0, t.y), 0.0).rgb;
+        nb += hdrTex.SampleLevel(uv + float2(-t.x, -t.y), 0.0).rgb;
+        nb += hdrTex.SampleLevel(uv + float2(t.x, -t.y), 0.0).rgb;
+        nb += hdrTex.SampleLevel(uv + float2(-t.x, t.y), 0.0).rgb;
+        nb += hdrTex.SampleLevel(uv + float2(t.x, t.y), 0.0).rgb;
+        hdr = max(hdr + (hdr - nb * (1.0 / 8.0)) * push.modeViewport.w,
+                  float3(0.0));
+    }
+    const float3 mapped = hdr * push.clearColorExp.a;
     float3 outColor;
     if (push.modeViewport.x < 0.5)
     {

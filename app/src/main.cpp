@@ -1431,7 +1431,6 @@ int main(int argc, char** argv) {
             tf.camPos = camera.position();
             tf.blend = taaPrevValid && taaWarmup > 1 ? 0.93f : 0.0f;
             tf.jitter = taaJitterUV;
-            tf.sharpen = vgDebug.taaSharpen;
             taaPass.draw(*vgBackend, tf, ci.width, ci.height);
             resolvedByTaa = true;
           }
@@ -1445,7 +1444,8 @@ int main(int argc, char** argv) {
                     vgDebug.tonemapMode),
                 vgDebug.exposure,
                 glm::vec4(kClearColor[0], kClearColor[1], kClearColor[2], 1.0f),
-                ci.width, ci.height, resolvedByTaa);
+                ci.width, ci.height, resolvedByTaa,
+                resolvedByTaa ? vgDebug.taaSharpen : 0.0f);
         }
       }
     }

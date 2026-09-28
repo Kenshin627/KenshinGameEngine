@@ -108,7 +108,6 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     // tight (0.05 inflation) so the history resists the residual
     // wobble of aliased content.
     float3 mn = cur, mx = cur;
-    float3 nb = float3(0.0);  // the 8-neighbor mean (the unsharp base)
     [unroll]
     for (int dy = -1; dy <= 1; ++dy)
         [unroll]
@@ -119,7 +118,6 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
                 currentHdr.Sample(cuv + float2(dx, dy) * tp.texel.xy).rgb;
             mn = min(mn, c);
             mx = max(mx, c);
-            nb += c;
         }
     const float3 center = (mn + mx) * 0.5;
     const float3 extents = (mx - mn) * (0.5 + 0.05);
@@ -127,10 +125,9 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     mx = center + extents;
     float3 h = history.Sample(puv).rgb;
     h = clamp(h, mn, mx);
-    float3 final = lerp(cur, h, blendM);
-    // UE-style post-resolve sharpen: the accumulation costs roughly a
-    // half-pixel of softness; a small unsharp against the compensated
-    // neighborhood claws it back (strength 0 = off).
-    final += (final - nb * (1.0 / 8.0)) * tp.texel.w;
-    return float4(final, 1.0);
+    // NOTE: NO sharpen here - the resolve output IS next frame's
+    // history; baking an unsharp into it re-applies the sharpen every
+    // frame (exponential ringing, the v1.6 "completely broken image").
+    // The sharpen lives in the tonemap's sample of this resolve.
+    return float4(lerp(cur, h, blendM), 1.0);
 }

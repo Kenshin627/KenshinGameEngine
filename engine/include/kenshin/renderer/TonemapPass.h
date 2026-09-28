@@ -40,7 +40,7 @@ class TonemapPass {
   /// every deferred frame; reads this slot's HDR target implicitly.
   void draw(backend::IRenderBackend& backend, Operator op, float exposure,
             const glm::vec4& clearColor, u32 width, u32 height,
-            bool fromTaa = false);
+            bool fromTaa = false, float sharpen = 0.0f);
 
  private:
   u32 m_pipeline = ~0u;
