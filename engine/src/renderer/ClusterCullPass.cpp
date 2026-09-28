@@ -112,6 +112,11 @@ bool cullClustersOnGpu(backend::IRenderBackend& backend,
     // [7] = (hwMode, hwThresholdPx): always OFF on the one-shot path
     // (the differential has no HW rasterizer).
     params[7] = glm::vec4(0.0f, 18.0f, 0.0f, 0.0f);
+  } else {
+    // [6].w must be POSITIVE even without occlusion: the LOD tolerance
+    // and the routing px/unit sign-encode projection type there (0
+    // would fall into the ORTHO branch and desync the differential).
+    params[6] = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
   }
   // [3] = work item count (the shader's input guard), [4] = occlusion
   // culled counter (out), [6] = cut-triangle accumulation (out) - the

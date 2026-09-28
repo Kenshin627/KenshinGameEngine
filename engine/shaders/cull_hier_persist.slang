@@ -107,7 +107,16 @@ bool fireable(uint groupIdx, float4x4 model) {
   const float scale = max(length(model[0].xyz),
                           max(length(model[1].xyz), length(model[2].xyz)));
   const float dist = max(distance(c, params[0].xyz) - g.bounds.w * scale, 0.1);
-  const float t = params[0].w * params[1].x * dist;
+  // Perspective chains scale the tolerance by distance (a world-space
+  // error projects smaller with range); ORTHO chains (the shadow
+  // clipmaps, params[6].w < 0 - the routing sign encoding) must NOT:
+  // projected error in an ortho map is error/texel regardless of
+  // range. Carrying the x dist over-relaxed the shadow cut ~eyeRange
+  // fold (700 tris / 0.47m tolerance at a 5.9mm texel - the visibly
+  // simplified silhouette).
+  const float t = params[6].w > 0.0
+                     ? params[0].w * params[1].x * dist
+                     : params[0].w * params[1].x;
   return g.simplifyError > t;
 }
 
@@ -329,7 +338,10 @@ uint visitNode(uint inst, uint nodeIdx, float4x4 model, uint nodeCount,
   }
   const float3 nearest = clamp(params[0].xyz, wmn, wmx);
   const float dist = max(distance(nearest, params[0].xyz), 0.1);
-  const float tNode = params[0].w * params[1].x * dist;
+  // Ortho chains (params[6].w < 0): no distance term - see fireable.
+  const float tNode = params[6].w > 0.0
+                          ? params[0].w * params[1].x * dist
+                          : params[0].w * params[1].x;
   if (node.maxSimplifyError <= tNode) {
     InterlockedAdd(state[5], 1);  // pruned
     return 0u;
