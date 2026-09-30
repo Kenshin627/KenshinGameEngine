@@ -20,6 +20,7 @@ namespace fsg = std::filesystem;
 #include "kenshin/assets/ObjLoader.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/geometry/ClusterDag.h"
+#include "kenshin/geometry/ImposterBaker.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
 #include "kenshin/geometry/KGeoFile.h"
 #include "kenshin/geometry/shapes/SphereGeometry.h"
@@ -39,6 +40,8 @@ int main(int argc, char** argv) {
   float rough = -1.0f, metal = -1.0f;   // --rough f / --metal f
   bool debugDump = false;               // --debug-dump: per-level DAG stats
   bool noCompress = false;              // --no-compress: emit v7 (raw pages)
+  bool imposter = false;                // --imposter: bake the far-field
+                                        // atlas (root cut) into the file
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-o") == 0 && i + 1 < argc)
       output = argv[++i];
@@ -60,6 +63,8 @@ int main(int argc, char** argv) {
       debugDump = true;
     else if (std::strcmp(argv[i], "--no-compress") == 0)
       noCompress = true;
+    else if (std::strcmp(argv[i], "--imposter") == 0)
+      imposter = true;
     else
       input = argv[i];
   }
@@ -397,6 +402,30 @@ int main(int argc, char** argv) {
     kenshin::log::shutdown();
     return 0;
   }
+  if (imposter) {
+    // The imposter cut = the DEEPEST level's clusters (the coarsest
+    // COVERING set; dag.roots can mix terminal fragments from finer
+    // levels that overlap the coarse cut and blow the 7-bit budget).
+    kenshin::u32 maxLevel = 0;
+    for (const auto& g : dag.groups)
+      maxLevel = std::max(maxLevel, kenshin::u32(g.lodLevel));
+    std::vector<kenshin::u32> cut;
+    for (const auto& g : dag.groups)
+      if (kenshin::u32(g.lodLevel) == maxLevel)
+        for (kenshin::u32 c : g.clusters) cut.push_back(c);
+    kenshin::geometry::ImposterAtlas atlas;
+    std::string ilog;
+    if (!kenshin::geometry::bakeImposterAtlas(dag, cut, atlas,
+                                              ilog)) {
+      KENSHIN_ERROR("[builder] imposter bake failed: {}", ilog);
+      kenshin::log::shutdown();
+      return 1;
+    }
+    dag.imposterDepth = std::move(atlas.depth);
+    dag.imposterTri = std::move(atlas.tri);
+    KENSHIN_INFO("[builder] imposter baked from {} root clusters",
+                 dag.roots.size());
+  }
   kenshin::geometry::PackedGeometry packed;
   if (!kenshin::geometry::packPages(dag, packed, log)) {
     KENSHIN_ERROR("page packing failed: {}", log);
@@ -414,7 +443,9 @@ int main(int argc, char** argv) {
     const auto raw = std::filesystem::file_size(fsg::path(output), ec);
     if (!ec)
       KENSHIN_INFO("[builder] {} ({}; on-disk {})", output,
-                   noCompress ? "v7 raw pages" : "v8 codec pages", raw);
+                   imposter ? "v9 imposter+pages"
+                            : (noCompress ? "v7 raw pages" : "v8 codec pages"),
+                   raw);
   }
   // The albedo travels WITH the asset (bare-name reference; the
   // runtime resolves against the .kgeo's directory).

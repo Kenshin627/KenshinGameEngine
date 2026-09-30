@@ -163,6 +163,14 @@ struct ClusterDag {
   /// paged gate; pre-v7 assets are rejected with a rebuild hint).
   bool hasMaterialTable = false;
 
+  // ---- M9.2: the far-field imposter atlas ---------------------------
+  /// v9: the root cut's 12x12x12x12 (depth-bits, triangle-id) bake.
+  /// Empty when the file predates v9 or the bake was skipped - the
+  /// runtime falls back to the cluster path (no gate; Stage B treats
+  /// an empty atlas as "never imposter this mesh").
+  std::vector<u32> imposterDepth;  // reversed depth bits, 0 = miss
+  std::vector<u32> imposterTri;    // triangle id, 0xFFFFFFFF = miss
+
   // ---- queries -------------------------------------------------------
   u32 triangleCount(u32 cluster) const {
     return clusters[cluster].indexCount / 3;

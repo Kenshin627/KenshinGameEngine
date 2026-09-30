@@ -29,6 +29,7 @@ add_executable(kenshin_tests
     src/vgchain_tests.cpp
     src/hzb_tests.cpp
     src/imposter_tests.cpp
+    src/kgeo_imposter_tests.cpp
     src/crash_main.cpp
 )
 

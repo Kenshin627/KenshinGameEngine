@@ -32,6 +32,7 @@ constexpr u32 kVersion7 =
         // widths word's high bits (12..19). The RUNTIME paged path
         // requires v7 (hasMaterialTable).
 constexpr u32 kVersion8 = 8;
+constexpr u32 kVersion9 = 9;  // M9.2: v8 + the imposter atlas section
 // M7.2b: v7 with meshopt-CODEC page blobs on disk (transcoded to the
 // v7 byte layout on every read; the in-memory/runtime format and all
 // tables are identical to v7). The tail directory entry grows to 12
@@ -39,8 +40,9 @@ constexpr u32 kVersion8 = 8;
 // page stored raw (codec inflation fallback).
 
 constexpr bool isV7Plus(u32 v) {
-  return v == kVersion7 || v == kVersion8;
+  return v == kVersion7 || v == kVersion8 || v == kVersion9;
 }
+constexpr bool isV9Plus(u32 v) { return v == kVersion9; }
 
 #pragma pack(push, 4)
 struct FileHeader {
@@ -314,7 +316,9 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   std::vector<ClusterDag::DagMaterial> mats = dag.materials;
   if (mats.empty()) mats.emplace_back();
 
-  const u32 version = compress ? kVersion8 : kVersion7;
+  const bool hasImposter =
+      !dag.imposterDepth.empty() && dag.imposterDepth.size() == dag.imposterTri.size();
+  const u32 version = hasImposter ? kVersion9 : (compress ? kVersion8 : kVersion7);
   const FileHeaderV3 header{
       .magic = kMagicV3,
       .version = version,
@@ -411,6 +415,24 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
          (stringBytes == 0 ||
           std::fwrite(strings.data(), 1, stringBytes, file) == stringBytes) &&
          writeVector(file, texOff) && writeVector(file, records);
+  }
+
+  // M9.2 v9: the imposter atlas (12x12 dirs x 12x12 texels of
+  // depth-bits + tri-id u32s; raw - 166 KB worst case, the codec gain
+  // on mostly-0xFFFFFFFF tri words is poor and the section is
+  // latency-critical at injection time). A u32 header word first
+  // (0xFFFFFFFF = absent, for pre-v9 readers that land here via
+  // version confusion).
+  if (hasImposter) {
+    const u32 atlasWords = static_cast<u32>(dag.imposterDepth.size());
+    ok = ok && std::fwrite(&atlasWords, sizeof(atlasWords), 1, file) == 1 &&
+         writeVector(file, dag.imposterDepth) &&
+         writeVector(file, dag.imposterTri);
+    if (ok)
+      KENSHIN_INFO("[builder] imposter atlas: {} dirs, {} words",
+                   atlasWords / (12u * 12u * 12u * 12u) * 0u +
+                       12u * 12u,
+                   atlasWords);
   }
 
   // Blobs (16 B aligned, offsets recorded); the DIRECTORY goes to the
@@ -744,6 +766,19 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
       }
     }
     dag.hasMaterialTable = true;
+  }
+  // M9.2 v9: the imposter atlas sits between the material section and
+  // the blobs (u32 word count, then depth[] and tri[]).
+  if (isV9Plus(h3.version)) {
+    u32 atlasWords = 0;
+    if (std::fread(&atlasWords, sizeof(atlasWords), 1, file) != 1 ||
+        atlasWords == 0xFFFFFFFFu || atlasWords == 0 ||
+        !readVector(file, dag.imposterDepth, atlasWords) ||
+        !readVector(file, dag.imposterTri, atlasWords)) {
+      log = "truncated (imposter atlas)";
+      std::fclose(file);
+      return false;
+    }
   }
   dag.pageMeta.resize(h3.pageCount);
   dag.pageMetaV5.clear();
