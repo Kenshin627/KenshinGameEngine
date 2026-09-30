@@ -24,6 +24,7 @@ add_library(kenshin_engine STATIC
     src/geometry/ClusterDag.cpp
     src/geometry/ClusterQuant.cpp
     src/geometry/ImposterBaker.cpp
+    src/renderer/ImposterPass.cpp
     src/geometry/LodCut.cpp
     src/geometry/shapes/BoxGeometry.cpp
     src/geometry/shapes/CylinderGeometry.cpp

@@ -208,6 +208,10 @@ struct DecodePush
 // material table + the albedo Texture2DArray. decodeParams[1].y
 // carries the material count (the id clamp bound).
 [[vk::binding(16)]] StructuredBuffer<GpuMaterial> materials;
+// M9.2: listSel==3 routes here - CPU-filled (instance, rootCluster)
+// pairs for tiny-instance imposters. The root cluster is a REAL
+// cluster entry, so everything below the pair resolve is unchanged.
+[[vk::binding(19)]] StructuredBuffer<uint2> imposterPairs;
 [[vk::binding(17)]] Texture2DArray<float4> albedoTex;
 [[vk::binding(18)]] SamplerState albedoSamp;
 
@@ -280,6 +284,7 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
                              max(uint(decodeParams[1].x), 1u) - 1u);
     const uint2 pair = listSel == 1u   ? hwPairs[pairIdx]
                        : listSel == 2u ? postPairs[pairIdx]
+                       : listSel == 3u ? imposterPairs[min(pairIdx, 255u)]
                                        : pairs[pairIdx];
     const uint instanceIdx = min(pair.x, uint(push.lightDir.w) - 1u);
     const uint clusterIdx = min(pair.y, uint(push.viewport.z) - 1u);
@@ -633,6 +638,7 @@ GBufferOut fsGBuffer(float4 frag : SV_Position)
                              max(uint(decodeParams[1].x), 1u) - 1u);
     const uint2 pair = listSel == 1u   ? hwPairs[pairIdx]
                        : listSel == 2u ? postPairs[pairIdx]
+                       : listSel == 3u ? imposterPairs[min(pairIdx, 255u)]
                                        : pairs[pairIdx];
     const uint instanceIdx = min(pair.x, uint(push.lightDir.w) - 1u);
     const uint clusterIdx = min(pair.y, uint(push.viewport.z) - 1u);

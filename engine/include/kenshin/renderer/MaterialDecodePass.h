@@ -96,14 +96,15 @@ class MaterialDecodePass {
                    const VirtualGeometryScene& scene,
                    const DecodeParams& params, u32 width, u32 height,
                    u32 visHandle, u32 pairs, u32 hwPairs, u32 postPairs,
-                   u32 pairCapacity, u32 albedoTexture);
+                   u32 pairCapacity, u32 albedoTexture,
+                   u32 imposterPairs = 0);
   void drawGBufferPaged(backend::IRenderBackend& backend,
                         const glm::mat4& viewProj,
                         const VirtualGeometryScene& scene,
                         const DecodeParams& params, u32 width, u32 height,
                         u32 visHandle, const DecodePagedInputs& paged,
                         u32 pairs, u32 hwPairs, u32 postPairs, u32 pairCapacity,
-                        u32 albedoTexture);
+                        u32 albedoTexture, u32 imposterPairs = 0);
   /// M9.1: decode the SHADOW chain's VisBuffer (the light's view) into
   /// light-space depth (fsShadowDepth -> the backend's R32F shadow
   /// target). `viewProj` is the LIGHT's own (Y-flipped) ortho matrix;

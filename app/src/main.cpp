@@ -52,6 +52,7 @@
 #include "kenshin/renderer/Renderer.h"
 #include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/StreamingManager.h"
+#include "kenshin/renderer/ImposterPass.h"
 #include "kenshin/renderer/TaaPass.h"
 #include "kenshin/renderer/TonemapPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
@@ -141,6 +142,8 @@ struct Args {
   bool rasterProbe = false;     // coverage histogram probe ([rasthist])
   bool noTaa = false;           // M9 A/B: disable temporal AA
   bool forceTaa = false;        // --taa: force ON over the parked default
+  bool imposterDebug = false;   // --imposter-debug: imposters replace the
+                                // extra-mesh instances (acceptance mode)
   bool noShadows = false;       // M9.1 A/B: disable the shadow map
   std::string ground;           // M9.1: a ground-plane .kgeo whose
   std::vector<std::string> meshes;  // --mesh <kgeo>: extra assets,
@@ -219,6 +222,8 @@ Args parseArgs(int argc, char** argv) {
       args.noTaa = true;
     else if (std::strcmp(argv[i], "--taa") == 0)
       args.forceTaa = true;
+    else if (std::strcmp(argv[i], "--imposter-debug") == 0)
+      args.imposterDebug = true;
     else if (std::strcmp(argv[i], "--ground") == 0 && i + 1 < argc)
       args.ground = argv[++i];
     else if (std::strcmp(argv[i], "--mesh") == 0 && i + 1 < argc)
@@ -394,7 +399,8 @@ struct VgDebugState {
   int tonemapMode = 2;   // 0 Reinhard, 1 ACES(Narkowicz), 2 Filmic(UE)
   bool shadows = true;   // M9.1: the directional light's shadow map
   int shadowLevels = 3;  // Stage B clipmap level count (1..3)
-  bool taa = true;  // M9 temporal AA (jitter + history resolve)
+  bool taa = true;      // M9 temporal AA (jitter + history resolve)
+  bool imposterDebug = false;  // M9.2: replace extra-mesh instances
   kenshin::f32 taaSharpen = 0.3f;  // post-resolve unsharp (0 = off)
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
@@ -509,6 +515,13 @@ int main(int argc, char** argv) {
   bool lightingReady = false;
   kenshin::renderer::TonemapPass tonemapPass;  // M8.3 HDR chain tail
   kenshin::renderer::TaaPass taaPass;          // M9 temporal resolve
+  kenshin::renderer::ImposterPass imposterPass;  // M9.2 tiny instances
+  bool imposterReady = false;
+  std::vector<kenshin::u32> meshAtlasBase;    // per meshId -> atlas word
+  std::vector<kenshin::u32> meshRootCluster;  // per meshId -> cluster
+  // Staged at setup (the previews die with their scope): per mesh the
+  // atlas planes + the single-cluster cut, empty = no imposter.
+  std::vector<std::vector<kenshin::u32>> stagedDepth, stagedTri;
   bool taaReady = false;
   glm::mat4 taaPrevViewProj{1.0f};  // UNJITTERED previous frame VP
   bool taaPrevValid = false;
@@ -522,6 +535,7 @@ int main(int argc, char** argv) {
   kenshin::u32 albedoTexture =
       kenshin::backend::IRenderBackend::kInvalidTextureHandle;
   VgDebugState vgDebug;
+  if (args.imposterDebug) vgDebug.imposterDebug = true;
   if (args.viewMode >= 0 && args.viewMode <= 6)
     vgDebug.viewMode = args.viewMode;
   else if (args.checker)
@@ -611,6 +625,7 @@ int main(int argc, char** argv) {
       // handles the table rebasing (M8.2 v2).
       std::vector<kenshin::u32> extraMeshIds;
       std::vector<std::string> extraTexPaths;
+      std::vector<demo::KgeoPreview> extraPreviews;
       for (const auto& path : args.meshes) {
         demo::KgeoPreview mp;
         std::string mlog;
@@ -647,8 +662,38 @@ int main(int argc, char** argv) {
         }
         extraMeshIds.push_back(id);
         extraTexPaths.push_back(path);
+        extraPreviews.push_back(std::move(mp));
         KENSHIN_INFO("[main] extra mesh {}: {} ({} clusters)", extraMeshIds.size() - 1,
                      path, mp.dag.clusters.size());
+      }
+      stagedDepth.assign(vgScene.meshes().size(), {});
+      stagedTri.assign(vgScene.meshes().size(), {});
+      {
+        const auto stage = [&](kenshin::u32 id, const demo::KgeoPreview& pv) {
+          if (pv.dag.imposterDepth.empty()) return;
+          kenshin::u32 maxLevel = 0;
+          for (const auto& g : pv.dag.groups)
+            maxLevel = std::max(maxLevel, kenshin::u32(g.lodLevel));
+          std::vector<kenshin::u32> cut;
+          for (const auto& g : pv.dag.groups)
+            if (kenshin::u32(g.lodLevel) == maxLevel)
+              for (kenshin::u32 c : g.clusters) cut.push_back(c);
+          if (cut.size() != 1u) {
+            KENSHIN_INFO("[imposter] mesh {}: cut has {} clusters (v1 "
+                         "needs exactly 1) - no imposter",
+                         id, cut.size());
+            return;
+          }
+          stagedDepth[id] = pv.dag.imposterDepth;
+          stagedTri[id] = pv.dag.imposterTri;
+          meshRootCluster[id] = cut[0];
+        };
+        stagedDepth.resize(1 + extraMeshIds.size());
+        stagedTri.resize(1 + extraMeshIds.size());
+        meshRootCluster.resize(1 + extraMeshIds.size(), 0xFFFFFFFFu);
+        stage(0, kgeoPreview);
+        for (kenshin::u32 e = 0; e < extraMeshIds.size(); ++e)
+          stage(extraMeshIds[e], extraPreviews[e]);
       }
       const kenshin::u32 slotCap =
           pagedAsset && args.streamBudgetMb > 0
@@ -864,6 +909,7 @@ int main(int argc, char** argv) {
             ImGui::Checkbox("shadows", &vgDebug.shadows);
             ImGui::SameLine();
             ImGui::Checkbox("TAA", &vgDebug.taa);
+            ImGui::Checkbox("imposter", &vgDebug.imposterDebug);
             if (vgDebug.taa)
               ImGui::SliderFloat("sharpen", &vgDebug.taaSharpen, 0.0f, 1.0f);
             ImGui::SliderInt("shadow levels", &vgDebug.shadowLevels, 1, 3);
@@ -1261,6 +1307,72 @@ int main(int argc, char** argv) {
 
         chain.execute(*vgBackend, ci);
 
+        // ---- M9.2: the imposter injection --------------------------------
+        if (!imposterReady) {
+          imposterReady = imposterPass.init(*vgBackend, shaders);
+          meshAtlasBase.assign(
+              vgScene->meshes().size(),
+              kenshin::renderer::ImposterPass::kNoAtlas);
+          // meshRootCluster came from the setup-time staging - the
+          // in-frame assign wiped it (the "cluster 4294967295" log).
+          for (kenshin::u32 m = 0; m < stagedDepth.size(); ++m) {
+            if (stagedDepth[m].empty()) continue;
+            const kenshin::u32 base = imposterPass.uploadAtlas(
+                *vgBackend, stagedDepth[m].data(), stagedTri[m].data(),
+                kenshin::u32(stagedDepth[m].size()));
+            meshAtlasBase[m] = base;
+            KENSHIN_INFO("[imposter] mesh {}: atlas @{} (cluster {})", m,
+                         base, meshRootCluster[m]);
+          }
+        }
+        if (imposterReady) {
+          kenshin::renderer::ImposterQuad quads[64];
+          glm::uvec2 pairs[256];
+          kenshin::u32 quadCount = 0, pairCount = 0;
+          for (kenshin::u32 ii = 0;
+               ii < chainInstances.size() && quadCount < 64 && pairCount < 255;
+               ++ii) {
+            const auto& inst = chainInstances[ii];
+            if (inst.meshId >= meshAtlasBase.size()) continue;
+            if (meshAtlasBase[inst.meshId] ==
+                kenshin::renderer::ImposterPass::kNoAtlas)
+              continue;
+            // v1 acceptance: the debug toggle imposters every extra
+            // mesh; the projected-bounds threshold routing follows.
+            if (!vgDebug.imposterDebug || ii == 0) continue;
+            const glm::vec3 c(inst.bounds);
+            const float r = inst.bounds.w;
+            const glm::vec4 clip = viewProjJ * glm::vec4(c, 1.0f);
+            if (clip.w <= 0.0f) continue;
+            const glm::vec2 ndc = glm::vec2(clip.x, clip.y) / clip.w;
+            const float cx = (ndc.x * 0.5f + 0.5f) * float(ci.width);
+            const float cy = (ndc.y * 0.5f + 0.5f) * float(ci.height);
+            const float d = glm::max(
+                glm::dot(c - camera.position(),
+                         glm::vec3(camera.viewMatrix()[0][2],
+                                   camera.viewMatrix()[1][2],
+                                   camera.viewMatrix()[2][2])) *
+                    -1.0f,
+                0.1f);
+            const int R = std::max(6, int(r / d / ci.worldPerPixel));
+            if (R > int(ci.width)) continue;
+            auto& q = quads[quadCount];
+            q.rect = glm::ivec4(int(cx) - R, int(cy) - R, int(cx) + R,
+                                int(cy) + R);
+            q.centerAtlas = glm::vec4(c, float(meshAtlasBase[inst.meshId]));
+            q.halfPair = glm::vec4(r, r, r, float(pairCount));
+            q.pad = glm::vec4(0.0f);
+            ++quadCount;
+            pairs[pairCount++] = glm::uvec2(ii, meshRootCluster[inst.meshId]);
+          }
+          if (quadCount > 0) {
+            imposterPass.setPairs(*vgBackend, pairs, pairCount);
+            imposterPass.draw(*vgBackend, chain.visBufferCurrent(*vgBackend),
+                              camera.viewProjMatrix(), camera.position(),
+                              ci.width, ci.height, quads, quadCount);
+          }
+        }
+
         // M9.1 Stage B: the clipmap rig - three levels, extent
         // 12/24/48m, each a light-view chain + decode. worldPerPixel
         // scales with extent (UE's texel-size LOD calibration);
@@ -1449,7 +1561,8 @@ int main(int argc, char** argv) {
                 chain.pairsCurrent(*vgBackend),
                 chain.hwPairsCurrent(*vgBackend),
                 chain.postPairsCurrent(*vgBackend), chain.maxPairs(),
-                albedoTexture);
+                albedoTexture,
+                imposterReady ? imposterPass.pairsBuffer() : 0);
           } else {
             decodePass.drawPaged(
                 *vgBackend, viewProjJ, *vgScene, decodeParams,
@@ -1632,6 +1745,7 @@ int main(int argc, char** argv) {
     if (lightingReady) lightingPass.onShutdown(*vgBackend);
     if (tonemapReady) tonemapPass.onShutdown(*vgBackend);
     if (taaReady) taaPass.onShutdown(*vgBackend);
+    if (imposterReady) imposterPass.onShutdown(*vgBackend);
     if (chainReady) chain.onShutdown(*vgBackend);
   }
   // Reverse registration order: overlay context, mesh pool (all GPU
