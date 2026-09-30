@@ -334,7 +334,7 @@ bool VisBufferChain::init(
   const usize pairBytes = usize(maxPairs) * sizeof(glm::uvec2);
   for (u32 s = 0; s < kSlots; ++s) {
     m_planes[s] =
-        makeHostBuffer(backend, 6 * sizeof(glm::vec4), nullptr, "chain-planes");
+        makeHostBuffer(backend, 8 * sizeof(glm::vec4), nullptr, "chain-planes");
     m_cntA[s] = makeHostBuffer(backend, 8, nullptr, "chain-cntA");
     m_visibleList[s] =
         makeDeviceBuffer(backend, listBytes, nullptr, "chain-visible");
@@ -490,6 +490,14 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // free: beginFrame's pacing wait proved its prior frame completed).
   std::memcpy(backend.mappedPtr(m_planes[slot]), in.planes,
               6 * sizeof(glm::vec4));
+  // M9.2: the tiny-skip camera block ([6]/[7] of the planes buffer,
+  // re-bound as tinyParams at binding 4 of the instance cull).
+  {
+    auto* pl = static_cast<glm::vec4*>(backend.mappedPtr(m_planes[slot]));
+    pl[6] = glm::vec4(in.camPos, f32(in.imposterThresholdPx));
+    pl[7] = glm::vec4(1.0f / std::max(in.worldPerPixel, 1e-6f),
+                      0.0f, 0.0f, 0.0f);
+  }
   const u32 cntA[2] = {0, m_instanceCount};
   std::memcpy(backend.mappedPtr(m_cntA[slot]), cntA, sizeof(cntA));
   std::memset(backend.mappedPtr(m_expCnt[slot]), 0, 8);
@@ -640,9 +648,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
 
   backend.fillBuffer(m_vis[slot], 0);
 
-  const u32 cullHandles[4] = {m_planes[slot], m_instanceBuffer,
-                              m_visibleList[slot], m_cntA[slot]};
-  backend.dispatchCompute(m_pipeCull, cullHandles, 4,
+  const u32 cullHandles[5] = {m_planes[slot], m_instanceBuffer,
+                              m_visibleList[slot], m_cntA[slot],
+                              m_planes[slot]};
+  backend.dispatchCompute(m_pipeCull, cullHandles, 5,
                           (m_instanceCount + 63) / 64, 1, 1);
   b(m_cntA[slot]);
 

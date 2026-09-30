@@ -746,6 +746,7 @@ int main(int argc, char** argv) {
         // second copy of the first mesh instead (the M9.1 ground bug).
         const auto makeInstFor = [&](kenshin::u32 id, const glm::mat4& model,
                                      kenshin::u32 casts = 1u) {
+          // casts: 0 receiver-only, 1 caster, 2 imposterable (M9.2)
           const kenshin::renderer::VgMeshRange& m =
               vgScene.meshes()[id];
           kenshin::renderer::CullGpuInstance inst;
@@ -868,7 +869,10 @@ int main(int argc, char** argv) {
           for (kenshin::u32 e = 0; e < extraMeshIds.size(); ++e) {
             const glm::vec3 o(-2.5f - 3.0f * float(e), 0.0f, 0.0f);
             const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
-            auto inst = makeInstFor(extraMeshIds[e], m);
+            const bool hasAtlas = e < extraPreviews.size() &&
+                                  !extraPreviews[e].dag.imposterDepth.empty();
+            auto inst = makeInstFor(extraMeshIds[e], m,
+                                    hasAtlas ? 2u : 1u);
             realBounds.push_back(inst.bounds);
             chainInstances.push_back(std::move(inst));
             vgInsts.push_back({m, extraMeshIds[e]});
@@ -1271,6 +1275,8 @@ int main(int argc, char** argv) {
         ci.width = static_cast<kenshin::u32>(vp.x);
         ci.height = static_cast<kenshin::u32>(vp.y);
         kenshin::renderer::extractFrustumPlanes(viewProjJ, ci.planes);
+        ci.imposterThresholdPx =
+            (args.imposterDebug || vgDebug.imposterDebug) ? 4096.0f : 0.0f;
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
         // Pure SW is the default since the 2026-09-19 threshold sweep:
         // mode-1 SW beat every routing configuration on all five scene
@@ -1362,26 +1368,20 @@ int main(int argc, char** argv) {
             if (meshAtlasBase[inst.meshId] ==
                 kenshin::renderer::ImposterPass::kNoAtlas)
               continue;
-            // v1 acceptance: the debug toggle imposters every extra
-            // mesh; the projected-bounds threshold routing follows.
-            // inst.bounds is the PARKED sphere - the real one rides
-            // the realBounds side table.
-            if (!vgDebug.imposterDebug || ii == 0) continue;
+            // M9.2: mirror the cull's tiny-skip EXACTLY.
+            const float thresholdPx = ci.imposterThresholdPx;
+            if (thresholdPx <= 0.0f || inst.pad[1] != 2u) continue;
             if (ii >= realBounds.size()) continue;
             const glm::vec3 c(realBounds[ii]);
             const float r = realBounds[ii].w;
+            const float d = glm::max(
+                glm::distance(c, camera.position()), 1e-3f);
+            if (r / d / ci.worldPerPixel >= thresholdPx) continue;
             const glm::vec4 clip = viewProjJ * glm::vec4(c, 1.0f);
             if (clip.w <= 0.0f) continue;
             const glm::vec2 ndc = glm::vec2(clip.x, clip.y) / clip.w;
             const float cx = (ndc.x * 0.5f + 0.5f) * float(ci.width);
             const float cy = (ndc.y * 0.5f + 0.5f) * float(ci.height);
-            const float d = glm::max(
-                glm::dot(c - camera.position(),
-                         glm::vec3(camera.viewMatrix()[0][2],
-                                   camera.viewMatrix()[1][2],
-                                   camera.viewMatrix()[2][2])) *
-                    -1.0f,
-                0.1f);
             const int R = std::max(6, int(r / d / ci.worldPerPixel));
             if (R > int(ci.width)) continue;
             auto& q = quads[quadCount];

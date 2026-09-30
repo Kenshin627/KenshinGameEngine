@@ -55,8 +55,15 @@ bool cullInstancesOnGpu(backend::IRenderBackend& backend,
   job.groupCountX =
       (static_cast<u32>(instances.size()) + 63u) / 64u;
 
+  // Buffer 0 doubles as tinyParams (binding 4): 8 vec4s, [6].w = 0
+  // disables the skip.
+  glm::vec4 planes8[8];
+  std::memcpy(planes8, planes, 6 * sizeof(glm::vec4));
+  planes8[6] = glm::vec4(0.0f);
+  planes8[7] = glm::vec4(0.0f);
   const u32 counters[2] = {0, static_cast<u32>(instances.size())};
-  job.buffers[0] = {planes, 6 * sizeof(glm::vec4), false};
+  job.buffers[0] = {planes8, sizeof(planes8), false};
+  job.buffers[4] = {planes8, sizeof(planes8), false};
   job.buffers[1] = {instances.data(),
                     instances.size() * sizeof(CullGpuInstance), false};
   job.buffers[2] = {nullptr,

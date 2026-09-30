@@ -18,12 +18,19 @@ struct GpuInstance
     float4x4 model;     // 64B
     uint meshId;        // +4
     uint _pad0;         // +4 each: three separate uints pad 12B to the
-    uint _pad1;         // vec4 at 80 (a float3/uint3 would align to 16
-    uint _pad2;         // and push bounds to 96 - stride must be 96B)
+    uint castShadows;   // vec4 at 80 (a float3/uint3 would align to 16
+    uint _pad2;         // and push bounds to 96 - stride must be 96B).
+                        // castShadows is OFFSET 72 - the host pad[1]
     float4 bounds;      // xyz world-space center, w radius
 };
 
+// M9.2: the projected-size tiny-instance skip. tinyParams[6] =
+// (camX, camY, camZ, thresholdPx), [7].x = 1/worldPerPixel;
+// thresholdPx <= 0 disables (every non-M9 chain). The projected
+// radius math mirrors the host quad builder EXACTLY.
+
 [[vk::binding(0)]] StructuredBuffer<float4>  frustumPlanes;
+[[vk::binding(4)]] StructuredBuffer<float4>  tinyParams;
 [[vk::binding(1)]] StructuredBuffer<GpuInstance> instances;
 [[vk::binding(2)]] RWStructuredBuffer<uint>  visibleList;
 [[vk::binding(3)]] RWStructuredBuffer<uint>  counter;
@@ -50,6 +57,16 @@ void main(uint tid : SV_DispatchThreadID)
             visible = false;
             break;
         }
+    }
+
+    // M9.2: a tiny imposterable instance never enters the cluster
+    // pipeline - the imposter quads carry it.
+    if (visible && tinyParams[6].w > 0.0 &&
+        instances[tid].castShadows == 2u)
+    {
+        const float d = max(distance(c, tinyParams[6].xyz), 1e-3);
+        const float pxR = r / d * tinyParams[7].x;
+        if (pxR < tinyParams[6].w) visible = false;
     }
 
     if (visible)

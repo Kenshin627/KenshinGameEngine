@@ -51,6 +51,11 @@ struct ChainInputs {
   u32 scissorRect[4] = {0, 0, 0xFFFFFFFFu, 0xFFFFFFFFu};
   glm::vec4 planes[6]{};
   bool occlusionEnabled = true;  // A/B + first-run safety toggle
+  /// M9.2: instances flagged imposterable (castShadows==2) with
+  /// projected bounds under this many pixels skip the cluster
+  /// pipeline at the instance cull (imposter quads carry them).
+  /// <= 0 disables (every non-M9 chain).
+  f32 imposterThresholdPx = 0.0f;
   /// M9.1: shadow chains set this to skip receiver-only instances
   /// (castShadows == 0 in the chain's instance buffer) at emit time.
   u32 cullNonCasters = 0;
