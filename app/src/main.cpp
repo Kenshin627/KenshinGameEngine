@@ -522,6 +522,7 @@ int main(int argc, char** argv) {
   // Staged at setup (the previews die with their scope): per mesh the
   // atlas planes + the single-cluster cut, empty = no imposter.
   std::vector<std::vector<kenshin::u32>> stagedDepth, stagedTri;
+  std::vector<glm::vec4> realBounds;  // M9.2: instance bounds pre-parking
   bool taaReady = false;
   glm::mat4 taaPrevViewProj{1.0f};  // UNJITTERED previous frame VP
   bool taaPrevValid = false;
@@ -849,7 +850,9 @@ int main(int argc, char** argv) {
           }
           vgScene.setInstances(vgInsts);
         } else {
+          realBounds.clear();
           chainInstances = {makeInst(glm::mat4(1.0f))};
+          realBounds.push_back(chainInstances.back().bounds);
           std::vector<kenshin::renderer::VgInstance> vgInsts = {
               kenshin::renderer::VgInstance{glm::mat4(1.0f), vgMeshId}};
           if (groundMeshId != 0xFFFFFFFFu) {
@@ -865,7 +868,9 @@ int main(int argc, char** argv) {
           for (kenshin::u32 e = 0; e < extraMeshIds.size(); ++e) {
             const glm::vec3 o(-2.5f - 3.0f * float(e), 0.0f, 0.0f);
             const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
-            chainInstances.push_back(makeInstFor(extraMeshIds[e], m));
+            auto inst = makeInstFor(extraMeshIds[e], m);
+            realBounds.push_back(inst.bounds);
+            chainInstances.push_back(std::move(inst));
             vgInsts.push_back({m, extraMeshIds[e]});
           }
           vgScene.setInstances(vgInsts);
@@ -1141,11 +1146,31 @@ int main(int argc, char** argv) {
           pagedInputs.clusterMeta = vgScene->clusterMetaBuffer();
           pagedPtr = &pagedInputs;
         }
+        // M9.2 step 3: park the impostered instances in the MAIN
+        // chain's list (zero transform + far bounds = frustum-culled
+        // in every mode; the imposter quads carry the pixels; the
+        // shadow chains keep the REAL list - shadows stay
+        // cluster-level). Order untouched - pair indices stay
+        // aligned with the scene's decode instances. Keyed off the
+        // setup-time staging (atlas availability) + the debug flag.
+        auto renderInstances = chainInstances;
+        if (args.imposterDebug || vgDebug.imposterDebug) {
+          for (kenshin::u32 ii = 0; ii < renderInstances.size(); ++ii) {
+            const auto& inst = renderInstances[ii];
+            if (inst.meshId >= stagedDepth.size()) continue;
+            if (stagedDepth[inst.meshId].empty()) continue;
+            if (ii == 0) continue;  // the primary stays clustered (v1)
+            renderInstances[ii].model = glm::mat4(0.0f);
+            renderInstances[ii].bounds = glm::vec4(1e9f, 1e9f, 1e9f, 0.0f);
+            KENSHIN_INFO("[imposter] instance {} parked (mesh {})", ii,
+                         inst.meshId);
+          }
+        }
         chainReady = chain.init(
             *vgBackend, shaders, vgScene->positions4(), vgScene->indices(),
             vgScene->clusterData(), vgScene->groupData(),
             vgScene->hierarchyData(), vgScene->groupRanges(), meshHierRoots,
-            chainInstances, chainMeshRanges,
+            renderInstances, chainMeshRanges,
             // Pair-list capacity: min(the theoretical worst case,
             // 4M pairs) - the cull writers saturate and the consumers
             // clamp at this cap (the wide-instance scaling form).
@@ -1339,9 +1364,12 @@ int main(int argc, char** argv) {
               continue;
             // v1 acceptance: the debug toggle imposters every extra
             // mesh; the projected-bounds threshold routing follows.
+            // inst.bounds is the PARKED sphere - the real one rides
+            // the realBounds side table.
             if (!vgDebug.imposterDebug || ii == 0) continue;
-            const glm::vec3 c(inst.bounds);
-            const float r = inst.bounds.w;
+            if (ii >= realBounds.size()) continue;
+            const glm::vec3 c(realBounds[ii]);
+            const float r = realBounds[ii].w;
             const glm::vec4 clip = viewProjJ * glm::vec4(c, 1.0f);
             if (clip.w <= 0.0f) continue;
             const glm::vec2 ndc = glm::vec2(clip.x, clip.y) / clip.w;
