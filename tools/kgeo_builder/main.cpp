@@ -415,6 +415,15 @@ int main(int argc, char** argv) {
         for (kenshin::u32 c : g.clusters) cut.push_back(c);
     kenshin::geometry::ImposterAtlas atlas;
     std::string ilog;
+    if (cut.size() != 1u) {
+      KENSHIN_INFO(
+          "[builder] imposter cut has {} clusters (v1 needs exactly "
+          "1) - skipping the atlas",
+          cut.size());
+      kenshin::log::shutdown();
+      return 1;
+    }
+    dag.imposterCluster = cut[0];  // serialized - the runtime's truth
     if (!kenshin::geometry::bakeImposterAtlas(dag, cut, atlas,
                                               ilog)) {
       KENSHIN_ERROR("[builder] imposter bake failed: {}", ilog);
@@ -423,8 +432,9 @@ int main(int argc, char** argv) {
     }
     dag.imposterDepth = std::move(atlas.depth);
     dag.imposterTri = std::move(atlas.tri);
-    KENSHIN_INFO("[builder] imposter baked from {} root clusters",
-                 dag.roots.size());
+    KENSHIN_INFO("[builder] imposter baked: cut cluster {} (of {} "
+                 "deepest-level clusters, {} roots)",
+                 dag.imposterCluster, cut.size(), dag.roots.size());
   }
   kenshin::geometry::PackedGeometry packed;
   if (!kenshin::geometry::packPages(dag, packed, log)) {

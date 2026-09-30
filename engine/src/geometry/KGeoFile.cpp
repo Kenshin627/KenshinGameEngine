@@ -426,6 +426,7 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   if (hasImposter) {
     const u32 atlasWords = static_cast<u32>(dag.imposterDepth.size());
     ok = ok && std::fwrite(&atlasWords, sizeof(atlasWords), 1, file) == 1 &&
+         std::fwrite(&dag.imposterCluster, sizeof(u32), 1, file) == 1 &&
          writeVector(file, dag.imposterDepth) &&
          writeVector(file, dag.imposterTri);
     if (ok)
@@ -773,6 +774,7 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     u32 atlasWords = 0;
     if (std::fread(&atlasWords, sizeof(atlasWords), 1, file) != 1 ||
         atlasWords == 0xFFFFFFFFu || atlasWords == 0 ||
+        std::fread(&dag.imposterCluster, sizeof(u32), 1, file) != 1 ||
         !readVector(file, dag.imposterDepth, atlasWords) ||
         !readVector(file, dag.imposterTri, atlasWords)) {
       log = "truncated (imposter atlas)";

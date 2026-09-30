@@ -170,6 +170,11 @@ struct ClusterDag {
   /// an empty atlas as "never imposter this mesh").
   std::vector<u32> imposterDepth;  // reversed depth bits, 0 = miss
   std::vector<u32> imposterTri;    // triangle id, 0xFFFFFFFF = miss
+  /// The bake's cut cluster (single-cluster cuts only, v1): the
+  /// payload's pair target. SINGLE SOURCE OF TRUTH - the runtime must
+  /// not recompute the cut (the builder/runtime definitions drifted:
+  /// dag.roots vs deepest-level, 9-cluster vs 1-cluster bakes).
+  u32 imposterCluster = 0xFFFFFFFFu;
 
   // ---- queries -------------------------------------------------------
   u32 triangleCount(u32 cluster) const {

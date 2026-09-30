@@ -53,10 +53,13 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID)
     const int x0 = int(e0.x), y0 = int(e0.y);
     const int x1 = int(e0.z), y1 = int(e0.w);
     const uint W = uint(params[4].w);
-    const int px = x0 + int(tid.x);
-    if (px > x1) return;
-    for (int py = y0; py <= y1; ++py)
+    // 64 threads stride the FLAT rect (columns AND rows).
+    const int cols = max(x1 - x0 + 1, 1);
+    const int rows = max(y1 - y0 + 1, 1);
+    for (int k = int(tid.x); k < cols * rows; k += 64)
     {
+        const int px = x0 + k % cols;
+        const int py = y0 + k / cols;
         if (px < 0 || py < 0 || uint(px) >= W || uint(py) >= uint(params[5].z))
             continue;
 

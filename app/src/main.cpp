@@ -672,22 +672,10 @@ int main(int argc, char** argv) {
       {
         const auto stage = [&](kenshin::u32 id, const demo::KgeoPreview& pv) {
           if (pv.dag.imposterDepth.empty()) return;
-          kenshin::u32 maxLevel = 0;
-          for (const auto& g : pv.dag.groups)
-            maxLevel = std::max(maxLevel, kenshin::u32(g.lodLevel));
-          std::vector<kenshin::u32> cut;
-          for (const auto& g : pv.dag.groups)
-            if (kenshin::u32(g.lodLevel) == maxLevel)
-              for (kenshin::u32 c : g.clusters) cut.push_back(c);
-          if (cut.size() != 1u) {
-            KENSHIN_INFO("[imposter] mesh {}: cut has {} clusters (v1 "
-                         "needs exactly 1) - no imposter",
-                         id, cut.size());
-            return;
-          }
+          if (pv.dag.imposterCluster == 0xFFFFFFFFu) return;
           stagedDepth[id] = pv.dag.imposterDepth;
           stagedTri[id] = pv.dag.imposterTri;
-          meshRootCluster[id] = cut[0];
+          meshRootCluster[id] = pv.dag.imposterCluster;
         };
         stagedDepth.resize(1 + extraMeshIds.size());
         stagedTri.resize(1 + extraMeshIds.size());
@@ -1150,31 +1138,11 @@ int main(int argc, char** argv) {
           pagedInputs.clusterMeta = vgScene->clusterMetaBuffer();
           pagedPtr = &pagedInputs;
         }
-        // M9.2 step 3: park the impostered instances in the MAIN
-        // chain's list (zero transform + far bounds = frustum-culled
-        // in every mode; the imposter quads carry the pixels; the
-        // shadow chains keep the REAL list - shadows stay
-        // cluster-level). Order untouched - pair indices stay
-        // aligned with the scene's decode instances. Keyed off the
-        // setup-time staging (atlas availability) + the debug flag.
-        auto renderInstances = chainInstances;
-        if (args.imposterDebug || vgDebug.imposterDebug) {
-          for (kenshin::u32 ii = 0; ii < renderInstances.size(); ++ii) {
-            const auto& inst = renderInstances[ii];
-            if (inst.meshId >= stagedDepth.size()) continue;
-            if (stagedDepth[inst.meshId].empty()) continue;
-            if (ii == 0) continue;  // the primary stays clustered (v1)
-            renderInstances[ii].model = glm::mat4(0.0f);
-            renderInstances[ii].bounds = glm::vec4(1e9f, 1e9f, 1e9f, 0.0f);
-            KENSHIN_INFO("[imposter] instance {} parked (mesh {})", ii,
-                         inst.meshId);
-          }
-        }
         chainReady = chain.init(
             *vgBackend, shaders, vgScene->positions4(), vgScene->indices(),
             vgScene->clusterData(), vgScene->groupData(),
             vgScene->hierarchyData(), vgScene->groupRanges(), meshHierRoots,
-            renderInstances, chainMeshRanges,
+            chainInstances, chainMeshRanges,
             // Pair-list capacity: min(the theoretical worst case,
             // 4M pairs) - the cull writers saturate and the consumers
             // clamp at this cap (the wide-instance scaling form).
