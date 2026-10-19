@@ -1322,6 +1322,7 @@ int main(int argc, char** argv) {
             meshAtlasBase[m] = base;
             KENSHIN_INFO("[imposter] mesh {}: atlas @{} (cluster {})", m,
                          base, meshRootCluster[m]);
+
           }
         }
         if (imposterReady) {

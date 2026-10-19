@@ -51,6 +51,7 @@ class ImposterPass {
             u32 height, const ImposterQuad* quads, u32 quadCount);
 
   u32 pairsBuffer() const { return m_pairs; }
+  u32 atlasBuffer() const { return m_atlas; }  // M9.2 debug/verify
   /// `pairs` maps the payload's pairIdx to (instance, rootCluster).
   void setPairs(backend::IRenderBackend& backend, const glm::uvec2* pairs,
                 u32 count);
