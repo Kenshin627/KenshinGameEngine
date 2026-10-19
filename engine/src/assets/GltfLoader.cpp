@@ -937,7 +937,12 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
         if (it == slotOfMaterial.end()) {
           // New slot: pull the PBR params + base-color texture ref.
           const JVal& jm = g.materials->at(mi);
+          // glTF: baseColorFactor defaults to WHITE (the texture alone
+          // is the albedo when no factor is given) - MeshData's 0.8
+          // default would double-attenuate textured materials into a
+          // washed warm gray after lighting.
           GltfMaterial gm;
+          gm.kd = glm::vec3(1.0f);
           int imgIdx = -1;
           if (const JVal* pbr = jm.find("pbrMetallicRoughness")) {
             if (const JVal* f = pbr->find("baseColorFactor");
