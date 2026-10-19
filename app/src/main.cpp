@@ -1042,14 +1042,14 @@ int main(int argc, char** argv) {
           const float a = (u - 0.5f) * 2.0f * glm::pi<float>();
           const glm::vec3 dir(std::cos(a) * lat, std::sin(a) * lat, z);
           const float t = z * 0.5f + 0.5f;
-          glm::vec3 c = glm::mix(glm::vec3(0.06f, 0.055f, 0.05f),
-                                 glm::vec3(0.22f, 0.24f, 0.28f), t * t);
+          glm::vec3 c = glm::mix(glm::vec3(0.045f, 0.042f, 0.04f),
+                                 glm::vec3(0.13f, 0.14f, 0.16f), t * t);
           const float dKey = std::max(0.0f, glm::dot(dir, kd));
-          c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 70.0f) *
-               5.0f;
+          c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 90.0f) *
+               1.8f;
           const float dFill = std::max(0.0f, glm::dot(dir, -kd));
           c += glm::vec3(0.45f, 0.55f, 0.75f) *
-               std::exp((dFill - 1.0f) * 45.0f) * 0.8f;
+               std::exp((dFill - 1.0f) * 60.0f) * 0.3f;
           float* o = probe.data() + (kenshin::usize(y) * kW + x) * 4;
           o[0] = c.r;
           o[1] = c.g;
