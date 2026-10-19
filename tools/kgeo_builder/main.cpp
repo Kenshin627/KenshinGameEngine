@@ -304,6 +304,41 @@ int main(int argc, char** argv) {
       const fsg::path outDir = fsg::path(output).parent_path();
       std::vector<std::string> writtenFor(gltfImages.size());
       dag.materials.clear();
+      int baseW = 0, baseH = 0;
+      auto resampleTo = [](const kenshin::assets::GltfImage& im, int w, int h) {
+        kenshin::assets::GltfImage out;
+        out.name = im.name;
+        out.width = w;
+        out.height = h;
+        out.rgba.assign(kenshin::usize(w) * h * 4, 0);
+        for (int y = 0; y < h; ++y) {
+          const int sy0 = int(kenshin::u64(y) * im.height / h);
+          const int sy1 =
+              std::max(int(kenshin::u64(y + 1) * im.height / h), sy0 + 1);
+          for (int x = 0; x < w; ++x) {
+            const int sx0 = int(kenshin::u64(x) * im.width / w);
+            const int sx1 =
+                std::max(int(kenshin::u64(x + 1) * im.width / w), sx0 + 1);
+            kenshin::u32 r = 0, g = 0, b = 0, n = 0;
+            for (int sy = sy0; sy < sy1 && sy < im.height; ++sy)
+              for (int sx = sx0; sx < sx1 && sx < im.width; ++sx) {
+                const kenshin::u8* p =
+                    im.rgba.data() + (kenshin::usize(sy) * im.width + sx) * 4;
+                r += p[0];
+                g += p[1];
+                b += p[2];
+                ++n;
+              }
+            kenshin::u8* o = out.rgba.data() + (kenshin::usize(y) * w + x) * 4;
+            o[0] = kenshin::u8(r / n);
+            o[1] = kenshin::u8(g / n);
+            o[2] = kenshin::u8(b / n);
+            o[3] = 255;
+          }
+        }
+        return out;
+      };
+
       for (const auto& gm : gltfMaterials) {
         kenshin::geometry::ClusterDag::DagMaterial dm = mat;
         dm.kd[0] = gm.kd[0];
@@ -318,31 +353,46 @@ int main(int argc, char** argv) {
         }
         if (rough >= 0.0f) dm.roughness = rough;
         if (metal >= 0.0f) dm.metallic = metal;
-        if (gm.image >= 0 && gm.image < int(gltfImages.size())) {
-          const auto& img = gltfImages[kenshin::usize(gm.image)];
-          if (img.width > 0) {
-            std::string& file = writtenFor[kenshin::usize(gm.image)];
-            if (file.empty()) {
-              const std::string stem =
-                  img.name.empty()
-                      ? "mat" + std::to_string(dag.materials.size())
-                      : img.name;
-              const fsg::path bmp = outDir / (stem + "_albedo.bmp");
-              if (!kenshin::util::writeBmp24(bmp.string(), img.rgba,
-                                             kenshin::u32(img.width),
-                                             kenshin::u32(img.height))) {
-                KENSHIN_ERROR("[builder] albedo re-encode failed: {}",
-                              bmp.string());
-                kenshin::log::shutdown();
-                return 1;
-              }
-              file = bmp.filename().string();
-              KENSHIN_INFO("[builder] gltf material {} albedo {}x{} -> {}",
-                           dag.materials.size(), img.width, img.height, file);
-            }
-            dm.texPath = file;
+        // Texture2DArray layers must share dimensions - the first
+        // image sets the base; others box-resample onto it (fine for
+        // both albedo and the linear MR data).
+        auto imageFile = [&](int imageIdx, const char* suffix) -> std::string {
+          if (imageIdx < 0 || imageIdx >= int(gltfImages.size())) return {};
+          kenshin::assets::GltfImage imgStore;
+          const kenshin::assets::GltfImage* imgPtr =
+              &gltfImages[kenshin::usize(imageIdx)];
+          if (baseW == 0) {
+            baseW = imgPtr->width;
+            baseH = imgPtr->height;
+          } else if (imgPtr->width != baseW || imgPtr->height != baseH) {
+            imgStore = resampleTo(*imgPtr, baseW, baseH);
+            imgPtr = &imgStore;
           }
-        }
+          const auto& img = *imgPtr;
+          if (img.width <= 0) return {};
+          std::string& file = writtenFor[kenshin::usize(imageIdx)];
+          if (file.empty()) {
+            const std::string stem =
+                img.name.empty() ? "mat" + std::to_string(dag.materials.size())
+                                 : img.name;
+            const fsg::path bmp = outDir / (stem + suffix + ".bmp");
+            if (!kenshin::util::writeBmp24(bmp.string(), img.rgba,
+                                           kenshin::u32(img.width),
+                                           kenshin::u32(img.height))) {
+              KENSHIN_ERROR("[builder] texture re-encode failed: {}",
+                            bmp.string());
+              return {};
+            }
+            file = bmp.filename().string();
+            KENSHIN_INFO("[builder] gltf material {} tex {}x{} -> {}",
+                         dag.materials.size(), img.width, img.height, file);
+          }
+          return file;
+        };
+        const std::string albedoFile = imageFile(gm.image, "_albedo");
+        if (!albedoFile.empty()) dm.texPath = albedoFile;
+        const std::string mrFile = imageFile(gm.mrImage, "_mr");
+        if (!mrFile.empty()) dm.mrPath = mrFile;
         dag.materials.push_back(dm);
       }
     } else {

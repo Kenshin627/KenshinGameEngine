@@ -154,6 +154,10 @@ struct ClusterDag {
     f32 roughness = 0.5f;
     f32 metallic = 0.0f;
     std::string texPath;
+    // v10: the metallicRoughness map (G=roughness, B=metallic; linear
+    // data). mrTexLayer is resolved by the app (like texLayer).
+    std::string mrPath;
+    f32 mrTexLayer = -1.0f;
   };
   std::vector<DagMaterial> materials;
   /// Per-cluster material id into `materials` (u8 range; stamped into

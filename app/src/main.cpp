@@ -584,15 +584,19 @@ int main(int argc, char** argv) {
       if (pagedAsset && !kgeoPreview.dag.materials.empty()) {
         const auto kgeoDir = std::filesystem::path(args.kgeo).parent_path();
         for (auto& mat : kgeoPreview.dag.materials) {
-          if (mat.texPath.empty()) continue;
-          const auto resolved =
-              mat.texPath.find(':') == std::string::npos &&
-                      !std::filesystem::exists(kgeoDir / mat.texPath)
-                  ? std::filesystem::path(mat.texPath)
-                  : (kgeoDir / mat.texPath);
-          const kenshin::u32 layer = textureManager.load(resolved.string());
-          if (layer != kenshin::manager::TextureManager::kInvalidLayer)
-            mat.texLayer = static_cast<kenshin::f32>(layer);
+          for (int slot = 0; slot < 2; ++slot) {
+            std::string& path = slot == 0 ? mat.texPath : mat.mrPath;
+            kenshin::f32& layerF = slot == 0 ? mat.texLayer : mat.mrTexLayer;
+            if (path.empty()) continue;
+            const auto resolved =
+                path.find(':') == std::string::npos &&
+                        !std::filesystem::exists(kgeoDir / path)
+                    ? std::filesystem::path(path)
+                    : (kgeoDir / path);
+            const kenshin::u32 layer = textureManager.load(resolved.string());
+            if (layer != kenshin::manager::TextureManager::kInvalidLayer)
+              layerF = static_cast<kenshin::f32>(layer);
+          }
         }
         albedoTexture = textureManager.textureArray();
       }

@@ -126,10 +126,11 @@ void LightingPass::draw(backend::IRenderBackend& backend,
       for (u32 w = 0; w < 6; ++w) base[w] = glm::vec4(0.0f);
     }
   }
-  const u32 buffers[4] = {m_lightBuffer,
-                          usingDummy ? m_materialDummy : materialTable,
-                          m_envBuffer, m_shadowParams};
-  backend.drawLighting(m_pipeline, buffers, 4, &push, sizeof(push), width,
+  // v10: per-pixel roughness/metallic rides the GBuffer B alpha; the
+  // material-table SSBO left the lighting shader (dead-strip would
+  // shift the binding map - the handle list follows reflection).
+  const u32 buffers[3] = {m_lightBuffer, m_envBuffer, m_shadowParams};
+  backend.drawLighting(m_pipeline, buffers, 3, &push, sizeof(push), width,
                        height);
 }
 

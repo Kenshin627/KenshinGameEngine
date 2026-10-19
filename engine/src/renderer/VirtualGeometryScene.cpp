@@ -272,11 +272,10 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   // offset into the concatenated table rides the GPU instance
   // (GpuInstance.materialBase) and the decode adds it - multi-mesh
   // scenes resolve their OWN materials.
-  m_meshMaterialBase.push_back(
-      static_cast<u32>(m_materialData.size() / 8u));
+  m_meshMaterialBase.push_back(static_cast<u32>(m_materialData.size() / 8u));
   for (const auto& mat : dag.materials) {
-    f32 r[8] = {mat.kd[0],     mat.kd[1],    mat.kd[2], mat.texLayer,
-                mat.roughness, mat.metallic, 0.0f,      0.0f};
+    f32 r[8] = {mat.kd[0],     mat.kd[1],    mat.kd[2],      mat.texLayer,
+                mat.roughness, mat.metallic, mat.mrTexLayer, 0.0f};
     m_materialData.insert(m_materialData.end(), r, r + 8);
     m_materialTexPaths.push_back(mat.texPath);
   }

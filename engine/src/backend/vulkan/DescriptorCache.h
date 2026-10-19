@@ -53,7 +53,9 @@ class DescriptorCache {
   /// per-binding type so the draw path knows which writes take image
   /// infos. Dense 0..maxBinding like createStorageLayout (gaps become
   /// the SSBO type - never written by the draw path, harmless).
-  static constexpr u32 kMaxMixedBindings = 20;
+  // 22 slots used: decode_material binds 0..19 (SSBOs + imposter
+  // pairs) plus the v10 metallicRoughness array (20/21).
+  static constexpr u32 kMaxMixedBindings = 24;
   static VkDescriptorSetLayout createMixedLayout(VkDevice device,
                                                  const u32* spirv,
                                                  usize spirvWords,

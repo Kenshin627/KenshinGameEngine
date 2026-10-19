@@ -1,13 +1,12 @@
 #include "kenshin/geometry/KGeoFile.h"
 
-#include "meshoptimizer/meshoptimizer.h"  // M7.2b page codec
-
 #include <cstdio>
 #include <cstring>
 #include <glm/glm.hpp>
 #include <vector>
 
 #include "kenshin/core/Log.h"
+#include "meshoptimizer/meshoptimizer.h"  // M7.2b page codec
 
 KENSHIN_NS_BEGIN
 
@@ -32,7 +31,8 @@ constexpr u32 kVersion7 =
         // widths word's high bits (12..19). The RUNTIME paged path
         // requires v7 (hasMaterialTable).
 constexpr u32 kVersion8 = 8;
-constexpr u32 kVersion9 = 9;  // M9.2: v8 + the imposter atlas section
+constexpr u32 kVersion9 = 9;    // M9.2: v8 + the imposter atlas section
+constexpr u32 kVersion10 = 10;  // v9 + per-material metallicRoughness map
 // M7.2b: v7 with meshopt-CODEC page blobs on disk (transcoded to the
 // v7 byte layout on every read; the in-memory/runtime format and all
 // tables are identical to v7). The tail directory entry grows to 12
@@ -40,9 +40,9 @@ constexpr u32 kVersion9 = 9;  // M9.2: v8 + the imposter atlas section
 // page stored raw (codec inflation fallback).
 
 constexpr bool isV7Plus(u32 v) {
-  return v == kVersion7 || v == kVersion8 || v == kVersion9;
+  return v == kVersion7 || v == kVersion8 || v == kVersion9 || v == kVersion10;
 }
-constexpr bool isV9Plus(u32 v) { return v == kVersion9; }
+constexpr bool isV9Plus(u32 v) { return v == kVersion9 || v == kVersion10; }
 
 #pragma pack(push, 4)
 struct FileHeader {
@@ -239,8 +239,7 @@ bool writeKGeo(const std::string& path, const ClusterDag& dag,
 }
 
 bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
-                    const PackedGeometry& pg, std::string& log,
-                    bool compress) {
+                    const PackedGeometry& pg, std::string& log, bool compress) {
   if (pg.pageCount != pg.pageMeta.size() || pg.pageCount != pg.pages.size() ||
       pg.clusterPage.size() != dag.clusters.size()) {
     log = "paged write: packing table size mismatch";
@@ -316,9 +315,15 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   std::vector<ClusterDag::DagMaterial> mats = dag.materials;
   if (mats.empty()) mats.emplace_back();
 
-  const bool hasImposter =
-      !dag.imposterDepth.empty() && dag.imposterDepth.size() == dag.imposterTri.size();
-  const u32 version = hasImposter ? kVersion9 : (compress ? kVersion8 : kVersion7);
+  const bool hasImposter = !dag.imposterDepth.empty() &&
+                           dag.imposterDepth.size() == dag.imposterTri.size();
+  bool hasMr = false;
+  for (const auto& m : mats)
+    if (!m.mrPath.empty()) hasMr = true;
+  const bool isV10 = hasMr;
+  const u32 version = isV10         ? kVersion10
+                      : hasImposter ? kVersion9
+                                    : (compress ? kVersion8 : kVersion7);
   const FileHeaderV3 header{
       .magic = kMagicV3,
       .version = version,
@@ -389,11 +394,18 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   // is offset-relative and stays untouched): string blob + per-
   // material path offsets + 8-f32 records (kd, texFlag, rough, metal).
   std::vector<u32> texOff(mats.size(), 0xFFFFFFFFu);
+  std::vector<u32> mrOff(mats.size(), 0xFFFFFFFFu);
   std::string strings;
   for (usize m = 0; m < mats.size(); ++m) {
     if (mats[m].texPath.empty()) continue;
     texOff[m] = static_cast<u32>(strings.size());
     strings += mats[m].texPath;
+    strings.push_back('\0');
+  }
+  for (usize m = 0; m < mats.size(); ++m) {
+    if (mats[m].mrPath.empty()) continue;
+    mrOff[m] = static_cast<u32>(strings.size());
+    strings += mats[m].mrPath;
     strings.push_back('\0');
   }
   while (strings.size() % 4 != 0) strings.push_back('\0');
@@ -407,14 +419,19 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
       r[3] = texOff[m] == 0xFFFFFFFFu ? -1.0f : 0.0f;  // has-texture flag
       r[4] = mats[m].roughness;
       r[5] = mats[m].metallic;
-      r[6] = 0.0f;
+      r[6] = (hasMr && mrOff[m] == 0xFFFFFFFFu) ? -1.0f : 0.0f;
       r[7] = 0.0f;
     }
     const u32 stringBytes = static_cast<u32>(strings.size());
     ok = std::fwrite(&stringBytes, sizeof(stringBytes), 1, file) == 1 &&
          (stringBytes == 0 ||
           std::fwrite(strings.data(), 1, stringBytes, file) == stringBytes) &&
-         writeVector(file, texOff) && writeVector(file, records);
+         writeVector(file, texOff) && (!isV10 || writeVector(file, mrOff)) &&
+         writeVector(file, records);
+    if (ok && isV10) {
+      const u32 imposterFlag = hasImposter ? 1u : 0u;
+      ok = std::fwrite(&imposterFlag, sizeof(imposterFlag), 1, file) == 1;
+    }
   }
 
   // M9.2 v9: the imposter atlas (12x12 dirs x 12x12 texels of
@@ -431,8 +448,7 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
          writeVector(file, dag.imposterTri);
     if (ok)
       KENSHIN_INFO("[builder] imposter atlas: {} dirs, {} words",
-                   atlasWords / (12u * 12u * 12u * 12u) * 0u +
-                       12u * 12u,
+                   atlasWords / (12u * 12u * 12u * 12u) * 0u + 12u * 12u,
                    atlasWords);
   }
 
@@ -466,8 +482,8 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
       std::vector<u8> padded(raw);
       padded.resize(words * 4u, 0);
       codec.resize(meshopt_encodeVertexBufferBound(words, 4u));
-      const usize enc = meshopt_encodeVertexBuffer(
-          codec.data(), codec.size(), padded.data(), words, 4u);
+      const usize enc = meshopt_encodeVertexBuffer(codec.data(), codec.size(),
+                                                   padded.data(), words, 4u);
       if (enc > 0 && enc < raw.size()) {
         storedLen = static_cast<u32>(enc);
         ok = std::fwrite(codec.data(), 1, enc, file) == enc;
@@ -698,11 +714,10 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     std::fclose(file);
     return false;
   }
-  const u32 metaWordsPerPage =
-      (h3.version == kVersion5 || h3.version == kVersion6 ||
-       isV7Plus(h3.version))
-          ? 12u
-          : 6u;
+  const u32 metaWordsPerPage = (h3.version == kVersion5 ||
+                                h3.version == kVersion6 || isV7Plus(h3.version))
+                                   ? 12u
+                                   : 6u;
   std::vector<u32> metaFlat;
   if (!readVector(file, metaFlat, usize(h3.pageCount) * metaWordsPerPage)) {
     log = "truncated (page metadata)";
@@ -746,7 +761,10 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
       std::fclose(file);
       return false;
     }
+    // File order (v10): texOff[] then mrOff[] then records.
+    std::vector<u32> mrOff;
     if (!readVector(file, texOff, materialCount) ||
+        (h3.version == kVersion10 && !readVector(file, mrOff, materialCount)) ||
         !readVector(file, records, usize(materialCount) * 8)) {
       log = "truncated (material table)";
       std::fclose(file);
@@ -761,6 +779,10 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
       mat.kd[2] = r[2];
       mat.roughness = r[4];
       mat.metallic = r[5];
+      if (h3.version == kVersion10 && r[6] >= 0.0f && mrOff[m] != 0xFFFFFFFFu &&
+          mrOff[m] < strings.size()) {
+        mat.mrPath = std::string(strings.data() + mrOff[m]);
+      }
       if (r[3] >= 0.0f && texOff[m] != 0xFFFFFFFFu &&
           texOff[m] < strings.size()) {
         mat.texPath = std::string(strings.data() + texOff[m]);
@@ -769,8 +791,19 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     dag.hasMaterialTable = true;
   }
   // M9.2 v9: the imposter atlas sits between the material section and
-  // the blobs (u32 word count, then depth[] and tri[]).
-  if (isV9Plus(h3.version)) {
+  // the blobs (u32 word count, then depth[] and tri[]). v10 carries an
+  // explicit presence flag (v10 does not imply the imposter feature).
+  bool wantImposter = h3.version == kVersion9;
+  if (h3.version == kVersion10) {
+    u32 imposterFlag = 0;
+    if (std::fread(&imposterFlag, sizeof(imposterFlag), 1, file) != 1) {
+      log = "truncated (imposter flag)";
+      std::fclose(file);
+      return false;
+    }
+    wantImposter = imposterFlag != 0;
+  }
+  if (wantImposter) {
     u32 atlasWords = 0;
     if (std::fread(&atlasWords, sizeof(atlasWords), 1, file) != 1 ||
         atlasWords == 0xFFFFFFFFu || atlasWords == 0 ||
@@ -872,18 +905,16 @@ bool KGeoPageReader::open(const std::string& path, std::string& log) {
   // The page directory is the file's tail: pageCount * 8 (v7-) or 12
   // (v8+) bytes - the entry width rides the version word.
   const bool v8 = h3.version >= kVersion8;
-  const usize entryBytes =
-      v8 ? sizeof(PageDirEntryV8) : sizeof(PageDirEntry);
-  if (_fseeki64(
-          file,
-          -static_cast<long long>(usize(h3.pageCount) * entryBytes),
-          SEEK_END) != 0) {
+  const usize entryBytes = v8 ? sizeof(PageDirEntryV8) : sizeof(PageDirEntry);
+  if (_fseeki64(file, -static_cast<long long>(usize(h3.pageCount) * entryBytes),
+                SEEK_END) != 0) {
     log = "cannot seek to the page directory";
     std::fclose(file);
     return false;
   }
   std::vector<u8> dirBytes(usize(h3.pageCount) * entryBytes);
-  if (std::fread(dirBytes.data(), 1, dirBytes.size(), file) != dirBytes.size()) {
+  if (std::fread(dirBytes.data(), 1, dirBytes.size(), file) !=
+      dirBytes.size()) {
     log = "truncated page directory";
     std::fclose(file);
     return false;
@@ -899,16 +930,14 @@ bool KGeoPageReader::open(const std::string& path, std::string& log) {
   m_rawLen.resize(h3.pageCount);
   for (u32 p = 0; p < h3.pageCount; ++p) {
     if (v8) {
-      const PageDirEntryV8& e =
-          *reinterpret_cast<const PageDirEntryV8*>(dirBytes.data() +
-                                                   usize(p) * entryBytes);
+      const PageDirEntryV8& e = *reinterpret_cast<const PageDirEntryV8*>(
+          dirBytes.data() + usize(p) * entryBytes);
       m_offsets[usize(p) * 2] = e.fileOffset;
       m_offsets[usize(p) * 2 + 1] = e.storedLen;
       m_rawLen[p] = e.rawLen;
     } else {
-      const PageDirEntry& e =
-          *reinterpret_cast<const PageDirEntry*>(dirBytes.data() +
-                                                  usize(p) * entryBytes);
+      const PageDirEntry& e = *reinterpret_cast<const PageDirEntry*>(
+          dirBytes.data() + usize(p) * entryBytes);
       m_offsets[usize(p) * 2] = e.fileOffset;
       m_offsets[usize(p) * 2 + 1] = e.byteLen;
       m_rawLen[p] = e.byteLen;
@@ -950,8 +979,8 @@ bool KGeoPageReader::readPage(u32 page, std::vector<u8>& out,
   // 4-byte-padded word stream; truncate back to rawLen).
   const usize words = usize((rawLen + 3) / 4);
   out.resize(words * 4);  // the codec writes whole words; truncate after
-  const int rc = meshopt_decodeVertexBuffer(out.data(), words, 4,
-                                            stored.data(), stored.size());
+  const int rc = meshopt_decodeVertexBuffer(out.data(), words, 4, stored.data(),
+                                            stored.size());
   if (rc != 0) {
     log = "page decode failed (corrupt blob?)";
     return false;

@@ -963,23 +963,46 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
                 imgIdx = int(imgIdxU);
             }
           }
-          if (imgIdx >= 0) {
-            auto imgIt = imgSlotOf.find(u32(imgIdx));
+          auto slotForImage = [&](int imageIdx) -> int {
+            if (imageIdx < 0 || !g.images) return -1;
+            auto imgIt = imgSlotOf.find(u32(imageIdx));
             if (imgIt == imgSlotOf.end()) {
               GltfImage dec;
               std::string imgLog;
-              if (decodeImage(g, g.images->at(u32(imgIdx)), dec, imgLog))
-                imgIt = imgSlotOf.emplace(u32(imgIdx), u32(usedImages.size()))
+              if (decodeImage(g, g.images->at(u32(imageIdx)), dec, imgLog))
+                imgIt = imgSlotOf.emplace(u32(imageIdx), u32(usedImages.size()))
                             .first,
                 usedImages.push_back(std::move(dec));
               else
                 log = log.empty() ? imgLog : log + "; " + imgLog;
             }
-            if (imgSlotOf.count(u32(imgIdx))) {
-              gm.image = int(imgSlotOf.at(u32(imgIdx)));
-              if (usedImages[gm.image].name.empty())
-                usedImages[gm.image].name =
-                    "mat" + std::to_string(usedMaterials.size());
+            if (!imgSlotOf.count(u32(imageIdx))) return -1;
+            return int(imgSlotOf.at(u32(imageIdx)));
+          };
+          gm.image = slotForImage(imgIdx);
+          if (gm.image >= 0 && usedImages[usize(gm.image)].name.empty())
+            usedImages[usize(gm.image)].name =
+                "mat" + std::to_string(usedMaterials.size());
+          // metallicRoughnessTexture: roughness rides G, metallic B
+          // (LINEAR data - never sRGB-decoded).
+          if (const JVal* pbrMr = jm.find("pbrMetallicRoughness");
+              pbrMr && g.textures && g.images) {
+            if (const JVal* mr = pbrMr->find("metallicRoughnessTexture"); mr) {
+              u32 mrTex = 0xFFFFFFFFu, mrImg = 0xFFFFFFFFu;
+              if (checkedU32(mr->numOr("index", 4294967295.0), mrTex) &&
+                  mrTex < g.textures->size() &&
+                  checkedU32(
+                      g.textures->at(mrTex).numOr("source", 4294967295.0),
+                      mrImg) &&
+                  mrImg < g.images->size()) {
+                const int slot = slotForImage(int(mrImg));
+                if (slot >= 0) {
+                  gm.mrImage = slot;
+                  if (usedImages[usize(slot)].name.empty())
+                    usedImages[usize(slot)].name =
+                        "mat" + std::to_string(usedMaterials.size()) + "_mr";
+                }
+              }
             }
           }
           matSlot = u32(usedMaterials.size());
