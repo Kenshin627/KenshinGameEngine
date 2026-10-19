@@ -972,6 +972,21 @@ int main(int argc, char** argv) {
                        m = std::max(m, g.lodLevel);
                      return m + 1;
                    }());
+      {
+        const auto* hn =
+            kgeoPreview.dag.hierarchyRoot <
+                    kgeoPreview.dag.hierarchyNodes.size()
+                ? &kgeoPreview.dag.hierarchyNodes[kgeoPreview.dag.hierarchyRoot]
+                : nullptr;
+        if (hn)
+          KENSHIN_INFO(
+              "[kgeo] hierarchy {} nodes, root {} aabb "
+              "min({:.2f},{:.2f},{:.2f}) max({:.2f},{:.2f},{:.2f}) err {:.4f}",
+              kgeoPreview.dag.hierarchyNodes.size(),
+              kgeoPreview.dag.hierarchyRoot, hn->aabbMin[0], hn->aabbMin[1],
+              hn->aabbMin[2], hn->aabbMax[0], hn->aabbMax[1], hn->aabbMax[2],
+              hn->maxSimplifyError);
+      }
     } else
       KENSHIN_WARN("[kgeo] load failed: {} (continuing with --mesh)", kgeoLog);
   }

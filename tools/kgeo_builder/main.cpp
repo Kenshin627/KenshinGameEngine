@@ -26,11 +26,46 @@ namespace fsg = std::filesystem;
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 
+// Sketchfab/FBX-sourced glTF assets routinely sit FAR off the origin
+// (a scan pivot 172 units up, say) - the raw scene is technically
+// correct but unusable as a display asset: the default camera misses
+// it, the LOD/shadow metrics degrade, and the v5 quant grid wastes
+// precision. Recenter: xy to the bbox center, the bottom to z=0 (the
+// ground-plane convention). `fit` additionally scales so the longest
+// dimension = N units (cm-sourced scans).
+static void recenterGltf(kenshin::assets::MeshData& mesh, float fit) {
+  if (mesh.positions.empty()) return;
+  float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+  for (kenshin::usize v = 0; v < mesh.vertexCount(); ++v)
+    for (int k = 0; k < 3; ++k) {
+      const float p = mesh.positions[v * 3 + k];
+      mn[k] = std::min(mn[k], p);
+      mx[k] = std::max(mx[k], p);
+    }
+  const float cx = (mn[0] + mx[0]) * 0.5f, cy = (mn[1] + mx[1]) * 0.5f;
+  const float size = std::max({mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]});
+  const float scale = fit > 0.0f && size > 1e-9f ? fit / size : 1.0f;
+  if (std::abs(cx) > 1e-6f || std::abs(cy) > 1e-6f || std::abs(mn[2]) > 1e-6f ||
+      scale != 1.0f) {
+    for (kenshin::usize v = 0; v < mesh.vertexCount(); ++v) {
+      mesh.positions[v * 3 + 0] = (mesh.positions[v * 3 + 0] - cx) * scale;
+      mesh.positions[v * 3 + 1] = (mesh.positions[v * 3 + 1] - cy) * scale;
+      mesh.positions[v * 3 + 2] = (mesh.positions[v * 3 + 2] - mn[2]) * scale;
+    }
+    KENSHIN_INFO(
+        "[builder] gltf recentered (-{:.2f},-{:.2f},-{:.2f}){} bbox {:.2f} -> "
+        "{:.2f} units",
+        cx, cy, mn[2], scale != 1.0f ? " + scaled" : "", size, size * scale);
+  }
+}
+
 int main(int argc, char** argv) {
   kenshin::log::init();
   KENSHIN_INFO("{}", kenshin::getBanner());
 
   std::string input, output = "out/mesh.kgeo";
+  float fit = 0.0f;  // --fit N: uniform scale so the longest bbox
+                     // dimension lands at N units (0 = as loaded)
   // Multi-material glTF set (filled only when the asset carries more
   // than one used material; single-material inputs take the legacy
   // single-table path unchanged).
@@ -63,7 +98,9 @@ int main(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--rough") == 0 && i + 1 < argc)
       rough = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--metal") == 0 && i + 1 < argc)
-      metal = std::atof(argv[++i]);
+      metal = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--fit") == 0 && i + 1 < argc)
+      fit = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--debug-dump") == 0)
       debugDump = true;
     else if (std::strcmp(argv[i], "--no-compress") == 0)
@@ -142,6 +179,7 @@ int main(int argc, char** argv) {
         KENSHIN_INFO("[builder] gltf albedo {}x{} -> {}", albedo.width,
                      albedo.height, bmp.string());
       }
+      recenterGltf(mesh, fit);
     } else if (!kenshin::assets::loadObj(input, mesh, log)) {
       KENSHIN_ERROR("load failed: {}", log);
       kenshin::log::shutdown();
