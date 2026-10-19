@@ -9,6 +9,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <map>
 
 #pragma warning(push, 0)
 #include "stb/stb_image.h"
@@ -19,7 +20,8 @@ KENSHIN_NS_BEGIN
 namespace assets {
 
 bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
-                  std::string& log);
+                  std::string& log, std::vector<GltfMaterial>* materials,
+                  std::vector<GltfImage>* images);
 
 namespace {
 
@@ -636,21 +638,25 @@ bool decodeImage(const Gltf& g, const JVal& img, GltfImage& out,
 }  // namespace
 
 bool loadGltf(const std::string& path, MeshData& mesh, GltfImage* albedo,
-              std::string& log) {
+              std::string& log, std::vector<GltfMaterial>* materials,
+              std::vector<GltfImage>* images) {
   try {
-    return loadGltfImpl(path, mesh, albedo, log);
+    return loadGltfImpl(path, mesh, albedo, log, materials, images);
   } catch (const std::bad_alloc&) {
     // The header contract: never throw - a hostile 20 MB "[0,0,...]"
     // JSON amplifies to >1 GB of DOM and would terminate the process.
     mesh = MeshData{};
     if (albedo) *albedo = GltfImage{};
+    if (materials) materials->clear();
+    if (images) images->clear();
     log = "out of memory (hostile or oversized file)";
     return false;
   }
 }
 
 bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
-                  std::string& log) {
+                  std::string& log, std::vector<GltfMaterial>* materials,
+                  std::vector<GltfImage>* images) {
   mesh = MeshData{};
   std::vector<u8> file;
   if (!readFile(path, file)) {
@@ -806,14 +812,31 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
   std::vector<glm::vec2> uvs;
   std::vector<glm::vec3> normals;
   std::vector<u32> indices;
+  std::vector<u32> triMaterial;  // per-triangle slot into usedMaterials
   bool anyUvs = true;
   bool allNormals = true;
   int firstMaterial = -1;
+  // Multi-material registry: every used material in first-use order
+  // (a slot per primitive), images deduplicated by glTF image index.
+  std::vector<GltfMaterial> usedMaterials;
+  std::vector<GltfImage> usedImages;
+  std::vector<int> imageOfMaterial;   // -1 = factor material
+  std::map<u32, u32> slotOfMaterial;  // glTF material index -> slot
+  std::map<u32, u32> imgSlotOf;       // glTF image index -> usedImages idx
 
-  for (const auto& [meshIdx, nodeM] : meshNodes) {
+  // glTF is right-handed Y-up by spec; the engine is right-handed
+  // Z-up. R_x(+90) column-major below: (x,y,z)_glTF -> (x,-z,y) -
+  // glTF up lands on engine +Z, handedness preserved (det = +1).
+  const glm::mat4 rootFix(1.0f, 0.0f, 0.0f, 0.0f,   // col0: x -> x
+                          0.0f, 0.0f, 1.0f, 0.0f,   // col1: y -> +Z
+                          0.0f, -1.0f, 0.0f, 0.0f,  // col2: z -> -Y
+                          0.0f, 0.0f, 0.0f, 1.0f);
+
+  for (const auto& [meshIdx, nodeMraw] : meshNodes) {
     const JVal& m = g.meshes->at(meshIdx);
     const JVal* prims = m.find("primitives");
     if (!prims) continue;
+    const glm::mat4 nodeM = rootFix * nodeMraw;
     const glm::mat3 normalM = glm::inverseTranspose(glm::mat3(nodeM));
     for (const JVal& prim : prims->items) {
       u32 mode = 4;
@@ -902,12 +925,67 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
       }
       for (u32 i : idx) indices.push_back(base + i);
 
-      if (firstMaterial < 0)
-        if (const JVal* mat = prim.find("material");
-            mat && mat->type == JVal::Num) {
-          u32 mi = 0;
-          if (checkedU32(mat->number, mi)) firstMaterial = int(mi);
+      // This primitive's material -> registry slot; every triangle
+      // gets tagged (cluster majority assignment happens in the DAG).
+      u32 matSlot = 0;
+      const JVal* mat = prim.find("material");
+      u32 mi = 0;
+      if (mat && mat->type == JVal::Num && checkedU32(mat->number, mi) &&
+          g.materials && mi < g.materials->size()) {
+        if (firstMaterial < 0) firstMaterial = int(mi);
+        auto it = slotOfMaterial.find(mi);
+        if (it == slotOfMaterial.end()) {
+          // New slot: pull the PBR params + base-color texture ref.
+          const JVal& jm = g.materials->at(mi);
+          GltfMaterial gm;
+          int imgIdx = -1;
+          if (const JVal* pbr = jm.find("pbrMetallicRoughness")) {
+            if (const JVal* f = pbr->find("baseColorFactor");
+                f && f->size() >= 3)
+              gm.kd = glm::vec3(f32(f->at(0).number), f32(f->at(1).number),
+                                f32(f->at(2).number));
+            gm.roughness = f32(pbr->numOr("roughnessFactor", 1.0));
+            gm.metallic = f32(pbr->numOr("metallicFactor", 1.0));
+            if (const JVal* bt = pbr->find("baseColorTexture");
+                bt && g.textures && g.images) {
+              u32 texIdx = 0xFFFFFFFFu, imgIdxU = 0xFFFFFFFFu;
+              if (checkedU32(bt->numOr("index", 4294967295.0), texIdx) &&
+                  texIdx < g.textures->size() &&
+                  checkedU32(
+                      g.textures->at(texIdx).numOr("source", 4294967295.0),
+                      imgIdxU) &&
+                  imgIdxU < g.images->size())
+                imgIdx = int(imgIdxU);
+            }
+          }
+          if (imgIdx >= 0) {
+            auto imgIt = imgSlotOf.find(u32(imgIdx));
+            if (imgIt == imgSlotOf.end()) {
+              GltfImage dec;
+              std::string imgLog;
+              if (decodeImage(g, g.images->at(u32(imgIdx)), dec, imgLog))
+                imgIt = imgSlotOf.emplace(u32(imgIdx), u32(usedImages.size()))
+                            .first,
+                usedImages.push_back(std::move(dec));
+              else
+                log = log.empty() ? imgLog : log + "; " + imgLog;
+            }
+            if (imgSlotOf.count(u32(imgIdx))) {
+              gm.image = int(imgSlotOf.at(u32(imgIdx)));
+              if (usedImages[gm.image].name.empty())
+                usedImages[gm.image].name =
+                    "mat" + std::to_string(usedMaterials.size());
+            }
+          }
+          matSlot = u32(usedMaterials.size());
+          usedMaterials.push_back(gm);
+          imageOfMaterial.push_back(gm.image);
+          slotOfMaterial.emplace(mi, matSlot);
+        } else {
+          matSlot = it->second;
         }
+      }
+      triMaterial.resize(triMaterial.size() + idx.size() / 3, matSlot);
     }
   }
 
@@ -949,34 +1027,26 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
     for (const glm::vec2& v : uvs) mesh.uvs.insert(mesh.uvs.end(), {v.x, v.y});
   }
 
-  // Material (pbrMetallicRoughness of the first referenced one).
-  if (firstMaterial >= 0 && g.materials &&
-      usize(firstMaterial) < g.materials->size()) {
-    const JVal& mat = g.materials->at(usize(firstMaterial));
-    const JVal* pbr = mat.find("pbrMetallicRoughness");
-    if (pbr) {
-      if (const JVal* f = pbr->find("baseColorFactor"); f && f->size() >= 3) {
-        mesh.material.kd = glm::vec3(f32(f->at(0).number), f32(f->at(1).number),
-                                     f32(f->at(2).number));
-        mesh.material.ka = glm::vec3(0.0f);
-      }
-      mesh.material.roughness = f32(pbr->numOr("roughnessFactor", 1.0));
-      mesh.material.metallic = f32(pbr->numOr("metallicFactor", 1.0));
-      if (const JVal* bt = pbr->find("baseColorTexture");
-          bt && albedo && g.textures && g.images) {
-        u32 texIdx = 0xFFFFFFFFu, imgIdx = 0xFFFFFFFFu;
-        if (checkedU32(bt->numOr("index", 4294967295.0), texIdx) &&
-            texIdx < g.textures->size() &&
-            checkedU32(g.textures->at(texIdx).numOr("source", 4294967295.0),
-                       imgIdx) &&
-            imgIdx < g.images->size()) {
-          std::string imgLog;
-          if (!decodeImage(g, g.images->at(imgIdx), *albedo, imgLog))
-            log = log.empty() ? imgLog : log + "; " + imgLog;
-        }
-      }
-    }
+  // Material (the first referenced one fills MeshData.material +
+  // the `albedo` out for single-material consumers; the full set goes
+  // to the multi-material outs below).
+  if (firstMaterial >= 0 && slotOfMaterial.count(u32(firstMaterial))) {
+    const u32 s = slotOfMaterial.at(u32(firstMaterial));
+    mesh.material.kd = usedMaterials[s].kd;
+    mesh.material.ka = glm::vec3(0.0f);
+    mesh.material.roughness = usedMaterials[s].roughness;
+    mesh.material.metallic = usedMaterials[s].metallic;
+    if (albedo && imageOfMaterial[s] >= 0)
+      *albedo = usedImages[u32(imageOfMaterial[s])];
   }
+  if (usedMaterials.size() > 1) {
+    mesh.triMaterial = std::move(triMaterial);
+  } else if (!triMaterial.empty()) {
+    // Single material: keep MeshData's "empty = material 0" shape.
+    triMaterial.clear();
+  }
+  if (materials) *materials = std::move(usedMaterials);
+  if (images) *images = std::move(usedImages);
   if (!anyUvs && albedo) *albedo = GltfImage{};  // no UVs -> untextured
   if (!anyUvs)
     log = log.empty() ? "note: no TEXCOORD_0 - untextured"

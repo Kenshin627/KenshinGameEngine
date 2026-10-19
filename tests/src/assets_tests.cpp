@@ -314,17 +314,22 @@ TEST_CASE("gltf loader: glb with transform, computed normals, image",
   // Node translation applied: x + 0.5.
   REQUIRE(mesh.positions[0] == Catch::Approx(1.0f).margin(1e-5f));
   REQUIRE(mesh.positions[3] == Catch::Approx(2.0f).margin(1e-5f));
-  REQUIRE(mesh.positions[7] == Catch::Approx(1.0f).margin(1e-5f));
   REQUIRE(mesh.positions[1] == Catch::Approx(0.0f).margin(1e-5f));
+  // The root axis fix (R_x(+90): (x,y,z)_glTF -> (x,-z,y)) puts the
+  // glTF XY-plane triangle into the engine's XZ plane: v2's glTF y=1
+  // becomes engine z=1, its engine y stays 0.
+  REQUIRE(mesh.positions[7] == Catch::Approx(0.0f).margin(1e-5f));
+  REQUIRE(mesh.positions[8] == Catch::Approx(1.0f).margin(1e-5f));
   REQUIRE(mesh.indices.size() == 3);
   REQUIRE(mesh.indices[0] == 0);
   REQUIRE(mesh.indices[2] == 2);
   REQUIRE(mesh.uvs.size() == 6);
   REQUIRE(mesh.uvs[2] == Catch::Approx(1.0f).margin(1e-5f));
-  // Normals were COMPUTED (none in the file): +z face normal.
+  // Normals were COMPUTED (none in the file): the glTF +z face
+  // normal lands on engine -y under the root fix.
   REQUIRE(mesh.normals.size() == 9);
-  REQUIRE(mesh.normals[2] == Catch::Approx(1.0f).margin(1e-4f));
-  REQUIRE(mesh.normals[5] == Catch::Approx(1.0f).margin(1e-4f));
+  REQUIRE(mesh.normals[1] == Catch::Approx(-1.0f).margin(1e-4f));
+  REQUIRE(mesh.normals[4] == Catch::Approx(-1.0f).margin(1e-4f));
   // Material: factors + the decoded embedded image.
   REQUIRE(mesh.material.kd.r == Catch::Approx(0.9f).margin(1e-5f));
   REQUIRE(mesh.material.roughness == Catch::Approx(0.35f).margin(1e-5f));
@@ -335,6 +340,105 @@ TEST_CASE("gltf loader: glb with transform, computed normals, image",
   REQUIRE(albedo.rgba[0] == 60);   // first texel dark tone
   REQUIRE(albedo.rgba[4] == 200);  // second texel light tone
   std::remove("out/tri.glb");
+}
+
+TEST_CASE("gltf loader: multi-material set with per-triangle tags",
+          "[assets][gltf]") {
+  // Two single-triangle primitives, two distinct factor materials.
+  // The merged mesh keeps insertion order: tri 0 -> material slot 0
+  // (the first referenced), tri 1 -> slot 1.
+  const float posA[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+  const float posB[9] = {5, 0, 0, 6, 0, 0, 5, 1, 0};
+  const kenshin::u16 idx[3] = {0, 1, 2};
+  std::vector<kenshin::u8> bin;
+  auto padTo4 = [](std::vector<kenshin::u8> v) {
+    while (v.size() % 4) v.push_back(0);
+    return v;
+  };
+  for (const float* p : {posA, posB}) {
+    std::vector<kenshin::u8> b((const kenshin::u8*)p,
+                               (const kenshin::u8*)p + 36);
+    bin.insert(bin.end(), b.begin(), b.end());
+  }
+  {
+    std::vector<kenshin::u8> b((const kenshin::u8*)idx,
+                               (const kenshin::u8*)idx + 6);
+    b = padTo4(b);
+    bin.insert(bin.end(), b.begin(), b.end());
+  }
+  {
+    std::vector<kenshin::u8> b((const kenshin::u8*)idx,
+                               (const kenshin::u8*)idx + 6);
+    b = padTo4(b);
+    bin.insert(bin.end(), b.begin(), b.end());
+  }
+  const std::string json =
+      "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+      "\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],"
+      "\"meshes\":[{\"primitives\":["
+      "{\"attributes\":{\"POSITION\":0},\"indices\":2,\"material\":0},"
+      "{\"attributes\":{\"POSITION\":1},\"indices\":3,\"material\":1}]}],"
+      "\"materials\":["
+      "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.9,0.8,0.7,1],"
+      "\"metallicFactor\":0.1,\"roughnessFactor\":0.35}},"
+      "{\"pbrMetallicRoughness\":{\"baseColorFactor\":[0.1,0.2,0.3,1],"
+      "\"metallicFactor\":0.9,\"roughnessFactor\":0.8}}],"
+      "\"accessors\":["
+      "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+      "{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+      "{\"bufferView\":2,\"componentType\":5123,\"count\":3,\"type\":"
+      "\"SCALAR\"},"
+      "{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":"
+      "\"SCALAR\"}],"
+      "\"bufferViews\":["
+      "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},"
+      "{\"buffer\":0,\"byteOffset\":36,\"byteLength\":36},"
+      "{\"buffer\":0,\"byteOffset\":72,\"byteLength\":8},"
+      "{\"buffer\":0,\"byteOffset\":80,\"byteLength\":8}],"
+      "\"buffers\":[{\"byteLength\":" +
+      std::to_string(bin.size()) + "}]}";
+  const auto jsonP = pad4(std::vector<kenshin::u8>(json.begin(), json.end()));
+  std::vector<kenshin::u8> glb;
+  appendU32(glb, 0x46546C67);
+  appendU32(glb, 2);
+  appendU32(glb, kenshin::u32(12 + 8 + jsonP.size() + 8 + bin.size()));
+  appendU32(glb, kenshin::u32(jsonP.size()));
+  appendU32(glb, 0x4E4F534A);
+  glb.insert(glb.end(), jsonP.begin(), jsonP.end());
+  appendU32(glb, kenshin::u32(bin.size()));
+  appendU32(glb, 0x004E4942);
+  glb.insert(glb.end(), bin.begin(), bin.end());
+  REQUIRE((std::filesystem::exists("out") ||
+           std::filesystem::create_directories("out")));
+  {
+    FILE* f = nullptr;
+    REQUIRE(fopen_s(&f, "out/multimat.glb", "wb") == 0);
+    std::fwrite(glb.data(), 1, glb.size(), f);
+    std::fclose(f);
+  }
+  kenshin::assets::MeshData mesh;
+  kenshin::assets::GltfImage albedo;
+  std::vector<kenshin::assets::GltfMaterial> mats;
+  std::vector<kenshin::assets::GltfImage> images;
+  std::string log;
+  REQUIRE(kenshin::assets::loadGltf("out/multimat.glb", mesh, &albedo, log,
+                                    &mats, &images));
+  INFO("log: " << log);
+  REQUIRE(mesh.triangleCount() == 2);
+  REQUIRE(mats.size() == 2);
+  REQUIRE(images.empty());  // factor-only materials: no images
+  REQUIRE(mesh.triMaterial.size() == 2);
+  REQUIRE(mesh.triMaterial[0] == 0);
+  REQUIRE(mesh.triMaterial[1] == 1);
+  REQUIRE(mats[0].kd.r == Catch::Approx(0.9f).margin(1e-5f));
+  REQUIRE(mats[0].metallic == Catch::Approx(0.1f).margin(1e-5f));
+  REQUIRE(mats[1].kd.g == Catch::Approx(0.2f).margin(1e-5f));
+  REQUIRE(mats[1].roughness == Catch::Approx(0.8f).margin(1e-5f));
+  // First-referenced material still fills the legacy single fields.
+  REQUIRE(mesh.material.kd.b == Catch::Approx(0.7f).margin(1e-5f));
+  REQUIRE(mesh.material.metallic == Catch::Approx(0.1f).margin(1e-5f));
+  REQUIRE(albedo.width == 0);
+  std::remove("out/multimat.glb");
 }
 
 TEST_CASE("gltf loader: rejects hostile bounds violations", "[assets][gltf]") {

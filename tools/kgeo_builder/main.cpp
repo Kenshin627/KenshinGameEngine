@@ -20,8 +20,8 @@ namespace fsg = std::filesystem;
 #include "kenshin/assets/ObjLoader.h"
 #include "kenshin/core/Log.h"
 #include "kenshin/geometry/ClusterDag.h"
-#include "kenshin/geometry/ImposterBaker.h"
 #include "kenshin/geometry/ClusterLodBuilder.h"
+#include "kenshin/geometry/ImposterBaker.h"
 #include "kenshin/geometry/KGeoFile.h"
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
@@ -31,6 +31,11 @@ int main(int argc, char** argv) {
   KENSHIN_INFO("{}", kenshin::getBanner());
 
   std::string input, output = "out/mesh.kgeo";
+  // Multi-material glTF set (filled only when the asset carries more
+  // than one used material; single-material inputs take the legacy
+  // single-table path unchanged).
+  std::vector<kenshin::assets::GltfMaterial> gltfMaterials;
+  std::vector<kenshin::assets::GltfImage> gltfImages;
   std::string proc;      // "sphere" or "knot"
   bool unpaged = false;  // --unpaged: emit v2 (pools) instead of v3+ (pages)
   // M8.2 material overrides (single material v1; OBJ inputs already
@@ -110,13 +115,14 @@ int main(int argc, char** argv) {
     for (char& c : inExt) c = char(tolower(unsigned(c)));
     if (inExt == ".glb" || inExt == ".gltf") {
       kenshin::assets::GltfImage albedo;
-      if (!kenshin::assets::loadGltf(input, mesh, &albedo, log)) {
+      if (!kenshin::assets::loadGltf(input, mesh, &albedo, log, &gltfMaterials,
+                                     &gltfImages)) {
         KENSHIN_ERROR("glTF load failed: {}", log);
         kenshin::log::shutdown();
         return 1;
       }
       if (!log.empty()) KENSHIN_WARN("[builder] gltf notes: {}", log);
-      if (albedo.width > 0) {
+      if (albedo.width > 0 && gltfMaterials.size() <= 1) {
         // Re-encode the embedded/decoded albedo as a BMP next to the
         // OUTPUT (the .kgeo's texture reference is a bare file name -
         // the pair travels together like an --albedo copy).
@@ -171,8 +177,8 @@ int main(int argc, char** argv) {
     // whether each triangle's geometric winding faces +Z or -Z; a flat
     // z=0 plane must be 100% one sign per consistently-wound input.
     const int maxLevel = 64;
-    std::vector<kenshin::u32> cl(maxLevel, 0), tr(maxLevel, 0),
-        up(maxLevel, 0), dn(maxLevel, 0), dg(maxLevel, 0);
+    std::vector<kenshin::u32> cl(maxLevel, 0), tr(maxLevel, 0), up(maxLevel, 0),
+        dn(maxLevel, 0), dg(maxLevel, 0);
     std::vector<double> maxEdge(maxLevel, 0.0), sumEdge(maxLevel, 0.0);
     for (kenshin::u32 ci = 0; ci < dag.clusters.size(); ++ci) {
       const auto& c = dag.clusters[ci];
@@ -183,18 +189,15 @@ int main(int argc, char** argv) {
                            i1 = dag.indices[c.indexOffset + t + 1],
                            i2 = dag.indices[c.indexOffset + t + 2];
         // indices are cluster-local; add the cluster's vertex slice base
-        const glm::vec3 p0(
-            dag.positions[size_t(c.vertexOffset + i0) * 3 + 0],
-            dag.positions[size_t(c.vertexOffset + i0) * 3 + 1],
-            dag.positions[size_t(c.vertexOffset + i0) * 3 + 2]);
-        const glm::vec3 p1(
-            dag.positions[size_t(c.vertexOffset + i1) * 3 + 0],
-            dag.positions[size_t(c.vertexOffset + i1) * 3 + 1],
-            dag.positions[size_t(c.vertexOffset + i1) * 3 + 2]);
-        const glm::vec3 p2(
-            dag.positions[size_t(c.vertexOffset + i2) * 3 + 0],
-            dag.positions[size_t(c.vertexOffset + i2) * 3 + 1],
-            dag.positions[size_t(c.vertexOffset + i2) * 3 + 2]);
+        const glm::vec3 p0(dag.positions[size_t(c.vertexOffset + i0) * 3 + 0],
+                           dag.positions[size_t(c.vertexOffset + i0) * 3 + 1],
+                           dag.positions[size_t(c.vertexOffset + i0) * 3 + 2]);
+        const glm::vec3 p1(dag.positions[size_t(c.vertexOffset + i1) * 3 + 0],
+                           dag.positions[size_t(c.vertexOffset + i1) * 3 + 1],
+                           dag.positions[size_t(c.vertexOffset + i1) * 3 + 2]);
+        const glm::vec3 p2(dag.positions[size_t(c.vertexOffset + i2) * 3 + 0],
+                           dag.positions[size_t(c.vertexOffset + i2) * 3 + 1],
+                           dag.positions[size_t(c.vertexOffset + i2) * 3 + 2]);
         const glm::vec3 n = glm::cross(p1 - p0, p2 - p0);
         const float area2 = glm::length(n);
         ++tr[lvl];
@@ -211,14 +214,15 @@ int main(int argc, char** argv) {
         sumEdge[lvl] += (e01 + e12 + e20) / 3.0;
       }
     }
-    KENSHIN_INFO("[dbg] level clusters tris upPct dnPct degPct maxEdge avgEdge");
+    KENSHIN_INFO(
+        "[dbg] level clusters tris upPct dnPct degPct maxEdge avgEdge");
     for (int l = 0; l < maxLevel; ++l)
       if (tr[l] > 0)
-        KENSHIN_INFO("[dbg] {:>5} {:>8} {:>7} {:>5.1f} {:>5.1f} {:>5.1f} "
-                     "{:>9.2f} {:>8.3f}",
-                     l, cl[l], tr[l], 100.0 * up[l] / tr[l],
-                     100.0 * dn[l] / tr[l], 100.0 * dg[l] / tr[l], maxEdge[l],
-                     sumEdge[l] / tr[l]);
+        KENSHIN_INFO(
+            "[dbg] {:>5} {:>8} {:>7} {:>5.1f} {:>5.1f} {:>5.1f} "
+            "{:>9.2f} {:>8.3f}",
+            l, cl[l], tr[l], 100.0 * up[l] / tr[l], 100.0 * dn[l] / tr[l],
+            100.0 * dg[l] / tr[l], maxEdge[l], sumEdge[l] / tr[l]);
   }
   // M8.2: the single-material table (v1). OBJ/MTL provides the
   // defaults; the CLI overrides win. The albedo reference is stored as
@@ -252,8 +256,62 @@ int main(int argc, char** argv) {
       albedoSrc = mesh.material.diffuseTexture;
     if (!albedoSrc.empty())
       mat.texPath = std::filesystem::path(albedoSrc).filename().string();
-    dag.materials = {mat};
-    dag.clusterMaterial.assign(dag.clusters.size(), 0);
+    if (gltfMaterials.size() > 1) {
+      // Multi-material table: one DagMaterial per used glTF material;
+      // per-cluster ids came from the DAG's vertex-majority vote (do
+      // NOT overwrite them with zeros). Explicit CLI overrides apply
+      // to every entry (they stay global knobs). Each textured
+      // material's albedo is re-encoded as its own BMP next to the
+      // output - same travels-together contract as the single case.
+      const fsg::path outDir = fsg::path(output).parent_path();
+      std::vector<std::string> writtenFor(gltfImages.size());
+      dag.materials.clear();
+      for (const auto& gm : gltfMaterials) {
+        kenshin::geometry::ClusterDag::DagMaterial dm = mat;
+        dm.kd[0] = gm.kd[0];
+        dm.kd[1] = gm.kd[1];
+        dm.kd[2] = gm.kd[2];
+        dm.roughness = gm.roughness;
+        dm.metallic = gm.metallic;
+        if (kd[0] >= 0.0f) {
+          dm.kd[0] = kd[0];
+          dm.kd[1] = kd[1];
+          dm.kd[2] = kd[2];
+        }
+        if (rough >= 0.0f) dm.roughness = rough;
+        if (metal >= 0.0f) dm.metallic = metal;
+        if (gm.image >= 0 && gm.image < int(gltfImages.size())) {
+          const auto& img = gltfImages[kenshin::usize(gm.image)];
+          if (img.width > 0) {
+            std::string& file = writtenFor[kenshin::usize(gm.image)];
+            if (file.empty()) {
+              const std::string stem =
+                  img.name.empty()
+                      ? "mat" + std::to_string(dag.materials.size())
+                      : img.name;
+              const fsg::path bmp = outDir / (stem + "_albedo.bmp");
+              if (!kenshin::util::writeBmp24(bmp.string(), img.rgba,
+                                             kenshin::u32(img.width),
+                                             kenshin::u32(img.height))) {
+                KENSHIN_ERROR("[builder] albedo re-encode failed: {}",
+                              bmp.string());
+                kenshin::log::shutdown();
+                return 1;
+              }
+              file = bmp.filename().string();
+              KENSHIN_INFO("[builder] gltf material {} albedo {}x{} -> {}",
+                           dag.materials.size(), img.width, img.height, file);
+            }
+            dm.texPath = file;
+          }
+        }
+        dag.materials.push_back(dm);
+      }
+    } else {
+      dag.materials = {mat};
+    }
+    if (dag.clusterMaterial.size() != dag.clusters.size())
+      dag.clusterMaterial.assign(dag.clusters.size(), 0);
   }
 
   KENSHIN_INFO(
@@ -424,17 +482,17 @@ int main(int argc, char** argv) {
       return 1;
     }
     dag.imposterCluster = cut[0];  // serialized - the runtime's truth
-    if (!kenshin::geometry::bakeImposterAtlas(dag, cut, atlas,
-                                              ilog)) {
+    if (!kenshin::geometry::bakeImposterAtlas(dag, cut, atlas, ilog)) {
       KENSHIN_ERROR("[builder] imposter bake failed: {}", ilog);
       kenshin::log::shutdown();
       return 1;
     }
     dag.imposterDepth = std::move(atlas.depth);
     dag.imposterTri = std::move(atlas.tri);
-    KENSHIN_INFO("[builder] imposter baked: cut cluster {} (of {} "
-                 "deepest-level clusters, {} roots)",
-                 dag.imposterCluster, cut.size(), dag.roots.size());
+    KENSHIN_INFO(
+        "[builder] imposter baked: cut cluster {} (of {} "
+        "deepest-level clusters, {} roots)",
+        dag.imposterCluster, cut.size(), dag.roots.size());
   }
   kenshin::geometry::PackedGeometry packed;
   if (!kenshin::geometry::packPages(dag, packed, log)) {

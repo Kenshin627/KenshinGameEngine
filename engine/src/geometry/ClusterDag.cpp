@@ -104,6 +104,33 @@ bool assembleClusterDag(const assets::MeshData& mesh,
   dag.sourceVertexCount = mesh.vertexCount();
   dag.sourceTriangleCount = mesh.triangleCount();
 
+  // Vertex -> majority material (from the loader's per-triangle
+  // tags). Simplified clusters mix original vertices, so triangle
+  // tags stop mapping 1:1 past LOD0 - the vertex vote below stays
+  // exact for every cluster whose vertices belong to one material
+  // region, at any LOD.
+  std::vector<u32> vertMaterial;
+  if (!mesh.triMaterial.empty() &&
+      mesh.triMaterial.size() == mesh.indices.size() / 3) {
+    const u32 vc = mesh.vertexCount();
+    vertMaterial.assign(vc, 0);
+    std::vector<std::map<u32, u32>> votes(vc);
+    for (usize t = 0; t < mesh.triMaterial.size(); ++t)
+      for (int k = 0; k < 3; ++k) {
+        const u32 v = mesh.indices[t * 3 + k];
+        if (v < vc) votes[v][mesh.triMaterial[t]]++;
+      }
+    for (usize v = 0; v < vc; ++v) {
+      u32 best = 0, bestN = 0;
+      for (const auto& [m, n] : votes[v])
+        if (n > bestN) {
+          best = m;
+          bestN = n;
+        }
+      vertMaterial[v] = best;
+    }
+  }
+
   // Pass 1: clusters + groups; geometry into cluster-local pools with
   // per-cluster vertex dedup.
   dag.groups.resize(builtGroups.size());
@@ -149,6 +176,20 @@ bool assembleClusterDag(const assets::MeshData& mesh,
         dag.indices.push_back(it->second);
       }
       node.indexCount = static_cast<u32>(cluster.indices.size());
+      if (!vertMaterial.empty()) {
+        std::map<u32, u32> tally;
+        for (const auto& [srcV, local] : localOf) {
+          (void)local;
+          if (srcV < vertMaterial.size()) tally[vertMaterial[srcV]]++;
+        }
+        u32 best = 0, bestN = 0;
+        for (const auto& [m, n] : tally)
+          if (n > bestN) {
+            best = m;
+            bestN = n;
+          }
+        dag.clusterMaterial.push_back(best);
+      }
       dag.clusters.push_back(std::move(node));
       dst.clusters.push_back(clusterIndex);
     }

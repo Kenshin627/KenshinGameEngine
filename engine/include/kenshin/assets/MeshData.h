@@ -25,6 +25,11 @@ struct MeshData {
   std::vector<f32> normals;    // 3 per vertex
   std::vector<f32> uvs;        // 2 per vertex
   std::vector<u32> indices;
+  /// Per-triangle material id (multi-material sources - the glTF
+  /// loader tags every primitive's triangles; empty = single material
+  /// 0, the OBJ/procedural case). The DAG assigns each cluster the
+  /// majority material of its vertices.
+  std::vector<u32> triMaterial;
 
   struct Material {
     glm::vec3 ka{0.2f, 0.2f, 0.2f};

@@ -20,7 +20,6 @@
 
 #include "kenshin/Common.h"
 #include "kenshin/assets/MeshData.h"
-
 KENSHIN_NS_BEGIN
 
 namespace assets {
@@ -34,12 +33,29 @@ struct GltfImage {
   std::vector<u8> rgba;
 };
 
+/// One USED glTF material (deduplicated, insertion order): PBR
+/// params plus the base-color image (index into the `images` out of
+/// loadGltf, -1 = untextured factor material).
+struct GltfMaterial {
+  glm::vec3 kd{0.8f, 0.8f, 0.8f};
+  f32 roughness = 0.5f;
+  f32 metallic = 0.0f;
+  int image = -1;
+};
+
 /// Load a .glb or .gltf. `albedo` (optional out) receives the first
 /// material's base-color texture when present; it stays empty
-/// otherwise. @return true on success (`log` carries the reason on
-/// false).
+/// otherwise. `materials`/`images` (optional outs) receive the full
+/// multi-material set - every used material in first-use order with
+/// `mesh.triMaterial` tagging each triangle's material slot - so the
+/// builder can emit a per-cluster material table. All coordinates are
+/// rotated into the engine's Z-up right-handed frame (glTF is
+/// right-handed Y-up by spec: R_x(+90), (x,y,z)_glTF ->
+/// (x,-z,y)_engine). @return true on success (`log` carries the
+/// reason on false).
 bool loadGltf(const std::string& path, MeshData& mesh, GltfImage* albedo,
-              std::string& log);
+              std::string& log, std::vector<GltfMaterial>* materials = nullptr,
+              std::vector<GltfImage>* images = nullptr);
 
 }  // namespace assets
 
