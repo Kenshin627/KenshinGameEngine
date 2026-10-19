@@ -391,14 +391,26 @@ struct VgDebugState {
   // deterministic - static positions, no time animation, keeping the
   // render regression byte-comparable).
   glm::vec3 lightDir{0.35f, 0.8f, 0.45f};
-  glm::vec3 lightColor{1.0f, 0.97f, 0.92f};
-  kenshin::f32 lightIntensity = 4.0f;
-  kenshin::f32 pointIntensity = 24.0f;
+  // Neutral key light: a warm tint (the old 1.0/0.97/0.92) biases
+  // r-g by ~8% - enough to flip every low-saturation olive/green
+  // texture patch to warm tan after lighting.
+  glm::vec3 lightColor{1.0f, 1.0f, 1.0f};
+  // Recalibrated for textured assets: the old 4.0 x 2.2 (~9x gain)
+  // auto-normalized every albedo into the filmic shoulder (a narrow
+  // bright band) - hue structure died, dark camo textures rendered
+  // as flat warm tan. New gain keeps mid-grays mid and dark textures
+  // dark enough for their color to read.
+  kenshin::f32 lightIntensity = 2.4f;
+  kenshin::f32 pointIntensity = 4.0f;
   kenshin::f32 ambient = 0.15f;
-  kenshin::f32 exposure = 2.2f;
+  kenshin::f32 exposure = 1.5f;
   // M8.3: the hemisphere ambient's two poles + tonemap operator.
-  glm::vec3 skyColor{0.65f, 0.75f, 0.95f};
-  glm::vec3 groundColor{0.28f, 0.25f, 0.22f};
+  // Neutral-gray hemisphere by default: colored poles (the old blue
+  // sky / warm ground) swing r-g by normal direction more than a dark
+  // texture's own albedo signal - the camo washed out. Luminance-only
+  // ambient keeps the shape cue; colored ambients stay a panel knob.
+  glm::vec3 skyColor{0.6f, 0.6f, 0.6f};
+  glm::vec3 groundColor{0.3f, 0.3f, 0.3f};
   int tonemapMode = 2;         // 0 Reinhard, 1 ACES(Narkowicz), 2 Filmic(UE)
   bool shadows = true;         // M9.1: the directional light's shadow map
   int shadowLevels = 3;        // Stage B clipmap level count (1..3)
