@@ -74,7 +74,8 @@ void LightingPass::draw(backend::IRenderBackend& backend,
                         float ambient, const glm::vec3& skyColor,
                         const glm::vec3& groundColor, const ShadowLevel* levels,
                         u32 levelCount, float extent0, const glm::vec3& origin,
-                        u32 width, u32 height) {
+                        u32 width, u32 height, u32 envTexture,
+                        float envMaxLod) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   const u32 count =
       static_cast<u32>(std::min<usize>(lights.size(), kMaxLights));
@@ -129,9 +130,12 @@ void LightingPass::draw(backend::IRenderBackend& backend,
   // v10: per-pixel roughness/metallic rides the GBuffer B alpha; the
   // material-table SSBO left the lighting shader (dead-strip would
   // shift the binding map - the handle list follows reflection).
+  // viewportAmb.w: the env probe's max prefiltered LOD (roughness ->
+  // LOD ladder scale).
+  push.viewportAmb.w = envMaxLod;
   const u32 buffers[3] = {m_lightBuffer, m_envBuffer, m_shadowParams};
   backend.drawLighting(m_pipeline, buffers, 3, &push, sizeof(push), width,
-                       height);
+                       height, envTexture);
 }
 
 void LightingPass::onShutdown(backend::IRenderBackend& backend) {

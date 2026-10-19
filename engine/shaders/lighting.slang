@@ -72,6 +72,9 @@ struct GpuLight {
 [[vk::binding(6)]] Sampler2D shadowMap1;
 [[vk::binding(7)]] Sampler2D shadowMap2;
 [[vk::binding(4)]] StructuredBuffer<float4> shadowParams;
+// The IBL environment probe: an equirectangular HDR texture whose mip
+// chain is the prefiltered radiance ladder (LOD = roughness).
+[[vk::binding(8)]] Sampler2DArray envMap;  // layer 0 (arrayed views)
 
 // NOTE on matrices: glm stores column-major and Slang's mul reads
 // buffer vec4s as rows - every transform below is an explicit linear
@@ -288,12 +291,16 @@ float3 fresnelSchlick(float ct, float3 f0) {
   // Hemisphere ambient (M8.3): sky from above, ground from below -
   // the cheap diffuse-IBL stand-in for a prefiltered probe.
   const float3 hemi = lerp(env[1].rgb, env[0].rgb, nrm.y * 0.5 + 0.5);
-  // Specular ambient: the same hemisphere sampled along the REFLECTED
-  // view ray through the UE-mobile analytic split-sum fit. Without it
-  // a metal surface is black between the (few) direct highlights -
-  // the metal look IS the environment reflection.
+  // Specular ambient (IBL): the environment probe sampled along the
+  // REFLECTED view ray, LOD = roughness * maxLod (the mip chain is
+  // the prefiltered radiance ladder), through the UE-mobile analytic
+  // split-sum fit. Without it a metal surface is black between the
+  // (few) direct highlights - the metal look IS the environment.
   const float3 rdir = reflect(-viewDir, nrm);
-  const float3 rHemi = lerp(env[1].rgb, env[0].rgb, rdir.y * 0.5 + 0.5);
+  const float2 equi = float2(atan2(rdir.y, rdir.x) / 6.28318530718 + 0.5,
+                             acos(clamp(rdir.z, -1.0, 1.0)) / 3.14159265359);
+  const float3 rHemi =
+      envMap.SampleLevel(float3(equi, 0.0), rm.x * push.viewportAmb.w).rgb;
   const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
   const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
   const float4 rr = float4(rm.x) * c0 + c1;

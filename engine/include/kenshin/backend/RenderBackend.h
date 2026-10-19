@@ -241,8 +241,11 @@ class IRenderBackend {
     /// consecutive: width*height*4 bytes each. The mip chain is
     /// generated on the GPU (linear blit downsample); mip count =
     /// floor(log2(max(width, height))) + 1.
+    /// hdr: RGBA16F f32 rows instead (the IBL environment probe) -
+    /// width*height*4*sizeof(f32) bytes per layer.
+    bool hdr = false;
     const u8* rgba = nullptr;
-    usize bytes = 0;  // width*height*4*layers
+    usize bytes = 0;  // width*height*(hdr ? 16 : 4)*layers
     const char* debugName = nullptr;
   };
   /// One-shot upload of a texture array: staging copy of every layer's
@@ -301,7 +304,7 @@ class IRenderBackend {
   virtual u32 createLightingPipeline(const FullscreenPipelineInfo& info) = 0;
   virtual void drawLighting(u32 pipeline, const u32* bufferHandles,
                             u32 bufferCount, const void* push, usize pushBytes,
-                            u32 width, u32 height) = 0;
+                            u32 width, u32 height, u32 envTexture) = 0;
   /// M8.3 tonemap pass: samples this frame slot's HDR target (bound to
   /// the reflected Sampler2D bindings in ascending order) and writes
   /// the exposure/tonemapped LDR into the frame color target via a

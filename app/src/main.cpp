@@ -501,6 +501,7 @@ int main(int argc, char** argv) {
   // backend tears down).
   auto& textureManager =
       engine.registerSubsystem<kenshin::manager::TextureManager>();
+
   auto& overlay = engine.registerSubsystem<kenshin::DebugOverlay>();
   // First-run docking: if no imgui.ini sits next to the EXE (the path
   // ImGui actually reads - a CWD-relative check sees stray files and
@@ -1015,9 +1016,61 @@ int main(int argc, char** argv) {
                                       // M4.4 CPU-cut retirement
   kenshin::renderer::VirtualGeometryScene* vgScene = nullptr;
   kenshin::backend::IRenderBackend* vgBackend = nullptr;
+  kenshin::u32 envTexture =
+      kenshin::backend::IRenderBackend::kInvalidTextureHandle;
+  float envMaxLod = 1.0f;
   if (virtualPath) {
     vgScene = &engine.get<kenshin::renderer::VirtualGeometryScene>();
     vgBackend = &engine.get<kenshin::backend::IRenderBackend>();
+
+    // IBL: a procedural HDR studio environment, equirectangular Z-up
+    // (u = atan2(y,x)/2pi + 0.5, v = acos(z)/pi - the lighting shader's
+    // sampling convention): a dim sky/ground gradient plus a bright
+    // softbox centered on the key-light direction (reflections stay
+    // consistent with the direct light + shadows). The GPU mip chain is
+    // the prefiltered radiance ladder; roughness -> LOD at sample time.
+    {
+      constexpr int kW = 512, kH = 256;
+      std::vector<float> probe(kenshin::usize(kW) * kH * 4);
+      const glm::vec3 kd = glm::normalize(glm::vec3(0.35f, 0.8f, 0.45f));
+      for (int y = 0; y < kH; ++y) {
+        const float v = (y + 0.5f) / kH;
+        const float theta = v * glm::pi<float>();
+        const float z = std::cos(theta), lat = std::sin(theta);
+        for (int x = 0; x < kW; ++x) {
+          const float u = (x + 0.5f) / kW;
+          const float a = (u - 0.5f) * 2.0f * glm::pi<float>();
+          const glm::vec3 dir(std::cos(a) * lat, std::sin(a) * lat, z);
+          const float t = z * 0.5f + 0.5f;
+          glm::vec3 c = glm::mix(glm::vec3(0.06f, 0.055f, 0.05f),
+                                 glm::vec3(0.22f, 0.24f, 0.28f), t * t);
+          const float dKey = std::max(0.0f, glm::dot(dir, kd));
+          c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 70.0f) *
+               5.0f;
+          const float dFill = std::max(0.0f, glm::dot(dir, -kd));
+          c += glm::vec3(0.45f, 0.55f, 0.75f) *
+               std::exp((dFill - 1.0f) * 45.0f) * 0.8f;
+          float* o = probe.data() + (kenshin::usize(y) * kW + x) * 4;
+          o[0] = c.r;
+          o[1] = c.g;
+          o[2] = c.b;
+          o[3] = 1.0f;
+        }
+      }
+      kenshin::backend::IRenderBackend::TextureArrayDesc ed;
+      ed.width = kW;
+      ed.height = kH;
+      ed.layers = 1;
+      ed.hdr = true;
+      ed.rgba = reinterpret_cast<const kenshin::u8*>(probe.data());
+      ed.bytes = probe.size() * sizeof(float);
+      ed.debugName = "ibl-env";
+      envTexture = vgBackend->createTextureArray(ed);
+      envMaxLod = std::floor(std::log2(float(kW))) + 1.0f - 1.0f;
+      KENSHIN_INFO("[ibl] studio probe {}x{} ({} mips) -> handle {}", kW, kH,
+                   int(envMaxLod) + 1, envTexture);
+    }
+
     if (args.noAsync) vgBackend->setAsyncChainEnabled(false);  // M4.4 A/B
   }
 
@@ -1640,7 +1693,7 @@ int main(int argc, char** argv) {
               vgDebug.ambient, vgDebug.skyColor, vgDebug.groundColor,
               shadowLevels,
               shadowsOn && vgDebug.viewMode == 0 ? shadowLevelCount : 0u, 12.0f,
-              shadowOrigin, ci.width, ci.height);
+              shadowOrigin, ci.width, ci.height, envTexture, envMaxLod);
           // M9 TAA resolve (skip the first frames after (re)validation:
           // the history is garbage until the ping-pong fills).
           bool resolvedByTaa = false;

@@ -375,7 +375,12 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
   // the binding is always live - dead-strip discipline in reverse).
   {
     const u8 white[4] = {255, 255, 255, 255};
-    const TextureArrayDesc dummy{1, 1, 1, white, 4, "dummy-texture"};
+    TextureArrayDesc dummy;
+    dummy.width = 1;
+    dummy.height = 1;
+    dummy.rgba = white;
+    dummy.bytes = 4;
+    dummy.debugName = "dummy-texture";
     if (createTextureArray(dummy) == kInvalidTextureHandle) return false;
     m_impl->dummyTexture = m_impl->textures.back();
     m_impl->textures.pop_back();
@@ -1375,10 +1380,11 @@ void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
 //                SHADER_READ_ONLY
 u32 VulkanBackend::createTextureArray(const TextureArrayDesc& desc) {
   Impl& impl = *m_impl;
+  const usize texelBytes = desc.hdr ? usize(8) : usize(4);  // RGBA16F : RGBA8
   if (desc.width == 0 || desc.height == 0 || desc.layers == 0 ||
       desc.rgba == nullptr ||
-      desc.bytes <
-          static_cast<usize>(desc.width) * desc.height * 4 * desc.layers) {
+      desc.bytes < static_cast<usize>(desc.width) * desc.height * texelBytes *
+                       desc.layers) {
     KENSHIN_ERROR("[vulkan] createTextureArray: bad desc ({}x{}x{} bytes={})",
                   desc.width, desc.height, desc.layers, desc.bytes);
     return kInvalidTextureHandle;
@@ -1387,19 +1393,20 @@ u32 VulkanBackend::createTextureArray(const TextureArrayDesc& desc) {
   while ((desc.width | desc.height) >> mips != 0) ++mips;
 
   GpuImage image;
-  if (!image.create(impl.device.allocator, impl.device.device, desc.width,
-                    desc.height, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_IMAGE_USAGE_SAMPLED_BIT |
-                        VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mips, desc.layers,
-                    /*arrayedView=*/true)) {
+  if (!image.create(
+          impl.device.allocator, impl.device.device, desc.width, desc.height,
+          desc.hdr ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_R8G8B8A8_UNORM,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+              VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mips, desc.layers,
+          /*arrayedView=*/true)) {
     KENSHIN_ERROR("[vulkan] createTextureArray: image creation failed");
     return kInvalidTextureHandle;
   }
 
   // Staging: every layer's mip 0, consecutive.
-  const usize layerBytes = static_cast<usize>(desc.width) * desc.height * 4;
+  const usize layerBytes =
+      static_cast<usize>(desc.width) * desc.height * texelBytes;
   const VkBufferCreateInfo stagingInfo{
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
       .size = static_cast<VkDeviceSize>(layerBytes * desc.layers),
@@ -1725,7 +1732,8 @@ u32 VulkanBackend::createShadowDecodePipeline(
 
 void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
                                  u32 bufferCount, const void* push,
-                                 usize pushBytes, u32 width, u32 height) {
+                                 usize pushBytes, u32 width, u32 height,
+                                 u32 envTexture) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
       pipeline > impl.pipelines.fullscreenCount())
@@ -1786,7 +1794,7 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
     // this slot's GBuffer views in order (A, then B), and the third
     // the shadow map (NEAREST - depth comparisons must not filter).
     const VkImageView shadowView0 = impl.shadowMap[0].view;
-    VkDescriptorImageInfo imageInfos[5] = {
+    VkDescriptorImageInfo imageInfos[6] = {
         VkDescriptorImageInfo{
             .sampler = impl.linearSampler,
             .imageView = slot.gbuffer[0].view,
@@ -1819,6 +1827,17 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
                              : shadowView0,
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         },
+        // The IBL environment probe (mip-filtered sampler - the mip
+        // chain is the prefiltered radiance LOD ladder; the dummy
+        // keeps the set valid when no env was created).
+        VkDescriptorImageInfo{
+            .sampler = impl.albedoSampler,
+            .imageView = envTexture < impl.textures.size() &&
+                                 impl.textureAlive[envTexture]
+                             ? impl.textures[envTexture].view
+                             : impl.dummyTexture.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
     };
     std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
     u32 nextImage = 0, nextBuffer = 0;
@@ -1832,9 +1851,10 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
           .descriptorType = fs.bindingTypes[b],
       };
       if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-        // Two GBuffer views then the three clipmap shadow maps (the
-        // shader declares exactly these five sampler bindings).
-        if (nextImage >= 5) {
+        // Two GBuffer views, the three clipmap shadow maps, then the
+        // IBL environment probe (the shader declares exactly these six
+        // sampler bindings).
+        if (nextImage >= 6) {
           bindMismatch = true;
           break;
         }
