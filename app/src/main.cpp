@@ -47,12 +47,12 @@
 #include "kenshin/manager/ShaderManager.h"
 #include "kenshin/manager/TextureManager.h"
 #include "kenshin/renderer/ClusterCullPass.h"
+#include "kenshin/renderer/ImposterPass.h"
 #include "kenshin/renderer/LightingPass.h"
 #include "kenshin/renderer/MaterialDecodePass.h"
 #include "kenshin/renderer/Renderer.h"
 #include "kenshin/renderer/SoftRasterPass.h"
 #include "kenshin/renderer/StreamingManager.h"
-#include "kenshin/renderer/ImposterPass.h"
 #include "kenshin/renderer/TaaPass.h"
 #include "kenshin/renderer/TonemapPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
@@ -144,16 +144,17 @@ struct Args {
   bool forceTaa = false;        // --taa: force ON over the parked default
   bool imposterDebug = false;   // --imposter-debug: imposters replace the
                                 // extra-mesh instances (acceptance mode)
+  bool imposterOff = false;     // --no-imposter: kill the routing (A/B)
   bool noShadows = false;       // M9.1 A/B: disable the shadow map
   std::string ground;           // M9.1: a ground-plane .kgeo whose
   std::vector<std::string> meshes;  // --mesh <kgeo>: extra assets,
                                     // instanced left-to-right
-                                // instances receive the shadows
-  bool multi = false;           // S4.6 acceptance: near/mid/far instances
-  bool dense = false;           // M3.4 acceptance: front-back occluders
-  int grid = 0;                 // --grid N: N-instance occlusion carpet
-                                // (1..32; the VisBuffer payload's 5b)
-  bool wall = false;            // --wall: big occluder + hidden fleet
+                                    // instances receive the shadows
+  bool multi = false;               // S4.6 acceptance: near/mid/far instances
+  bool dense = false;               // M3.4 acceptance: front-back occluders
+  int grid = 0;                     // --grid N: N-instance occlusion carpet
+                                    // (1..32; the VisBuffer payload's 5b)
+  bool wall = false;                // --wall: big occluder + hidden fleet
   // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
   // controller's interactive defaults.
   bool hasCam = false;
@@ -224,6 +225,8 @@ Args parseArgs(int argc, char** argv) {
       args.forceTaa = true;
     else if (std::strcmp(argv[i], "--imposter-debug") == 0)
       args.imposterDebug = true;
+    else if (std::strcmp(argv[i], "--no-imposter") == 0)
+      args.imposterOff = true;
     else if (std::strcmp(argv[i], "--ground") == 0 && i + 1 < argc)
       args.ground = argv[++i];
     else if (std::strcmp(argv[i], "--mesh") == 0 && i + 1 < argc)
@@ -396,12 +399,12 @@ struct VgDebugState {
   // M8.3: the hemisphere ambient's two poles + tonemap operator.
   glm::vec3 skyColor{0.65f, 0.75f, 0.95f};
   glm::vec3 groundColor{0.28f, 0.25f, 0.22f};
-  int tonemapMode = 2;   // 0 Reinhard, 1 ACES(Narkowicz), 2 Filmic(UE)
-  bool shadows = true;   // M9.1: the directional light's shadow map
-  int shadowLevels = 3;  // Stage B clipmap level count (1..3)
-  bool taa = true;      // M9 temporal AA (jitter + history resolve)
+  int tonemapMode = 2;         // 0 Reinhard, 1 ACES(Narkowicz), 2 Filmic(UE)
+  bool shadows = true;         // M9.1: the directional light's shadow map
+  int shadowLevels = 3;        // Stage B clipmap level count (1..3)
+  bool taa = true;             // M9 temporal AA (jitter + history resolve)
   bool imposterDebug = false;  // M9.2: replace extra-mesh instances
-  kenshin::f32 taaSharpen = 0.3f;  // post-resolve unsharp (0 = off)
+  kenshin::f32 taaSharpen = 0.3f;      // post-resolve unsharp (0 = off)
   kenshin::f32 pixelThreshold = 1.0f;  // the CHAIN's LOD threshold
   kenshin::f32 hwThresholdPx = 1.0f;   // SW/HW routing edge threshold
                                        // (moved off KgeoPreview at the
@@ -513,8 +516,8 @@ int main(int argc, char** argv) {
   kenshin::renderer::MaterialDecodePass decodePass;
   kenshin::renderer::LightingPass lightingPass;  // M8.1 deferred pair
   bool lightingReady = false;
-  kenshin::renderer::TonemapPass tonemapPass;  // M8.3 HDR chain tail
-  kenshin::renderer::TaaPass taaPass;          // M9 temporal resolve
+  kenshin::renderer::TonemapPass tonemapPass;    // M8.3 HDR chain tail
+  kenshin::renderer::TaaPass taaPass;            // M9 temporal resolve
   kenshin::renderer::ImposterPass imposterPass;  // M9.2 tiny instances
   bool imposterReady = false;
   std::vector<kenshin::u32> meshAtlasBase;    // per meshId -> atlas word
@@ -526,7 +529,7 @@ int main(int argc, char** argv) {
   bool taaReady = false;
   glm::mat4 taaPrevViewProj{1.0f};  // UNJITTERED previous frame VP
   bool taaPrevValid = false;
-  int taaWarmup = 0;                // frames since (re)validation
+  int taaWarmup = 0;  // frames since (re)validation
   bool tonemapReady = false;
   kenshin::renderer::DecodeParams decodeParams;
   // M6.3: page-streaming driver (v3 assets; null otherwise).
@@ -648,8 +651,7 @@ int main(int argc, char** argv) {
                         !std::filesystem::exists(dir / mat.texPath)
                     ? std::filesystem::path(mat.texPath)
                     : (dir / mat.texPath);
-            const kenshin::u32 layer =
-                textureManager.load(resolved.string());
+            const kenshin::u32 layer = textureManager.load(resolved.string());
             if (layer != kenshin::manager::TextureManager::kInvalidLayer)
               mat.texLayer = static_cast<kenshin::f32>(layer);
           }
@@ -657,15 +659,17 @@ int main(int argc, char** argv) {
         }
         const kenshin::u32 id = vgScene.addMeshPaged(mp.dag);
         if (id == 0xFFFFFFFFu) {
-          KENSHIN_ERROR("[main] --mesh {} rejected (rebuild with the "
-                        "current kgeo_builder)", path);
+          KENSHIN_ERROR(
+              "[main] --mesh {} rejected (rebuild with the "
+              "current kgeo_builder)",
+              path);
           return 1;
         }
         extraMeshIds.push_back(id);
         extraTexPaths.push_back(path);
         extraPreviews.push_back(std::move(mp));
-        KENSHIN_INFO("[main] extra mesh {}: {} ({} clusters)", extraMeshIds.size() - 1,
-                     path, mp.dag.clusters.size());
+        KENSHIN_INFO("[main] extra mesh {}: {} ({} clusters)",
+                     extraMeshIds.size() - 1, path, mp.dag.clusters.size());
       }
       stagedDepth.assign(vgScene.meshes().size(), {});
       stagedTri.assign(vgScene.meshes().size(), {});
@@ -735,8 +739,7 @@ int main(int argc, char** argv) {
         const auto makeInstFor = [&](kenshin::u32 id, const glm::mat4& model,
                                      kenshin::u32 casts = 1u) {
           // casts: 0 receiver-only, 1 caster, 2 imposterable (M9.2)
-          const kenshin::renderer::VgMeshRange& m =
-              vgScene.meshes()[id];
+          const kenshin::renderer::VgMeshRange& m = vgScene.meshes()[id];
           kenshin::renderer::CullGpuInstance inst;
           inst.model = model;
           inst.meshId = id;
@@ -751,11 +754,10 @@ int main(int argc, char** argv) {
           const kenshin::f32 scale =
               std::max({glm::length(model[0]), glm::length(model[1]),
                         glm::length(model[2])});
-          inst.bounds =
-              glm::vec4(glm::vec3(model * glm::vec4(m.boundsSphere.x,
-                                                    m.boundsSphere.y,
-                                                    m.boundsSphere.z, 1.0f)),
-                        m.boundsSphere.w * scale);
+          inst.bounds = glm::vec4(
+              glm::vec3(model * glm::vec4(m.boundsSphere.x, m.boundsSphere.y,
+                                          m.boundsSphere.z, 1.0f)),
+              m.boundsSphere.w * scale);
           return inst;
         };
         const auto makeInst = [&](const glm::mat4& model) {
@@ -859,8 +861,7 @@ int main(int argc, char** argv) {
             const glm::mat4 m = glm::translate(glm::mat4(1.0f), o);
             const bool hasAtlas = e < extraPreviews.size() &&
                                   !extraPreviews[e].dag.imposterDepth.empty();
-            auto inst = makeInstFor(extraMeshIds[e], m,
-                                    hasAtlas ? 2u : 1u);
+            auto inst = makeInstFor(extraMeshIds[e], m, hasAtlas ? 2u : 1u);
             realBounds.push_back(inst.bounds);
             chainInstances.push_back(std::move(inst));
             vgInsts.push_back({m, extraMeshIds[e]});
@@ -1309,9 +1310,8 @@ int main(int argc, char** argv) {
         // ---- M9.2: the imposter injection --------------------------------
         if (!imposterReady) {
           imposterReady = imposterPass.init(*vgBackend, shaders);
-          meshAtlasBase.assign(
-              vgScene->meshes().size(),
-              kenshin::renderer::ImposterPass::kNoAtlas);
+          meshAtlasBase.assign(vgScene->meshes().size(),
+                               kenshin::renderer::ImposterPass::kNoAtlas);
           // meshRootCluster came from the setup-time staging - the
           // in-frame assign wiped it (the "cluster 4294967295" log).
           for (kenshin::u32 m = 0; m < stagedDepth.size(); ++m) {
@@ -1320,9 +1320,8 @@ int main(int argc, char** argv) {
                 *vgBackend, stagedDepth[m].data(), stagedTri[m].data(),
                 kenshin::u32(stagedDepth[m].size()));
             meshAtlasBase[m] = base;
-            KENSHIN_INFO("[imposter] mesh {}: atlas @{} (cluster {})", m,
-                         base, meshRootCluster[m]);
-
+            KENSHIN_INFO("[imposter] mesh {}: atlas @{} (cluster {})", m, base,
+                         meshRootCluster[m]);
           }
         }
         if (imposterReady) {
@@ -1343,8 +1342,8 @@ int main(int argc, char** argv) {
             if (ii >= realBounds.size()) continue;
             const glm::vec3 c(realBounds[ii]);
             const float r = realBounds[ii].w;
-            const float d = glm::max(
-                glm::distance(c, camera.position()), 1e-3f);
+            const float d =
+                glm::max(glm::distance(c, camera.position()), 1e-3f);
             if (r / d / ci.worldPerPixel >= thresholdPx) continue;
             const glm::vec4 clip = viewProjJ * glm::vec4(c, 1.0f);
             if (clip.w <= 0.0f) continue;
@@ -1354,8 +1353,8 @@ int main(int argc, char** argv) {
             const int R = std::max(6, int(r / d / ci.worldPerPixel));
             if (R > int(ci.width)) continue;
             auto& q = quads[quadCount];
-            q.rect = glm::ivec4(int(cx) - R, int(cy) - R, int(cx) + R,
-                                int(cy) + R);
+            q.rect =
+                glm::ivec4(int(cx) - R, int(cy) - R, int(cx) + R, int(cy) + R);
             q.centerAtlas = glm::vec4(c, float(meshAtlasBase[inst.meshId]));
             q.halfPair = glm::vec4(r, r, r, float(pairCount));
             q.pad = glm::vec4(0.0f);
@@ -1413,12 +1412,12 @@ int main(int argc, char** argv) {
           const kenshin::u32 residentNow =
               streamer ? streamer->residentPages() : 0xFFFFFFFFu;
           const bool keyChanged =
-              !shadowKey.valid ||
-              glm::distance(L, shadowKey.L) > 1e-4f ||
+              !shadowKey.valid || glm::distance(L, shadowKey.L) > 1e-4f ||
               vgDebug.pixelThreshold != shadowKey.threshold ||
               shadowLevelCount != shadowKey.levels ||
               residentNow != shadowKey.residentPages ||
-              ci.cullMode != shadowKey.cullMode || ci.hwMode != shadowKey.hwMode;
+              ci.cullMode != shadowKey.cullMode ||
+              ci.hwMode != shadowKey.hwMode;
           if (keyChanged) {
             shadowDirtyTiles[0] = shadowDirtyTiles[1] = shadowDirtyTiles[2] =
                 0xFFFFu;
@@ -1553,25 +1552,24 @@ int main(int argc, char** argv) {
           pd.clusterMeta = vgScene->clusterMetaBuffer();
           if (finalView) {
             decodePass.drawGBufferPaged(
-                *vgBackend, viewProjJ, *vgScene, decodeParams,
-                ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
+                *vgBackend, viewProjJ, *vgScene, decodeParams, ci.width,
+                ci.height, chain.visBufferCurrent(*vgBackend), pd,
                 chain.pairsCurrent(*vgBackend),
                 chain.hwPairsCurrent(*vgBackend),
                 chain.postPairsCurrent(*vgBackend), chain.maxPairs(),
-                albedoTexture,
-                imposterReady ? imposterPass.pairsBuffer() : 0);
+                albedoTexture, imposterReady ? imposterPass.pairsBuffer() : 0);
           } else {
             decodePass.drawPaged(
-                *vgBackend, viewProjJ, *vgScene, decodeParams,
-                ci.width, ci.height, chain.visBufferCurrent(*vgBackend), pd,
+                *vgBackend, viewProjJ, *vgScene, decodeParams, ci.width,
+                ci.height, chain.visBufferCurrent(*vgBackend), pd,
                 chain.pairsCurrent(*vgBackend),
                 chain.hwPairsCurrent(*vgBackend),
                 chain.postPairsCurrent(*vgBackend), chain.maxPairs());
           }
         } else {
           if (finalView) {
-            decodePass.drawGBuffer(*vgBackend, viewProjJ,
-                                   *vgScene, decodeParams, ci.width, ci.height,
+            decodePass.drawGBuffer(*vgBackend, viewProjJ, *vgScene,
+                                   decodeParams, ci.width, ci.height,
                                    chain.visBufferCurrent(*vgBackend),
                                    chain.pairsCurrent(*vgBackend),
                                    chain.hwPairsCurrent(*vgBackend),
@@ -1579,8 +1577,8 @@ int main(int argc, char** argv) {
                                    chain.maxPairs(), albedoTexture);
           } else {
             decodePass.draw(
-                *vgBackend, viewProjJ, *vgScene, decodeParams,
-                ci.width, ci.height, chain.visBufferCurrent(*vgBackend),
+                *vgBackend, viewProjJ, *vgScene, decodeParams, ci.width,
+                ci.height, chain.visBufferCurrent(*vgBackend),
                 chain.pairsCurrent(*vgBackend),
                 chain.hwPairsCurrent(*vgBackend),
                 chain.postPairsCurrent(*vgBackend), chain.maxPairs());
@@ -1602,8 +1600,7 @@ int main(int argc, char** argv) {
             lights.push_back(pt);
           }
           lightingPass.draw(
-              *vgBackend, glm::inverse(viewProjJ),
-              camera.position(), lights,
+              *vgBackend, glm::inverse(viewProjJ), camera.position(), lights,
               vgScene->paged()
                   ? vgScene->materialTableBuffer()
                   : kenshin::backend::IRenderBackend::kInvalidBufferHandle,
@@ -1621,7 +1618,7 @@ int main(int argc, char** argv) {
             tf.invViewProj = glm::inverse(camera.viewProjMatrix());
             tf.prevViewProj = taaPrevViewProj;
             tf.camPos = camera.position();
-            tf.blend = taaPrevValid && taaWarmup > 1 ? 0.93f : 0.0f;
+            tf.blend = taaPrevValid && taaWarmup > 1 ? 0.95f : 0.0f;
             tf.jitter = taaJitterUV;
             taaPass.draw(*vgBackend, tf, ci.width, ci.height);
             resolvedByTaa = true;

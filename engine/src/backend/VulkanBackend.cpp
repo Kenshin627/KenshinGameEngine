@@ -144,9 +144,24 @@ struct VulkanBackend::Impl {
   // freshly written one.
   GpuImage taa[2];
   VkImageLayout taaLayout[2] = {};
+  // Per-slot copies of the TAA params block (drawTaa memcpys the
+  // pass's shared host-mapped buffer into the CURRENT slot's copy at
+  // record time): the shared block is rewritten every frame - its
+  // jitter word differs per frame - while the previous frame's shader
+  // read may still be in flight; slot ownership is the only pacing
+  // that covers a 1-frame-reuse CPU write.
+  u32 taaParamsSlot[kMaxFramesInFlight] = {kInvalidBufferHandle,
+                                           kInvalidBufferHandle};
+  // snapshotHostBuffer mirrors: source handle -> per-slot copies
+  // (created lazily; few entries - one per hot shared params buffer).
+  std::unordered_map<u32, u32> snapMirrors[kMaxFramesInFlight];
   u32 taaParity = 0;
   u32 taaSize = 0;
   bool taaActive = false;
+  // Cross-submission TAA history dependency (see drawTaa): the frame
+  // submit waits this timeline value before the resolve's history read.
+  u64 taaHistWaitValue = 0;
+  bool taaHistWaitNeeded = false;
   GpuImage dummyTexture;
   std::vector<GpuImage> textures;
   std::vector<bool> textureAlive;
@@ -525,6 +540,7 @@ std::unique_ptr<IRenderBackend> createVulkanBackend() {
 
 bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   Impl& impl = *m_impl;
+  impl.taaActive = false;  // drawTaa re-arms it; drawTonemap reads it
   // Headless (no window): no swapchain - record offscreen-only frames
   // (in-frame compute tests, CI). Everything else (pacing, offscreen
   // targets, per-slot recording) runs unchanged.
@@ -761,7 +777,7 @@ void VulkanBackend::endFrame() {
     // ALL_COMMANDS here (headless frames have no decode draws whose
     // stage mask could order it, and the test readbacks that follow
     // must observe the completed chain).
-    VkSemaphoreSubmitInfo chainWaits[2] = {};
+    VkSemaphoreSubmitInfo chainWaits[3] = {};
     u32 chainWaitCount = 0;
     if (impl.chainValueB != 0) {
       chainWaits[chainWaitCount++] = VkSemaphoreSubmitInfo{
@@ -770,6 +786,17 @@ void VulkanBackend::endFrame() {
           .value = impl.chainValueB,
           .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
       };
+    }
+    // Same TAA history cross-submission wait as the windowed submit
+    // (drawTaa runs headless too - the resolve is window-independent).
+    if (impl.taaHistWaitNeeded) {
+      chainWaits[chainWaitCount++] = VkSemaphoreSubmitInfo{
+          .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+          .semaphore = impl.frameSync.frameTimeline,
+          .value = impl.taaHistWaitValue,
+          .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+      };
+      impl.taaHistWaitNeeded = false;
     }
     const VkSubmitInfo2 submit{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
@@ -920,7 +947,7 @@ void VulkanBackend::endFrame() {
   // command + vertex fetches (it may then run CONCURRENTLY with the
   // still-executing SW raster; both atomically max the same
   // VisBuffer), valueB gates the decode's fragment-stage vis read.
-  VkSemaphoreSubmitInfo waits[3] = {waitSubmit, {}, {}};
+  VkSemaphoreSubmitInfo waits[4] = {waitSubmit, {}, {}, {}};
   u32 waitCount = 1;
   if (impl.chainValueB != 0) {
     waits[waitCount++] = VkSemaphoreSubmitInfo{
@@ -943,6 +970,20 @@ void VulkanBackend::endFrame() {
         .value = impl.chainValueB,
         .stageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
     };
+  }
+  // TAA history cross-submission dependency (armed by drawTaa): wait
+  // the previous frame's completion before any FRAGMENT-stage work in
+  // THIS submission - the resolve reads the ping-pong image that frame
+  // wrote. Waits the same timeline this submit signals next (legal for
+  // timeline semaphores: wait value < signal value).
+  if (impl.taaHistWaitNeeded) {
+    waits[waitCount++] = VkSemaphoreSubmitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = impl.frameSync.frameTimeline,
+        .value = impl.taaHistWaitValue,
+        .stageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+    };
+    impl.taaHistWaitNeeded = false;
   }
   const VkSubmitInfo2 submit{
       .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
@@ -1197,6 +1238,30 @@ void VulkanBackend::destroyGraphicsPipeline(u32 pipeline) {
 u32 VulkanBackend::createBuffer(const BufferDesc& desc) {
   return m_impl->buffers.create(m_impl->device,
                                 m_impl->frameSync.slots[0].commandPool, desc);
+}
+
+u32 VulkanBackend::snapshotHostBuffer(u32 buffer) {
+  Impl& impl = *m_impl;
+  const usize bytes = impl.buffers.size(buffer);
+  if (!impl.buffers.valid(buffer) || bytes == 0) return buffer;
+  const u32 slotIdx = impl.frameSync.frameIndex;
+  auto& mirror = impl.snapMirrors[slotIdx];
+  auto it = mirror.find(buffer);
+  if (it == mirror.end()) {
+    BufferDesc desc;
+    desc.size = bytes;
+    desc.usage =
+        IRenderBackend::BufferStorage | IRenderBackend::BufferHostVisible;
+    desc.debugName = "host-snapshot-slot";
+    const u32 created = createBuffer(desc);
+    if (created == kInvalidBufferHandle) return buffer;  // passthrough
+    it = mirror.emplace(buffer, created).first;
+  }
+  // The slot's prior frame has provably completed at beginFrame - the
+  // memcpy cannot tear an in-flight read of THIS slot's mirror.
+  std::memcpy(impl.buffers.mapped(it->second), impl.buffers.mapped(buffer),
+              bytes);
+  return it->second;
 }
 
 void VulkanBackend::destroyBuffer(u32 buffer) {
@@ -1898,8 +1963,8 @@ void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
           {full ? 0 : int(scissorRect[0]), full ? 0 : int(scissorRect[1])},
           {full ? width : scissorRect[2] - scissorRect[0],
            full ? height : scissorRect[3] - scissorRect[1]}};
-      impl.cmd.beginColorPass(impl.shadowMap[level].view, width, height,
-                              loadOp, rect, 1.0f);
+      impl.cmd.beginColorPass(impl.shadowMap[level].view, width, height, loadOp,
+                              rect, 1.0f);
 
       const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
       std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
@@ -1985,24 +2050,40 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
   // valid whatever the reflection produced.
   if (fs.bindingCount < 1) return;
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
-  if (slot.hdr.view == VK_NULL_HANDLE ||
-      slot.gbuffer[0].view == VK_NULL_HANDLE)
+  if (slot.hdr.view == VK_NULL_HANDLE || slot.gbuffer[0].view == VK_NULL_HANDLE)
     return;
   if (width == 0 || height == 0) return;
 
   // (Re)create the ping-pong pair on size change; the fresh history is
   // garbage either way - the app's blend ramp covers the first frames.
   static const VkFormat kTaaFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+  bool taaPairFresh = false;
   if (impl.taa[0].image == VK_NULL_HANDLE || impl.taaSize != width ||
       impl.taa[1].image == VK_NULL_HANDLE) {
+    // Deferred destruction (the mesh-buffer idiom): the old pair may
+    // still be bound by an in-flight frame - freeing it now lets the
+    // allocator hand the memory to the new pair while frame k's
+    // resolve still writes it (torn initial history).
     for (u32 i = 0; i < 2; ++i) {
-      if (impl.taa[i].image != VK_NULL_HANDLE)
-        impl.taa[i].destroy(impl.device.allocator, impl.device.device);
-      if (!impl.taa[i].create(impl.device.allocator, impl.device.device,
-                              width, height, kTaaFormat,
-                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                  VK_IMAGE_USAGE_SAMPLED_BIT,
-                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+      if (impl.taa[i].image != VK_NULL_HANDLE) {
+        const VkImage deadImage = impl.taa[i].image;
+        const VkImageView deadView = impl.taa[i].view;
+        const VmaAllocation deadAlloc = impl.taa[i].allocation;
+        const VmaAllocator alloc = impl.device.allocator;
+        const VkDevice dev = impl.device.device;
+        impl.frameSync.slots[impl.frameSync.frameIndex].deletionQueue.push(
+            [deadImage, deadView, deadAlloc, alloc, dev] {
+              vkDestroyImage(dev, deadImage, nullptr);
+              vkDestroyImageView(dev, deadView, nullptr);
+              vmaFreeMemory(alloc, deadAlloc);
+            });
+        impl.taa[i] = GpuImage{};  // detached: the slot queue frees it
+      }
+      if (!impl.taa[i].create(
+              impl.device.allocator, impl.device.device, width, height,
+              kTaaFormat,
+              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
         KENSHIN_ERROR("[vulkan] taa target creation failed");
         return;
       }
@@ -2013,6 +2094,8 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
     }
     impl.taaSize = width;
     impl.taaParity = 0;
+    taaPairFresh = true;
+    KENSHIN_INFO("[vulkan] taa pair resized {}x{}", width, height);
   }
 
   impl.taaParity ^= 1u;
@@ -2028,23 +2111,64 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
         .range = impl.buffers.size(bufferHandles[i]),
     };
   }
+  // Snapshot the params into this slot's private buffer BEFORE the
+  // descriptor bind: TaaPass rewrites its shared mapped block every
+  // frame (the jitter word changes per frame), so binding it directly
+  // lets the NEXT frame's CPU write tear THIS frame's in-flight read
+  // (the run-to-run nondeterminism with TAA on; everything upstream
+  // is byte-exact). The slot's pacing proves its previous submission
+  // finished, so the memcpy lands while the GPU cannot be reading it.
+  if (bufferCount > 0) {
+    const u32 slotIdx = impl.frameSync.frameIndex;
+    const usize paramBytes = impl.buffers.size(bufferHandles[0]);
+    if (!impl.buffers.valid(impl.taaParamsSlot[slotIdx])) {
+      BufferDesc desc;
+      desc.size = paramBytes;
+      desc.usage =
+          IRenderBackend::BufferStorage | IRenderBackend::BufferHostVisible;
+      desc.initialData = nullptr;
+      desc.debugName = "taa-params-slot";
+      impl.taaParamsSlot[slotIdx] = createBuffer(desc);
+    }
+    if (!impl.buffers.valid(impl.taaParamsSlot[slotIdx]))
+      KENSHIN_ERROR(
+          "[vulkan] taa slot-params mirror unavailable (allocation "
+          "failure?) - binding the shared block; per-frame param "
+          "rewrites can tear the in-flight read");
+    if (impl.buffers.valid(impl.taaParamsSlot[slotIdx])) {
+      std::memcpy(impl.buffers.mapped(impl.taaParamsSlot[slotIdx]),
+                  impl.buffers.mapped(bufferHandles[0]), paramBytes);
+      // A fresh pair's history is UNINITIALIZED - blending it at full
+      // strength seeds the accumulation with allocation garbage (the
+      // run-to-run nondeterminism). The app's warmup ramp only covers
+      // startup, not mid-run resizes, so zero the blend word (offset
+      // 140 = TaaParams.camBlend.w) in the slot copy: this frame seeds
+      // the history with the raw current sample.
+      if (taaPairFresh)
+        static_cast<f32*>(
+            impl.buffers.mapped(impl.taaParamsSlot[slotIdx]))[35] = 0.0f;
+      infos[0] = VkDescriptorBufferInfo{
+          .buffer = impl.buffers.buffer(impl.taaParamsSlot[slotIdx]),
+          .offset = 0,
+          .range = paramBytes,
+      };
+    }
+  }
 
   impl.cmd.endPass();
   // history: park in SHADER_READ; the write target: -> COLOR_ATTACHMENT.
   CommandContext::pipelineBarrier(
-      impl.cmd.cmd(),
-      CommandContext::imageBarrier(
-          impl.taa[histIdx].image, impl.taaLayout[histIdx],
-          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-          VK_ACCESS_2_SHADER_READ_BIT));
+      impl.cmd.cmd(), CommandContext::imageBarrier(
+                          impl.taa[histIdx].image, impl.taaLayout[histIdx],
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                          VK_ACCESS_2_SHADER_READ_BIT));
   CommandContext::pipelineBarrier(
-      impl.cmd.cmd(),
-      CommandContext::imageBarrier(
-          impl.taa[writeIdx].image, impl.taaLayout[writeIdx],
-          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+      impl.cmd.cmd(), CommandContext::imageBarrier(
+                          impl.taa[writeIdx].image, impl.taaLayout[writeIdx],
+                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
   {
     const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "taa"};
     impl.cmd.beginColorPass(impl.taa[writeIdx].view, width, height);
@@ -2078,7 +2202,8 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
             .pImageInfo = &imageInfos[k],
         };
       } else {
-        const u32 k = bufferCount == 0 ? 0 : (std::min)(nextBuffer++, bufferCount - 1u);
+        const u32 k =
+            bufferCount == 0 ? 0 : (std::min)(nextBuffer++, bufferCount - 1u);
         writes[b] = VkWriteDescriptorSet{
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = set,
@@ -2096,10 +2221,10 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
     vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                       fs.pipeline);
     if (pushBytes > 0)
-      vkCmdPushConstants(impl.cmd.cmd(), fs.layout,
-                         VK_SHADER_STAGE_VERTEX_BIT |
-                             VK_SHADER_STAGE_FRAGMENT_BIT,
-                         0, static_cast<u32>(pushBytes), push);
+      vkCmdPushConstants(
+          impl.cmd.cmd(), fs.layout,
+          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+          static_cast<u32>(pushBytes), push);
     vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
   }
   impl.cmd.endPass();
@@ -2107,14 +2232,25 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
   // history) - park it in SHADER_READ.
   CommandContext::pipelineBarrier(
       impl.cmd.cmd(),
-      CommandContext::imageBarrier(
-          impl.taa[writeIdx].image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-          VK_ACCESS_2_SHADER_READ_BIT));
+      CommandContext::imageBarrier(impl.taa[writeIdx].image,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                   VK_ACCESS_2_SHADER_READ_BIT));
   impl.taaLayout[writeIdx] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   impl.taaLayout[histIdx] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   impl.taaActive = true;
+  // The resolve reads the ping-pong image the PREVIOUS frame's resolve
+  // wrote - a one-frame-reuse image OUTSIDE slot ownership. Slot pacing
+  // only proves kMaxFramesInFlight-ago submits complete, and a pipeline
+  // barrier cannot order across submissions: without a queue-level wait
+  // the history read races the previous frame's resolve write (observed
+  // as run-to-run nondeterministic output pixels with TAA on, byte-exact
+  // with it off). The frame submit waits the previous frame's timeline
+  // value, FRAGMENT-stage masked - only the history-reading passes gate;
+  // the async chain still overlaps frames.
+  impl.taaHistWaitValue = impl.frameSync.timelineValue;
+  impl.taaHistWaitNeeded = true;
 }
 
 void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,

@@ -38,6 +38,7 @@ class VulkanBackend final : public IRenderBackend {
   void draw(u32 pipeline, u32 mesh, const DrawData& data) override;
   GpuTimings gpuTimings() const override { return m_gpuTimings; }
   u32 createBuffer(const BufferDesc& desc) override;
+  u32 snapshotHostBuffer(u32 buffer) override;
   void destroyBuffer(u32 buffer) override;
   bool readbackBuffer(u32 buffer, usize offset, usize bytes,
                       std::vector<u8>& out) override;

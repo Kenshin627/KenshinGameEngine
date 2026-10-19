@@ -11,10 +11,10 @@ KENSHIN_NS_BEGIN
 namespace renderer {
 
 namespace {
-constexpr u32 kMaxQuads = 64;   // tiny instances per frame
-constexpr u32 kMaxPairs = 256;  // the decode clamps pairIdx to 255
-constexpr u32 kQuadsWords = kMaxQuads * 16;      // 4 float4 per quad
-constexpr u32 kParamsBytes = 8 * 16;             // float4[8]
+constexpr u32 kMaxQuads = 64;                // tiny instances per frame
+constexpr u32 kMaxPairs = 256;               // the decode clamps pairIdx to 255
+constexpr u32 kQuadsWords = kMaxQuads * 16;  // 4 float4 per quad
+constexpr u32 kParamsBytes = 8 * 16;         // float4[8]
 }  // namespace
 
 bool ImposterPass::init(backend::IRenderBackend& backend,
@@ -64,8 +64,7 @@ u32 ImposterPass::uploadAtlas(backend::IRenderBackend& backend,
     std::vector<u32> fresh(usize(newCap) * 2, 0);
     if (m_atlasWords > 0) {
       std::vector<u8> old(usize(m_atlasWords) * 8);
-      if (!backend.readbackBuffer(m_atlas, 0, old.size(), old))
-        return kNoAtlas;
+      if (!backend.readbackBuffer(m_atlas, 0, old.size(), old)) return kNoAtlas;
       std::memcpy(fresh.data(), old.data(), old.size());
     }
     backend::IRenderBackend::BufferDesc desc;
@@ -75,14 +74,16 @@ u32 ImposterPass::uploadAtlas(backend::IRenderBackend& backend,
     desc.initialData = fresh.data();
     desc.debugName = "imposter-atlas";
     const u32 handle = backend.createBuffer(desc);
-    if (handle == backend::IRenderBackend::kInvalidBufferHandle) return kNoAtlas;
+    if (handle == backend::IRenderBackend::kInvalidBufferHandle)
+      return kNoAtlas;
     if (m_atlas != backend::IRenderBackend::kInvalidBufferHandle)
       backend.destroyBuffer(m_atlas);
     m_atlas = handle;
     m_atlasCapacity = newCap;
   }
   // The shader reads uint2 per texel: interleave the planes.
-  u32* dst = static_cast<u32*>(backend.mappedPtr(m_atlas)) + usize(m_atlasWords) * 2;
+  u32* dst =
+      static_cast<u32*>(backend.mappedPtr(m_atlas)) + usize(m_atlasWords) * 2;
   for (u32 i = 0; i < words; ++i) {
     dst[usize(i) * 2] = depth[i];
     dst[usize(i) * 2 + 1] = tri[i];
@@ -104,22 +105,29 @@ void ImposterPass::draw(backend::IRenderBackend& backend, u32 visBuffer,
                         const glm::mat4& viewProj, const glm::vec3& camPos,
                         u32 width, u32 height, const ImposterQuad* quads,
                         u32 quadCount) {
-  if (m_pipeline == ~0u || quadCount == 0 || visBuffer == backend::IRenderBackend::kInvalidBufferHandle)
+  if (m_pipeline == ~0u || quadCount == 0 ||
+      visBuffer == backend::IRenderBackend::kInvalidBufferHandle)
     return;
   quadCount = std::min(quadCount, kMaxQuads);
 
   auto* p = static_cast<glm::vec4*>(backend.mappedPtr(m_params));
   for (int c = 0; c < 4; ++c) p[c] = viewProj[c];
   p[4] = glm::vec4(camPos, static_cast<f32>(width));
-  p[5] = glm::vec4(1.0f / static_cast<f32>(width),
-                   1.0f / static_cast<f32>(height),
-                   static_cast<f32>(height), static_cast<f32>(quadCount));
+  p[5] =
+      glm::vec4(1.0f / static_cast<f32>(width), 1.0f / static_cast<f32>(height),
+                static_cast<f32>(height), static_cast<f32>(quadCount));
 
   auto* q = static_cast<glm::vec4*>(backend.mappedPtr(m_quads));
   std::memcpy(q, quads, sizeof(ImposterQuad) * quadCount);
 
-  const u32 handles[4] = {visBuffer, m_params, m_quads, m_atlas};
-  const u32 groups = (quadCount * 64 + 63) / 64;  // one 64-thread group per quad row span
+  // Slot snapshots: the params/quads carry JITTERED viewProj/rects
+  // (different bytes every frame) in a shared host block - binding it
+  // directly lets this frame's CPU rewrite tear the previous frame's
+  // still-running dispatch.
+  const u32 handles[4] = {visBuffer, backend.snapshotHostBuffer(m_params),
+                          backend.snapshotHostBuffer(m_quads), m_atlas};
+  const u32 groups =
+      (quadCount * 64 + 63) / 64;  // one 64-thread group per quad row span
   backend.dispatchCompute(m_pipeline, handles, 4, quadCount, 1, 1);
   // Compute write -> the decode's fragment read.
   backend.bufferBarrier(visBuffer, false);

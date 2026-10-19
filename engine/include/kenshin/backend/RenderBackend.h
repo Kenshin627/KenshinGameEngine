@@ -213,6 +213,16 @@ class IRenderBackend {
   /// Create a device-local buffer (optionally filled). Returns handle or
   /// kInvalidBufferHandle on failure.
   virtual u32 createBuffer(const BufferDesc& desc) = 0;
+  /// Returns a SLOT-OWNED buffer whose bytes are a record-time
+  /// snapshot of `buffer` (host-visible only). Bind this instead of a
+  /// shared host buffer whose contents change per frame: the CPU
+  /// rewrite at record time can tear the PREVIOUS frame's still-
+  /// executing read (the M9 TAA jitter nondeterminism - a shared
+  /// params block with a per-phase jitter word flickered the resolve
+  /// run-to-run; everything single-frame looked byte-exact because
+  /// memoryless paths converge). The passthrough default keeps
+  /// headless/test backends unchanged.
+  virtual u32 snapshotHostBuffer(u32 buffer) { return buffer; }
   /// Deferred destruction (safe while frames are in flight).
   virtual void destroyBuffer(u32 buffer) = 0;
   /// Blocking readback of a byte range (verification paths). Returns false
@@ -305,9 +315,9 @@ class IRenderBackend {
   /// (a push block would exceed the guaranteed 128B). The tonemap pass
   /// that follows with fromTaa=true samples the fresh resolve.
   virtual u32 createTaaPipeline(const FullscreenPipelineInfo& info) = 0;
-  virtual void drawTaa(u32 pipeline, const u32* bufferHandles,
-                       u32 bufferCount, const void* push, usize pushBytes,
-                       u32 width, u32 height) = 0;
+  virtual void drawTaa(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
+                       const void* push, usize pushBytes, u32 width,
+                       u32 height) = 0;
   /// M9.1 shadow depth decode: the fsShadowDepth entry (the shadow
   /// chain's VisBuffer decoded from the light's view) rendered into the
   /// backend's persistent R32F shadow target (created on first use,
