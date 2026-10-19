@@ -203,6 +203,20 @@ float3 filmToneMap(float3 linearColor)
     return max(toneColor, 0.0);
 }
 
+// The display OETF: the lighting chain is linear; the 8-bit target
+// is interpreted as sRGB. Without the encode every tonemapped value
+// lands in the crushed toe (mid-dark, flat contrast) - photographic
+// textures lose their pattern.
+float3 linearToSrgb(float3 c)
+{
+    const float3 lo = c * 12.92;
+    const float3 hi = 1.055 * pow(max(c, float3(1e-10)), float3(1.0 / 2.4))
+                      - 0.055;
+    return float3(c.x <= 0.0031308 ? lo.x : hi.x,
+                  c.y <= 0.0031308 ? lo.y : hi.y,
+                  c.z <= 0.0031308 ? lo.z : hi.z);
+}
+
 [shader("fragment")]
 float4 fsMain(float4 frag : SV_Position) : SV_Target
 {
@@ -252,5 +266,5 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     if (!(outColor.x >= 0.0) || !(outColor.y >= 0.0) ||
         !(outColor.z >= 0.0))
         return float4(0.5, 0.0, 0.5, 1.0);  // magenta sentinel
-    return float4(outColor, 1.0);
+    return float4(linearToSrgb(outColor), 1.0);
 }

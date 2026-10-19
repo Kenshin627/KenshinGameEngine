@@ -869,7 +869,8 @@ GBufferOut fsGBuffer(float4 frag : SV_Position)
             const float foot = max(max(duv.x, duv.y) * texScale, 1e-9f);
             const float lod = clamp(log2(foot), 0.0, float(mips - 1u));
             const float3 sampleUv = float3(uv, min(mat.kdTex.a, float(layers) - 1.0));
-            kd *= albedoTex.SampleLevel(albedoSamp, sampleUv, lod).rgb;
+            kd *= srgbToLinear(
+                albedoTex.SampleLevel(albedoSamp, sampleUv, lod).rgb);
         }
     }
 
@@ -883,6 +884,17 @@ GBufferOut fsGBuffer(float4 frag : SV_Position)
         o.a = float4(0, 0, 0, 0);  // reads as background
     }
     return o;
+}
+
+// ── color space ──────────────────────────────────────────────────
+// Texture assets are sRGB-encoded (JPEG/PNG/BMP by convention);
+// lighting math needs linear. The polynomial EOTF (branchless,
+// ~1e-4 of the exact curve). Filtering happens in sRGB space (a
+// hardware sRGB view would filter linear) - acceptable for the
+// 8-bit mips we ship; the alternative is sRGB format views.
+float3 srgbToLinear(float3 c)
+{
+    return c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878);
 }
 
 // ── M9.1 shadow depth entry ──────────────────────────────────────
