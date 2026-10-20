@@ -401,7 +401,7 @@ struct VgDebugState {
   // as flat warm tan. New gain keeps mid-grays mid and dark textures
   // dark enough for their color to read.
   kenshin::f32 lightIntensity = 2.4f;
-  kenshin::f32 pointIntensity = 4.0f;
+  kenshin::f32 pointIntensity = 1.2f;
   kenshin::f32 ambient = 0.15f;
   kenshin::f32 exposure = 1.5f;
   // M8.3: the hemisphere ambient's two poles + tonemap operator.
@@ -1045,14 +1045,19 @@ int main(int argc, char** argv) {
           // A real studio reads BRIGHT to a dark-f0 metal: broad
           // ceiling/key radiance, not a pinpoint on near-black sky
           // (f0 0.05-0.15 x 0.05 = black surface with specks).
-          glm::vec3 c = glm::mix(glm::vec3(0.20f, 0.19f, 0.17f),
-                                 glm::vec3(0.85f, 0.87f, 0.92f), t * t);
+          // True HDR magnitudes: a dark-f0 metal (linear ~0.04 after
+          // the sRGB decode) only reads as metal against studio-HDR
+          // radiance - ceiling ~3, softbox ~8. The ground's diffuse
+          // never sees the env (hemisphere constants), so this cannot
+          // blow it.
+          glm::vec3 c = glm::mix(glm::vec3(0.35f, 0.34f, 0.32f),
+                                 glm::vec3(1.6f, 1.65f, 1.75f), t * t);
           const float dKey = std::max(0.0f, glm::dot(dir, kd));
-          c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 35.0f) *
-               3.0f;
+          c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 12.0f) *
+               5.0f;
           const float dFill = std::max(0.0f, glm::dot(dir, -kd));
           c += glm::vec3(0.55f, 0.65f, 0.85f) *
-               std::exp((dFill - 1.0f) * 45.0f) * 0.6f;
+               std::exp((dFill - 1.0f) * 20.0f) * 1.2f;
           float* o = probe.data() + (kenshin::usize(y) * kW + x) * 4;
           o[0] = c.r;
           o[1] = c.g;
@@ -1086,6 +1091,18 @@ int main(int argc, char** argv) {
         glm::vec3(args.camTarget[0], args.camTarget[1], args.camTarget[2]),
         static_cast<kenshin::f32>(args.width) /
             static_cast<kenshin::f32>(args.height));
+  else if (vgScene && !vgScene->meshes().empty() &&
+           vgScene->meshes()[0].boundsSphere.w > 0.0f) {
+    // Auto-frame the default camera to the loaded asset (no --cam):
+    // target the bounds-sphere center, distance ~2.4 radii so the
+    // object fills a good third of the frame at a 45-degree vantage
+    // (the fixed old default framed a 2-unit knot; any other asset
+    // rendered as a tiny blob in a sea of ground).
+    const glm::vec4& bs = vgScene->meshes()[0].boundsSphere;
+    controller.setup(45.0f, 6.0f, bs.w * 2.8f, glm::vec3(bs),
+                     static_cast<kenshin::f32>(args.width) /
+                         static_cast<kenshin::f32>(args.height));
+  }
 
   kenshin::core::FrameStats<240> stats;
   kenshin::Timer frameTimer;

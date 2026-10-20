@@ -217,13 +217,13 @@ struct DecodePush {
 // M9.2: listSel==3 routes here - CPU-filled (instance, rootCluster)
 // pairs for tiny-instance imposters. The root cluster is a REAL
 // cluster entry, so everything below the pair resolve is unchanged.
-[[vk::binding(19)]] StructuredBuffer<uint2> imposterPairs;
-[[vk::binding(17)]] Texture2DArray<float4> albedoTex;
-[[vk::binding(18)]] SamplerState albedoSamp;
-// v10: the metallicRoughness array (same TextureManager array as the
-// albedo - the backend binds every SAMPLED_IMAGE to it).
-[[vk::binding(20)]] Texture2DArray<float4> mrTex;
-[[vk::binding(21)]] SamplerState mrSamp;
+[[vk::binding(18)]] StructuredBuffer<uint2> imposterPairs;
+// The ONE combined image+sampler binding: the shared TextureManager
+// array carries albedo AND metallicRoughness layers alike - the MR
+// sample rides the same binding with its layer index (a SECOND
+// Sampler2DArray binding gets dropped by Slang's reflection; keep the
+// numbering dense - a gap becomes an SSBO slot that eats a handle).
+[[vk::binding(17)]] Sampler2DArray albedoTex;
 
 // kPageSlotSize (128 KB) in u32 elements - mirrors rasterize_sw / CPU
 // (v5: all page sections are u32-addressed).
@@ -848,25 +848,25 @@ struct GBufferOut {
     float2 duv = max(abs(dUVdx), abs(dUVdy));
     uint alayers = 1, amips = 1, atw = 1, ath = 1;
     albedoTex.GetDimensions(0, atw, ath, alayers, amips);
-    uint mlayers = 1, mmips = 1, mtw = 1, mth = 1;
-    mrTex.GetDimensions(0, mtw, mth, mlayers, mmips);
+    const float texScale = float(max(atw, ath));
+    const float foot = max(max(duv.x, duv.y) * texScale, 1e-9f);
+    const float lod = clamp(log2(foot), 0.0, float(amips - 1u));
     if (mat.kdTex.a >= 0.0) {
-      const float texScale = float(max(atw, ath));
-      const float foot = max(max(duv.x, duv.y) * texScale, 1e-9f);
-      const float lod = clamp(log2(foot), 0.0, float(amips - 1u));
       const float3 sampleUv =
           float3(uv, min(mat.kdTex.a, float(alayers) - 1.0));
-      kd *= srgbToLinear(albedoTex.SampleLevel(albedoSamp, sampleUv, lod).rgb);
+      kd *= srgbToLinear(albedoTex.SampleLevel(sampleUv, lod).rgb);
     }
     if (mat.params.z >= 0.0) {
       // glTF MR packing: roughness in G, metallic in B. LINEAR
-      // data (never sRGB-decoded); factors multiply the map.
-      const float texScale = float(max(mtw, mth));
-      const float foot = max(max(duv.x, duv.y) * texScale, 1e-9f);
-      const float lod = clamp(log2(foot), 0.0, float(mmips - 1u));
-      const float3 sampleUv =
-          float3(uv, min(mat.params.z, float(mlayers) - 1.0));
-      const float3 mr = mrTex.SampleLevel(mrSamp, sampleUv, lod).rgb;
+      // data (never sRGB-decoded); factors multiply the map. The
+      // MR layer rides the SAME array as the albedo (one combined
+      // binding - a second Sampler2DArray gets dropped by Slang's
+      // reflection).
+      const float3 mr =
+          albedoTex
+              .SampleLevel(float3(uv, min(mat.params.z, float(alayers) - 1.0)),
+                           lod)
+              .rgb;
       rough *= mr.g;
       metal *= mr.b;
     }
