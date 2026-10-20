@@ -1042,14 +1042,17 @@ int main(int argc, char** argv) {
           const float a = (u - 0.5f) * 2.0f * glm::pi<float>();
           const glm::vec3 dir(std::cos(a) * lat, std::sin(a) * lat, z);
           const float t = z * 0.5f + 0.5f;
-          glm::vec3 c = glm::mix(glm::vec3(0.045f, 0.042f, 0.04f),
-                                 glm::vec3(0.13f, 0.14f, 0.16f), t * t);
+          // A real studio reads BRIGHT to a dark-f0 metal: broad
+          // ceiling/key radiance, not a pinpoint on near-black sky
+          // (f0 0.05-0.15 x 0.05 = black surface with specks).
+          glm::vec3 c = glm::mix(glm::vec3(0.20f, 0.19f, 0.17f),
+                                 glm::vec3(0.85f, 0.87f, 0.92f), t * t);
           const float dKey = std::max(0.0f, glm::dot(dir, kd));
-          c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 90.0f) *
-               1.8f;
+          c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 35.0f) *
+               3.0f;
           const float dFill = std::max(0.0f, glm::dot(dir, -kd));
-          c += glm::vec3(0.45f, 0.55f, 0.75f) *
-               std::exp((dFill - 1.0f) * 60.0f) * 0.3f;
+          c += glm::vec3(0.55f, 0.65f, 0.85f) *
+               std::exp((dFill - 1.0f) * 45.0f) * 0.6f;
           float* o = probe.data() + (kenshin::usize(y) * kW + x) * 4;
           o[0] = c.r;
           o[1] = c.g;
