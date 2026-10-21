@@ -841,6 +841,12 @@ struct GBufferOut {
         min(((qm.widths >> 12) & 0xFFu) + instances[instanceIdx].materialBase,
             matCount - 1u);
     const GpuMaterial mat = materials[matId];
+    // The material's own factor FIRST (glTF baseColorFactor - 1,1,1
+    // for texture-only materials, the literal color for factor
+    // materials like this asset's green lenses/black visor plate;
+    // without it every untextured material rendered the global gray).
+    // Linear by spec - only the TEXTURE sample goes through the EOTF.
+    kd *= mat.kdTex.rgb;
     // params.z carries the resolved metallicRoughness array layer
     // (-1 = factor-only material).
     float rough = mat.params.x;

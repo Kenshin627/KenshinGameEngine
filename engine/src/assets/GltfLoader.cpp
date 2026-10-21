@@ -946,9 +946,16 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
           int imgIdx = -1;
           if (const JVal* pbr = jm.find("pbrMetallicRoughness")) {
             if (const JVal* f = pbr->find("baseColorFactor");
-                f && f->size() >= 3)
+                f && f->size() >= 3) {
               gm.kd = glm::vec3(f32(f->at(0).number), f32(f->at(1).number),
                                 f32(f->at(2).number));
+              if (f->size() >= 4) gm.alpha = f32(f->at(3).number);
+            }
+            // Only BLEND carries alpha; OPAQUE/MASK ignore the factor's
+            // w per spec.
+            if (const JVal* am = jm.find("alphaMode");
+                !(am && am->type == JVal::Str && am->text == "BLEND"))
+              gm.alpha = 1.0f;
             gm.roughness = f32(pbr->numOr("roughnessFactor", 1.0));
             gm.metallic = f32(pbr->numOr("metallicFactor", 1.0));
             if (const JVal* bt = pbr->find("baseColorTexture");

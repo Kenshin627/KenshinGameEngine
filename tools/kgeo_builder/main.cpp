@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <glm/glm.hpp>
 #include <string>
 #include <vector>
@@ -180,6 +181,45 @@ int main(int argc, char** argv) {
                      albedo.height, bmp.string());
       }
       recenterGltf(mesh, fit);
+      // BLEND-material sink: translucent plates that hug an opaque
+      // surface (this asset's visor plate rides ~1e-3 behind the shell
+      // face) lose that hair-thin depth order to LOD simplification
+      // error at runtime - simplified shell wobble flips the winner
+      // per cluster and paints opaque blocks over the camo. Push the
+      // BLEND geometry inward along its normals by a margin larger
+      // than any LOD error (1.5 per-mille of the fit box) so the opaque
+      // surface wins every near-tie; plates that genuinely protrude
+      // (the visor's wrap rim) stay visible - the offset is dwarfed by
+      // their real clearance.
+      {
+        using kenshin::u32;
+        using kenshin::usize;
+        bool anyBlend = false;
+        for (const auto& gm : gltfMaterials) anyBlend |= gm.alpha < 0.999f;
+        if (anyBlend && !mesh.triMaterial.empty() &&
+            mesh.normals.size() == mesh.positions.size()) {
+          const float kSink = fit > 0.0f ? fit * 0.0015f : 0.003f;
+          std::vector<bool> sink(mesh.vertexCount(), false);
+          for (usize t = 0; t < mesh.triMaterial.size(); ++t) {
+            const u32 m = mesh.triMaterial[t];
+            if (m >= gltfMaterials.size() ||
+                gltfMaterials[m].alpha >= 0.999f)
+              continue;
+            for (int k = 0; k < 3; ++k)
+              sink[mesh.indices[t * 3 + k]] = true;
+          }
+          usize sunk = 0;
+          for (usize v = 0; v < sink.size(); ++v) {
+            if (!sink[v]) continue;
+            for (int k = 0; k < 3; ++k)
+              mesh.positions[v * 3 + k] -= mesh.normals[v * 3 + k] * kSink;
+            ++sunk;
+          }
+          if (sunk)
+            KENSHIN_INFO("[builder] BLEND sink: {} verts -{} units (normal)",
+                         sunk, kSink);
+        }
+      }
     } else if (!kenshin::assets::loadObj(input, mesh, log)) {
       KENSHIN_ERROR("load failed: {}", log);
       kenshin::log::shutdown();
@@ -408,6 +448,61 @@ int main(int argc, char** argv) {
       dagStats.clusterCount, dagStats.groupCount, dagStats.maxLevel,
       dagStats.rootCount, dagStats.monotonicFixes, dag.hierarchyNodes.size(),
       dag.hierarchyRoot);
+
+  // Per-material cluster census (diagnosing material-boundary
+  // artifacts): counts + LOD histogram + the union bounds of each
+  // material's clusters, plus how many triangles each material's
+  // clusters actually carry (vertex-majority vs triangle reality).
+  if (!dag.clusterMaterial.empty()) {
+    using kenshin::u32;
+    using kenshin::usize;
+    // Per-LEVEL triangle census (which level is coarsest?) + roots per
+    // level - settles level semantics from data.
+    {
+      std::map<u32, kenshin::u64> lvlTris, lvlClusters, lvlRoots;
+      for (u32 c = 0; c < dag.clusters.size(); ++c) {
+        const u32 lvl = dag.groups[dag.clusters[c].group].lodLevel;
+        ++lvlClusters[lvl];
+        lvlTris[lvl] += dag.clusters[c].indexCount / 3;
+        if (dag.clusters[c].isRoot) ++lvlRoots[lvl];
+      }
+      for (const auto& [l, n] : lvlClusters)
+        KENSHIN_INFO("[builder] level {}: {} clusters, {} tris, {} roots", l, n,
+                     lvlTris[l], lvlRoots[l]);
+    }
+    std::map<u32, u32> perLevelAll;
+    for (u32 m = 0; m < dag.materials.size(); ++m) {
+      u32 cnt = 0, tris = 0;
+      std::map<u32, u32> perLevel;
+      glm::vec3 mn(FLT_MAX), mx(-FLT_MAX);
+      for (u32 c = 0; c < dag.clusters.size(); ++c) {
+        if (dag.clusterMaterial[c] != m) continue;
+        ++cnt;
+        tris += dag.clusters[c].indexCount / 3;
+        ++perLevel[dag.groups[dag.clusters[c].group].lodLevel];
+        for (usize i = 0; i < dag.clusters[c].indexCount; ++i) {
+          const u32 li = dag.clusters[c].indexOffset + i;
+          if (li >= dag.indices.size()) continue;
+          const u32 vi = dag.clusters[c].vertexOffset + dag.indices[li];
+          if (vi * 3 + 2 >= dag.positions.size()) continue;
+          for (int k = 0; k < 3; ++k) {
+            const float p = dag.positions[vi * 3 + k];
+            mn[k] = std::min(mn[k], p);
+            mx[k] = std::max(mx[k], p);
+          }
+        }
+      }
+      std::string lv;
+      for (const auto& [l, n] : perLevel)
+        lv += " L" + std::to_string(l) + "=" + std::to_string(n);
+      if (cnt > 0)
+        KENSHIN_INFO(
+            "[builder] material {} '{}': {} clusters, {} tris, bounds "
+            "({:.2f},{:.2f},{:.2f})..({:.2f},{:.2f},{:.2f}){}",
+            m, dag.materials[m].texPath.empty() ? "?" : dag.materials[m].texPath,
+            cnt, tris, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z, lv);
+    }
+  }
 
   // M7.2 Step-0 probe: triangle index-span distribution under (a) the
   // existing first-use vertex ordering (the u8 locals ARE first-use)

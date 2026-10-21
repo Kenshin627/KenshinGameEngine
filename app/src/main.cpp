@@ -34,6 +34,8 @@
 
 #include "DemoScene.h"
 #include "KgeoPreview.h"
+#include "stb/stb_image.h"  // env.hdr decode (impl: engine's stb_image_impl)
+
 #include "kenshin/DebugOverlay.h"
 #include "kenshin/Engine.h"
 #include "kenshin/Version.h"
@@ -574,6 +576,12 @@ int main(int argc, char** argv) {
       // these; rendering still runs the CPU-cut path until S4.5.
       auto& vgScene =
           engine.registerSubsystem<kenshin::renderer::VirtualGeometryScene>();
+      // Multi-material assets carry their own base-color factors in
+      // the material table - the studio kd (0.75) would wash them.
+      // Single-material assets keep the studio kd bit-identical (their
+      // material factor is 1, so the product is unchanged).
+      if (kgeoPreview.dag.materials.size() > 1)
+        decodeParams.kd = glm::vec3(1.0f);
       // M6.3: v3 assets (tables-only dag) take the paged branch - the
       // vertex pools are never uploaded, the pages stream via the
       // StreamingManager. slotCap = the budget's structural form.
@@ -1023,13 +1031,68 @@ int main(int argc, char** argv) {
     vgScene = &engine.get<kenshin::renderer::VirtualGeometryScene>();
     vgBackend = &engine.get<kenshin::backend::IRenderBackend>();
 
-    // IBL: a procedural HDR studio environment, equirectangular Z-up
+    // IBL environment: an env.hdr next to the loaded asset wins (a
+    // real Radiance HDRI - rich structured reflections); the
+    // procedural studio probe is the fallback.
+  {
+    const std::filesystem::path envPath =
+        std::filesystem::path(args.kgeo).parent_path() / "env.hdr";
+    if (std::filesystem::exists(envPath)) {
+      int ew = 0, eh = 0, ec = 0;
+      float* data = stbi_loadf(envPath.string().c_str(), &ew, &eh, &ec, 4);
+      if (data && ew > 0 && eh > 0) {
+        std::vector<kenshin::u16> half(kenshin::usize(ew) * eh * 4);
+        for (kenshin::usize i = 0; i < half.size(); ++i) {
+          const kenshin::u32 b =
+              *reinterpret_cast<const kenshin::u32*>(&data[i]);
+          const kenshin::u32 sign = (b >> 16) & 0x8000u;
+          const kenshin::u32 ex = (b >> 23) & 0xFFu;
+          const kenshin::u32 man = b & 0x7FFFFFu;
+          kenshin::u16 hf;
+          if (ex >= 255)
+            hf = kenshin::u16(sign | 0x7C00u | (man ? 0x200u : 0));
+          else if (ex < 98)
+            hf = 0;
+          else {
+            const kenshin::u32 e2 = ex - 127 + 15;
+            hf = e2 >= 31 ? kenshin::u16(sign | 0x7C00u)
+                          : kenshin::u16(sign | (e2 << 10) | (man >> 13));
+          }
+          half[i] = hf;
+        }
+        stbi_image_free(data);
+        if (vgBackend) {
+          kenshin::backend::IRenderBackend::TextureArrayDesc ed;
+          ed.width = kenshin::u32(ew);
+          ed.height = kenshin::u32(eh);
+          ed.layers = 1;
+          ed.hdr = true;
+          ed.rgba = reinterpret_cast<const kenshin::u8*>(half.data());
+          ed.bytes = half.size() * sizeof(kenshin::u16);
+          ed.debugName = "ibl-env-hdr";
+          envTexture = vgBackend->createTextureArray(ed);
+          envMaxLod = std::floor(std::log2(float(ew))) + 1.0f - 1.0f;
+          KENSHIN_INFO("[ibl] loaded {} ({}x{}, {} mips) -> handle {}",
+                       envPath.string(), ew, eh, int(envMaxLod) + 1,
+                       envTexture);
+        }
+      } else if (data == nullptr) {
+        KENSHIN_WARN("[ibl] {} failed to decode (stbi: {})", envPath.string(),
+                     stbi_failure_reason() ? stbi_failure_reason() : "?");
+      }
+    }
+  }
+  // IBL: a procedural HDR studio environment, equirectangular Z-up
     // (u = atan2(y,x)/2pi + 0.5, v = acos(z)/pi - the lighting shader's
     // sampling convention): a dim sky/ground gradient plus a bright
     // softbox centered on the key-light direction (reflections stay
     // consistent with the direct light + shadows). The GPU mip chain is
     // the prefiltered radiance ladder; roughness -> LOD at sample time.
-    {
+    // env.hdr in effect? skip the procedural probe.
+    if (envTexture !=
+        kenshin::backend::IRenderBackend::kInvalidTextureHandle) {
+      KENSHIN_INFO("[ibl] env.hdr in effect (probe skipped)");
+    } else {
       constexpr int kW = 512, kH = 256;
       std::vector<float> probe(kenshin::usize(kW) * kH * 4);
       const glm::vec3 kd = glm::normalize(glm::vec3(0.35f, 0.8f, 0.45f));
@@ -1050,8 +1113,14 @@ int main(int argc, char** argv) {
           // radiance - ceiling ~3, softbox ~8. The ground's diffuse
           // never sees the env (hemisphere constants), so this cannot
           // blow it.
-          glm::vec3 c = glm::mix(glm::vec3(0.35f, 0.34f, 0.32f),
-                                 glm::vec3(1.6f, 1.65f, 1.75f), t * t);
+          // 6.5x: the dark camo's linear f0 (~0.04 after the sRGB
+          // decode) needs studio-HDI radiance for the metal to read.
+          const float es = getenv("KENSHIN_ENV_SCALE")
+                               ? atof(getenv("KENSHIN_ENV_SCALE"))
+                               : 6.5f;
+          glm::vec3 c =
+              glm::mix(glm::vec3(0.35f, 0.34f, 0.32f) * es,
+                       glm::vec3(1.6f, 1.65f, 1.75f) * es, t * t);
           const float dKey = std::max(0.0f, glm::dot(dir, kd));
           c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 12.0f) *
                5.0f;
@@ -1065,13 +1134,38 @@ int main(int argc, char** argv) {
           o[3] = 1.0f;
         }
       }
+      // RGBA16F upload: convert the f32 rows to half bits (the HDR
+      // path's 8-byte texels are f16 pairs - feeding f32 bits reads
+      // as denormal garbage, a black environment).
+      std::vector<kenshin::u16> half;
+      half.reserve(probe.size());
+      for (const float v : probe) {
+        const kenshin::u32 b = *reinterpret_cast<const kenshin::u32*>(&v);
+        const kenshin::u32 sign = (b >> 16) & 0x8000u;
+        const kenshin::u32 ex = (b >> 23) & 0xFFu;
+        const kenshin::u32 man = b & 0x7FFFFFu;
+        kenshin::u16 hf;
+        if (ex >= 255)
+          hf = kenshin::u16(sign | 0x7C00u | (man ? 0x200u : 0));
+        else if (ex < 98)  // underflow to zero/denormal (env range:
+                           // values 0..8, plain zero is fine)
+          hf = 0;
+        else {
+          const kenshin::u32 e2 = ex - 127 + 15;
+          if (e2 >= 31)
+            hf = kenshin::u16(sign | 0x7C00u);
+          else
+            hf = kenshin::u16(sign | (e2 << 10) | (man >> 13));
+        }
+        half.push_back(hf);
+      }
       kenshin::backend::IRenderBackend::TextureArrayDesc ed;
       ed.width = kW;
       ed.height = kH;
       ed.layers = 1;
       ed.hdr = true;
-      ed.rgba = reinterpret_cast<const kenshin::u8*>(probe.data());
-      ed.bytes = probe.size() * sizeof(float);
+      ed.rgba = reinterpret_cast<const kenshin::u8*>(half.data());
+      ed.bytes = half.size() * sizeof(kenshin::u16);
       ed.debugName = "ibl-env";
       envTexture = vgBackend->createTextureArray(ed);
       envMaxLod = std::floor(std::log2(float(kW))) + 1.0f - 1.0f;

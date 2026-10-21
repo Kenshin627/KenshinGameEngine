@@ -14,6 +14,10 @@ add_executable(KENSHINDemo
 
 target_link_libraries(KENSHINDemo PRIVATE kenshin::engine)
 
+# stb_image.h (the implementation compiles once inside the engine lib)
+target_include_directories(KENSHINDemo SYSTEM PRIVATE
+    ${CMAKE_SOURCE_DIR}/ThirdParty)
+
 if(MSVC)
     target_compile_options(KENSHINDemo PRIVATE /W4 /permissive- /utf-8 /MP)
 endif()

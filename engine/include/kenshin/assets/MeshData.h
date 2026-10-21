@@ -33,7 +33,11 @@ struct MeshData {
 
   struct Material {
     glm::vec3 ka{0.2f, 0.2f, 0.2f};
-    glm::vec3 kd{0.8f, 0.8f, 0.8f};
+    // White = the multiplicative identity: the builder folds this into
+    // the v7 material record and the decode multiplies it onto the
+    // global studio kd, so the default must be a no-op (0.8 would dim
+    // every default-material asset 20%).
+    glm::vec3 kd{1.0f, 1.0f, 1.0f};
     std::string diffuseTexture;  // path or empty
     f32 roughness = 0.5f;        // glTF pbr (GltfLoader fills it; the
     f32 metallic = 0.0f;         // builder folds it into the v7 table)

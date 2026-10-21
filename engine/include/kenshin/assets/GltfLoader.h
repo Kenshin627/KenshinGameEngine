@@ -43,6 +43,11 @@ struct GltfMaterial {
   int image = -1;    // base-color image (index into `images` out)
   int mrImage = -1;  // metallicRoughness image (glTF packs roughness in
                      // G, metallic in B; LINEAR data - never sRGB-decoded)
+  f32 alpha = 1.0f;  // baseColorFactor[3] when alphaMode == BLEND (the
+                     // builder sinks BLEND geometry slightly behind the
+                     // opaque surface - skintight plates otherwise lose
+                     // their intended depth order to LOD simplification
+                     // error and paint opaque blocks over the shell)
 };
 
 /// Load a .glb or .gltf. `albedo` (optional out) receives the first

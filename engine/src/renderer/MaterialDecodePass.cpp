@@ -140,23 +140,43 @@ static void recordDecode(
                     static_cast<f32>(slotU32Total), 0.0f);
   dp[1] = glm::vec4(static_cast<f32>(pairCapacity),
                     static_cast<f32>(materialCount), 0.0f, 0.0f);
+  // imposterPairs falls back to the params buffer when imposters are
+  // off (the app passes 0): every entry point's SPIR-V carries the
+  // binding, and a dead handle would both leave it unwritten
+  // (validation UB) and - worse - trip the backends' handle-validity
+  // early-outs, silently killing whole decode draws.
+  const u32 imposterPairsSafe =
+      (imposterPairs == 0u ||
+       imposterPairs == backend::IRenderBackend::kInvalidBufferHandle)
+          ? decodeParams
+          : imposterPairs;
   const u32 handles[18] = {
       visHandle,   clusterBuffer, instanceBuffer, poolPos,     poolNrm,
       poolUv,      poolIdx,       groupBuffer,    clusterPage, pageTable,
       pageHeader,  decodeParams,  pairs,          hwPairs,     postPairs,
-      clusterMeta, materialTable, imposterPairs};
+      clusterMeta, materialTable, imposterPairsSafe};
   switch (mode) {
     case 1:
       backend.drawGBuffer(pipeline, handles, 18, albedoTexture, &push,
                           sizeof(push), width, height);
       break;
     case 2:
-      backend.drawShadowDecode(pipeline, handles, 17, &push, sizeof(push),
+      // 18 handles like the GBuffer draw: the shadow/fullscreen entry
+      // points also carry the module-scope imposterPairs binding in
+      // their SPIR-V - leaving it unwritten is the validation-layer
+      // "never been updated" error and undefined data if a payload
+      // ever routes listSel 3. Extra handles are inert: the write
+      // loops clamp to each pipeline's reflected binding count.
+      // 18 handles across all three entry points: each one's SPIR-V
+      // carries the module-scope imposterPairs binding (the backends'
+      // write loops clamp to the reflected count, and the safe-handle
+      // fallback above keeps the last entry valid).
+      backend.drawShadowDecode(pipeline, handles, 18, &push, sizeof(push),
                                width, height, shadowLevel, shadowEnabled,
                                scissorRect);
       break;
     default:
-      backend.drawFullscreen(pipeline, handles, 16, &push, sizeof(push));
+      backend.drawFullscreen(pipeline, handles, 18, &push, sizeof(push));
       break;
   }
 }
