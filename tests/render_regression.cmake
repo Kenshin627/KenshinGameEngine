@@ -3,6 +3,7 @@
 #
 # Called from tests/CMakeLists.txt via add_test with:
 #   -DDEMO=<path to KENSHINDemo>  -DBUILDER=<path to kgeo_builder>
+#   -DBMPDIFF=<path to bmpdiff>
 #   -DREF=<reference bmp>         -DOUT=<output bmp>
 #   -DEXEDIR=<exe dir: imgui.ini lives there>
 #   [-DKGEO=1 -DPROC=knot -DLOD=1]
@@ -17,12 +18,21 @@
 # Reference regeneration (after an INTENDED rendering change):
 #   1. cmake --build --preset windows-msvc-release
 #   2. rm build/windows-msvc-release/app/Release/imgui.ini
-#   3. run the demo command shown in the failure message
+#   3. run ctest (or this script) - the failure names the output bmp
+#      and a .diff.bmp (differing pixels in red, |delta| x 8)
 #   4. copy the output bmp over tests/data/render_<case>_ref.bmp
 # Reference updates go through review like any code change - the diff
 # being binary is the point: any unintended pixel change fails this test.
 
 file(REMOVE "${EXEDIR}/imgui.ini")
+
+# Absolute paths: the demo runs in OUT's directory (see below), so a
+# relative path from a manual `cmake -P` run must not shift.
+foreach(var DEMO BUILDER BMPDIFF OUT REF ALBEDO)
+  if(${var})
+    get_filename_component(${var} "${${var}}" ABSOLUTE)
+  endif()
+endforeach()
 
 # ALBEDO (M8.2): the texture reference goes through the BUILDER (-
 # -albedo) so the .kgeo carries a material table with a real texture;
@@ -53,9 +63,17 @@ if(NOHW)
   list(APPEND EXTRA_ARGS --no-hw)
 endif()
 
+# Pinned working directory: the demo falls back to ./env.hdr for its
+# IBL, so a run from a directory holding one (the repo root does) would
+# render - and regenerate references - under a different environment.
+get_filename_component(OUT_DIR "${OUT}" DIRECTORY)
+if(EXISTS "${OUT_DIR}/env.hdr")
+  message(FATAL_ERROR "${OUT_DIR}/env.hdr would change the test's IBL")
+endif()
 execute_process(
   COMMAND "${DEMO}" --frames 6 --size 1280x720 ${EXTRA_ARGS}
           --screenshot "${OUT}"
+  WORKING_DIRECTORY "${OUT_DIR}"
   RESULT_VARIABLE rc)
 if(NOT rc EQUAL 0)
   message(FATAL_ERROR "KENSHINDemo exited with ${rc}")
@@ -74,38 +92,36 @@ if(NOT DEFINED TOLERANCE)
   set(TOLERANCE 0)
 endif()
 
+# bmpdiff (tools/bmpdiff): pixel count + max delta + bbox in well under
+# a second, and a diff image next to the output on mismatch. (The old
+# per-pixel CMake hex loop took 10+ minutes on a differing frame.)
+set(DIFF_IMAGE "${OUT}.diff.bmp")
+file(REMOVE "${DIFF_IMAGE}")
 execute_process(
-  COMMAND "${CMAKE_COMMAND}" -E compare_files "${OUT}" "${REF}"
-  RESULT_VARIABLE rc)
-if((NOT rc EQUAL 0) AND (TOLERANCE GREATER 0))
-  # Byte-pair (BGR) diff count over same-size BMPs.
-  file(READ "${OUT}" outHex HEX)
-  file(READ "${REF}" refHex HEX)
-  string(LENGTH "${outHex}" outLen)
-  string(LENGTH "${refHex}" refLen)
-  if(NOT outLen STREQUAL refLen)
-    message(FATAL_ERROR "render regression: size mismatch.")
-  endif()
-  set(diff 0)
-  set(i 54)  # skip the BMP header (14) + info (40)
-  while(i LESS outLen)
-    string(SUBSTRING "${outHex}" ${i} 6 outPx)
-    string(SUBSTRING "${refHex}" ${i} 6 refPx)
-    if(NOT outPx STREQUAL refPx)
-      math(EXPR diff "${diff} + 1")
-      if(diff GREATER ${TOLERANCE})
-        message(FATAL_ERROR
-          "render regression: over ${diff} pixels differ (budget ${TOLERANCE}).")
-      endif()
-    endif()
-    math(EXPR i "${i} + 6")
-  endwhile()
-elseif(NOT rc EQUAL 0)
+  COMMAND "${BMPDIFF}" "${OUT}" "${REF}" --tolerance "${TOLERANCE}"
+          --diff "${DIFF_IMAGE}"
+  RESULT_VARIABLE rc
+  OUTPUT_VARIABLE diffOut
+  ERROR_VARIABLE diffErr)
+string(STRIP "${diffOut}${diffErr}" diffReport)
+if(rc EQUAL 0)
+  message(STATUS "${diffReport}")
+elseif(rc EQUAL 1)
   message(FATAL_ERROR
-    "render regression: screenshot differs from reference.\n"
-    "  got:      ${OUT}\n"
-    "  expected: ${REF}\n"
+    "render regression: screenshot differs from reference.
+"
+    "  ${diffReport}
+"
+    "  got:      ${OUT}
+"
+    "  expected: ${REF}
+"
+    "  diff:     ${DIFF_IMAGE}
+"
     "If this change is INTENDED, regenerate the reference (see the "
     "instructions at the top of tests/render_regression.cmake) and commit "
     "it together with the code change.")
+else()
+  message(FATAL_ERROR "render regression: bmpdiff failed (${rc}): "
+                      "${diffReport}")
 endif()

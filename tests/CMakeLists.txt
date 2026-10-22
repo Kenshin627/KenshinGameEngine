@@ -65,6 +65,7 @@ add_test(NAME render_baseline
     COMMAND ${CMAKE_COMMAND}
         -DDEMO=$<TARGET_FILE:KENSHINDemo>
         -DBUILDER=$<TARGET_FILE:kgeo_builder>
+        -DBMPDIFF=$<TARGET_FILE:bmpdiff>
         -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_baseline_ref.bmp
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_baseline_out.bmp
         -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
@@ -73,6 +74,7 @@ add_test(NAME render_kgeo
     COMMAND ${CMAKE_COMMAND}
         -DDEMO=$<TARGET_FILE:KENSHINDemo>
         -DBUILDER=$<TARGET_FILE:kgeo_builder>
+        -DBMPDIFF=$<TARGET_FILE:bmpdiff>
         -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_kgeo_ref.bmp
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_out.bmp
         -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
@@ -90,6 +92,7 @@ add_test(NAME render_kgeo_nohw
     COMMAND ${CMAKE_COMMAND}
         -DDEMO=$<TARGET_FILE:KENSHINDemo>
         -DBUILDER=$<TARGET_FILE:kgeo_builder>
+        -DBMPDIFF=$<TARGET_FILE:bmpdiff>
         -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_kgeo_ref.bmp
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_nohw_out.bmp
         -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
@@ -103,6 +106,7 @@ add_test(NAME render_kgeo_albedo
     COMMAND ${CMAKE_COMMAND}
         -DDEMO=$<TARGET_FILE:KENSHINDemo>
         -DBUILDER=$<TARGET_FILE:kgeo_builder>
+        -DBMPDIFF=$<TARGET_FILE:bmpdiff>
         -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_kgeo_albedo_ref.bmp
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_kgeo_albedo_out.bmp
         -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
