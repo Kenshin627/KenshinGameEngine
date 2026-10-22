@@ -362,8 +362,17 @@ float3 fresnelSchlick(float ct, float3 f0) {
       probe ? shIrradiance(nrm) * envIntensity : hemi * push.viewportAmb.z;
   // env[11].x: the emissive strength multiplier (glTF emissiveFactor is
   // clamped to 1 without KHR_materials_emissive_strength).
-  const float3 emissive = gbufferC.SampleLevel(uv, 0.0).rgb * env[11].x;
-  const float3 color = diffuseColor * ambientIrr + envSpec + lo + emissive;
+  const float4 gc = gbufferC.SampleLevel(uv, 0.0);
+  const float3 emissive = gc.rgb * env[11].x;
+  // glTF material occlusion (GBuffer C alpha = 1 - ao): INDIRECT light
+  // only (the direct term has its own shadows). Specular occlusion via
+  // Lagarde's fit (Frostbite, "Moving Frostbite to PBR" 4.10.2): rough
+  // lobes take the full AO, glossy ones at grazing angles escape it.
+  const float ao = 1.0 - saturate(gc.a);
+  const float specAo = saturate(
+      pow(max(ndv + ao, 0.0), exp2(-16.0 * rm.x - 1.0)) - 1.0 + ao);
+  const float3 color = diffuseColor * ambientIrr * ao + envSpec * specAo +
+                       lo + emissive;
   // HDR out - scrub garbage (crossing-triangle paths) to the
   // BACKGROUND sentinel (alpha 0); magenta was too easy to miss
   // under an exposure curve.

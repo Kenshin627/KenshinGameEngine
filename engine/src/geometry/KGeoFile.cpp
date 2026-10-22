@@ -338,8 +338,9 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   for (const auto& m : mats) {
     if (!m.mrPath.empty()) hasMr = true;
     if (!m.nrmPath.empty()) hasNrm = true;
-    if (m.emissive[0] > 0.0f || m.emissive[1] > 0.0f || m.emissive[2] > 0.0f)
-      hasEmissive = true;
+    if (m.emissive[0] > 0.0f || m.emissive[1] > 0.0f || m.emissive[2] > 0.0f ||
+        (m.occlusion > 0.0f && !m.mrPath.empty()))
+      hasEmissive = true;  // the 12-f32 record (emissive + occlusion)
   }
   // v11 carries the v10 layout plus the normal-map paths (a normal map
   // without an MR map still writes the v10 arrays - mrOff all-absent).
@@ -459,7 +460,10 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
       // v11: normal-map presence (-1 absent); pre-v11 writes 0 = pad.
       r[7] = (isV11 && nrmOff[m] == 0xFFFFFFFFu) ? -1.0f : 0.0f;
       if (isV13)
+      {
         for (int c = 0; c < 3; ++c) r[8 + c] = mats[m].emissive[c];
+        r[11] = mats[m].occlusion;  // was a zero pad: old v13 = no AO
+      }
     }
     const u32 stringBytes = static_cast<u32>(strings.size());
     ok = std::fwrite(&stringBytes, sizeof(stringBytes), 1, file) == 1 &&
@@ -818,10 +822,12 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
       const usize recF = h3.version == kVersion13 ? 12 : 8;
       const f32* r = records.data() + usize(m) * recF;
       auto& mat = dag.materials[m];
-      if (recF == 12)
+      if (recF == 12) {
         for (int c = 0; c < 3; ++c)
           mat.emissive[c] =
               (r[8 + c] >= 0.0f && r[8 + c] < 1e4f) ? r[8 + c] : 0.0f;
+        mat.occlusion = (r[11] >= 0.0f && r[11] <= 1.0f) ? r[11] : 0.0f;
+      }
       mat.kd[0] = r[0];
       mat.kd[1] = r[1];
       mat.kd[2] = r[2];

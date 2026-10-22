@@ -168,6 +168,7 @@ struct Args {
   float exposure = -1.0f;       // --exposure: seeds the panel value
   float envIntensity = -1.0f;   // --env-intensity: seeds the panel value
   bool noBloom = false;         // --no-bloom
+  std::string envPath;          // --env: an explicit Radiance HDRI
   float taaSharpen = -1.0f;     // --taa-sharpen: seeds the panel value
   float bloomStrength = -1.0f;  // --bloom-strength: seeds the panel value
   float emissiveStrength = -1.0f;  // --emissive-strength: ditto
@@ -199,6 +200,8 @@ Args parseArgs(int argc, char** argv) {
       args.envIntensity = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--taa-sharpen") == 0 && i + 1 < argc)
       args.taaSharpen = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--env") == 0 && i + 1 < argc)
+      args.envPath = argv[++i];
     else if (std::strcmp(argv[i], "--no-bloom") == 0)
       args.noBloom = true;
     else if (std::strcmp(argv[i], "--bloom-strength") == 0 && i + 1 < argc)
@@ -1145,12 +1148,21 @@ int main(int argc, char** argv) {
     vgScene = &engine.get<kenshin::renderer::VirtualGeometryScene>();
     vgBackend = &engine.get<kenshin::backend::IRenderBackend>();
 
-    // IBL environment: an env.hdr next to the loaded asset wins (a
-    // real Radiance HDRI - rich structured reflections); the
+    // IBL environment (a real Radiance HDRI - rich structured
+    // reflections), first hit wins: --env <path>, an env.hdr next to
+    // the loaded asset, an env.hdr in the working directory. The
     // procedural studio probe is the fallback.
     {
-      const std::filesystem::path envPath =
-          std::filesystem::path(args.kgeo).parent_path() / "env.hdr";
+      std::filesystem::path envPath;
+      if (!args.envPath.empty()) {
+        envPath = args.envPath;
+        if (!std::filesystem::exists(envPath))
+          KENSHIN_WARN("[ibl] --env {} not found (studio probe)",
+                       envPath.string());
+      } else {
+        envPath = std::filesystem::path(args.kgeo).parent_path() / "env.hdr";
+        if (!std::filesystem::exists(envPath)) envPath = "env.hdr";
+      }
       if (std::filesystem::exists(envPath)) {
         int ew = 0, eh = 0, ec = 0;
         // Decode from memory with the Radiance header normalized:

@@ -1045,6 +1045,27 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
               }
             }
           }
+          // occlusionTexture (AO in R; LINEAR). glTF: ao' = 1 +
+          // strength * (ao - 1), applied to INDIRECT light only.
+          if (const JVal* ot = jm.find("occlusionTexture");
+              ot && g.textures && g.images) {
+            u32 oTex = 0xFFFFFFFFu, oImg = 0xFFFFFFFFu;
+            if (checkedU32(ot->numOr("index", 4294967295.0), oTex) &&
+                oTex < g.textures->size() &&
+                checkedU32(g.textures->at(oTex).numOr("source", 4294967295.0),
+                           oImg) &&
+                oImg < g.images->size()) {
+              const int slot = slotForImage(int(oImg));
+              if (slot >= 0) {
+                gm.aoImage = slot;
+                const f32 st = f32(ot->numOr("strength", 1.0));
+                gm.aoStrength = st >= 0.0f ? std::min(st, 1.0f) : 0.0f;
+                if (usedImages[usize(slot)].name.empty())
+                  usedImages[usize(slot)].name =
+                      "mat" + std::to_string(usedMaterials.size()) + "_ao";
+              }
+            }
+          }
           matSlot = u32(usedMaterials.size());
           usedMaterials.push_back(gm);
           imageOfMaterial.push_back(gm.image);

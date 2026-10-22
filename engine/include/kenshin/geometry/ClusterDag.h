@@ -164,6 +164,10 @@ struct ClusterDag {
     f32 nrmTexLayer = -1.0f;
     // v11: emitted radiance (linear rgb, added unlit by the lighting).
     f32 emissive[3] = {0.0f, 0.0f, 0.0f};
+    // v13 record pad: the glTF occlusion strength (0 = no AO). The AO
+    // itself rides the MR map's R channel (ORM packing; the builder
+    // composes it in when the asset stores AO separately).
+    f32 occlusion = 0.0f;
   };
   std::vector<DagMaterial> materials;
   /// Per-cluster material id into `materials` (u8 range; stamped into

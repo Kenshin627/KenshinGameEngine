@@ -276,11 +276,13 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   m_meshMaterialBase.push_back(
       static_cast<u32>(m_materialData.size() / kMaterialFloats));
   for (const auto& mat : dag.materials) {
-    // decode_material's GpuMaterial: kdTex, params, emissive (3 float4).
+    // decode_material's GpuMaterial: kdTex, params, emissive (3 float4;
+    // emissive.w = occlusion strength, live only with an MR layer).
     f32 r[kMaterialFloats] = {mat.kd[0],       mat.kd[1],       mat.kd[2],
                               mat.texLayer,    mat.roughness,   mat.metallic,
                               mat.mrTexLayer,  mat.nrmTexLayer, mat.emissive[0],
-                              mat.emissive[1], mat.emissive[2], 0.0f};
+                              mat.emissive[1], mat.emissive[2],
+                              mat.mrTexLayer >= 0.0f ? mat.occlusion : 0.0f};
     m_materialData.insert(m_materialData.end(), r, r + kMaterialFloats);
     m_materialTexPaths.push_back(mat.texPath);
   }

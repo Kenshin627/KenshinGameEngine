@@ -49,6 +49,9 @@ struct GltfMaterial {
                       // their intended depth order to LOD simplification
                       // error and paint opaque blocks over the shell)
   int nrmImage = -1;  // normalTexture image (tangent space, LINEAR)
+  int aoImage = -1;   // occlusionTexture image (AO in R, LINEAR) - often
+                      // the SAME image as mrImage (ORM packing)
+  f32 aoStrength = 1.0f;  // occlusionTexture.strength, [0, 1]
   glm::vec3 emissive{0.0f};  // emissiveFactor x KHR_materials_emissive_
                              // strength (linear radiance; textures: v1
                              // factor only)

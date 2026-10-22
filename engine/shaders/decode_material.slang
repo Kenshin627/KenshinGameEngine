@@ -162,7 +162,7 @@ float2 v5Uv(uint vi, uint uvBase, uint poolTotal, uint vertexOffset,
 struct GpuMaterial {
   float4 kdTex;   // rgb kd, a = texture-array layer (-1 = untextured)
   float4 params;  // x roughness, y metallic, z MR layer, w normal layer (-1 = none)
-  float4 emissive;  // rgb emitted radiance (linear), w pad
+  float4 emissive;  // rgb emitted radiance (linear), w occlusion strength
 };
 
 struct DecodePush {
@@ -617,6 +617,7 @@ struct GBufferOut {
   o.b = float4(0, 0, 0, 0);
   o.c = float4(0, 0, 0, 0);
   float3 emissiveOut = float3(0.0);
+  float aoLoss = 0.0;  // 1 - ao (GBuffer C alpha; 0 = unoccluded)
 
   const float2 wh = push.viewport.xy;
   const uint2 pixel = uint2(frag.xy);
@@ -883,6 +884,8 @@ struct GBufferOut {
               .rgb;
       rough *= mr.g;
       metal *= mr.b;
+      // glTF occlusion (R of the ORM map): ao' = 1 + s * (ao - 1).
+      aoLoss = saturate(mat.emissive.w) * (1.0 - saturate(mr.r));
     }
     // v11 normal map (params.w = its array layer, -1 = none): glTF
     // tangent space (+X = +u, +Y = +v - verified against the F-35
@@ -926,7 +929,7 @@ struct GBufferOut {
 
   o.a = float4(nrm, dist);
   o.b = float4(kd, matIdOut);
-  o.c = float4(emissiveOut, 0.0);
+  o.c = float4(emissiveOut, aoLoss);
   // NaN scrub (crossing-triangle garbage paths) - the lighting pass
   // must never read non-finite GBuffer data.
   if (!(nrm.x >= -1.0 && nrm.x <= 1.0) || !(dist >= 0.0) || !(o.b.x >= 0.0)) {

@@ -766,8 +766,36 @@ int main(int argc, char** argv) {
         };
         const std::string albedoFile = imageFile(gm.image, "_albedo");
         if (!albedoFile.empty()) dm.texPath = albedoFile;
-        const std::string mrFile = imageFile(gm.mrImage, "_mr");
+        // AO rides the MR layer's R channel (glTF ORM packing - the
+        // Vulture / Sketchfab exports share one image). A separate
+        // occlusion image is composed into a copy of the MR image (or
+        // a G = B = 1 stand-in: factors x 1 = the factor-only result).
+        int mrIdx = gm.mrImage;
+        if (gm.aoImage >= 0 && gm.aoImage != gm.mrImage &&
+            gm.aoImage < int(gltfImages.size())) {
+          const auto& ao = gltfImages[kenshin::usize(gm.aoImage)];
+          kenshin::assets::GltfImage orm;
+          if (mrIdx >= 0 && mrIdx < int(gltfImages.size())) {
+            orm = gltfImages[kenshin::usize(mrIdx)];
+          } else {
+            orm.width = ao.width;
+            orm.height = ao.height;
+            orm.rgba.assign(kenshin::usize(ao.width) * ao.height * 4, 255);
+          }
+          const kenshin::assets::GltfImage aoFit =
+              (ao.width == orm.width && ao.height == orm.height)
+                  ? ao
+                  : resampleTo(ao, orm.width, orm.height);
+          for (kenshin::usize i = 0; i + 3 < orm.rgba.size(); i += 4)
+            orm.rgba[i] = aoFit.rgba[i];
+          orm.name = "mat" + std::to_string(dag.materials.size()) + "_ao";
+          gltfImages.push_back(std::move(orm));
+          writtenFor.emplace_back();
+          mrIdx = int(gltfImages.size()) - 1;
+        }
+        const std::string mrFile = imageFile(mrIdx, "_mr");
         if (!mrFile.empty()) dm.mrPath = mrFile;
+        if (gm.aoImage >= 0 && !mrFile.empty()) dm.occlusion = gm.aoStrength;
         const std::string nrmFile = imageFile(gm.nrmImage, "_nrm");
         if (!nrmFile.empty()) dm.nrmPath = nrmFile;
         for (int c = 0; c < 3; ++c) dm.emissive[c] = gm.emissive[c];
