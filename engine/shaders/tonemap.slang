@@ -258,6 +258,26 @@ float3 toneMapOp(float3 mapped)
                float3(0.0));
 }
 
+static const float2 kRing[8] = {
+    float2(-1.0, 0.0), float2(1.0, 0.0),  float2(0.0, -1.0),
+    float2(0.0, 1.0),  float2(-1.0, -1.0), float2(1.0, -1.0),
+    float2(-1.0, 1.0), float2(1.0, 1.0)};
+
+// Sharpen domain: rgb / (1 + max channel); alpha (coverage, already
+// in [0, 1]) passes through. Monotonic, so the neighborhood clamp in
+// compressed space bounds the decompressed result too.
+float4 compressHdr(float4 v)
+{
+    const float3 rgb = max(v.rgb, float3(0.0));
+    return float4(rgb / (1.0 + max(rgb.x, max(rgb.y, rgb.z))), v.a);
+}
+float4 decompressHdr(float4 v)
+{
+    const float3 rgb = max(v.rgb, float3(0.0));
+    const float m = min(max(rgb.x, max(rgb.y, rgb.z)), 0.999);
+    return float4(rgb / (1.0 - m), v.a);
+}
+
 [shader("fragment")]
 float4 fsMain(float4 frag : SV_Position) : SV_Target
 {
@@ -298,18 +318,26 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     // zero-rgb background neighbors.
     if (push.modeViewport.w > 0.0)
     {
+        // In a tone-compressed domain (x / (1 + max(x)), Karis's TAA
+        // weighting) and clamped to the 3x3 neighborhood's range (CAS):
+        // in linear HDR one specular neighbor at 100+ dragged the
+        // unsharp of a merely bright pixel below zero - isolated BLACK
+        // specks along hot highlights.
         const float2 t = push.modeViewport.yz;
+        const float4 c = compressHdr(hdr4);
         float4 nb = float4(0.0);
-        nb += hdrTex.SampleLevel(uv + float2(-t.x, 0.0), 0.0);
-        nb += hdrTex.SampleLevel(uv + float2(t.x, 0.0), 0.0);
-        nb += hdrTex.SampleLevel(uv + float2(0.0, -t.y), 0.0);
-        nb += hdrTex.SampleLevel(uv + float2(0.0, t.y), 0.0);
-        nb += hdrTex.SampleLevel(uv + float2(-t.x, -t.y), 0.0);
-        nb += hdrTex.SampleLevel(uv + float2(t.x, -t.y), 0.0);
-        nb += hdrTex.SampleLevel(uv + float2(-t.x, t.y), 0.0);
-        nb += hdrTex.SampleLevel(uv + float2(t.x, t.y), 0.0);
-        hdr4 = max(hdr4 + (hdr4 - nb * (1.0 / 8.0)) * push.modeViewport.w,
-                   float4(0.0));
+        float4 lo = c, hi = c;
+        [unroll] for (int k = 0; k < 8; ++k)
+        {
+            const float4 s =
+                compressHdr(hdrTex.SampleLevel(uv + kRing[k] * t, 0.0));
+            nb += s;
+            lo = min(lo, s);
+            hi = max(hi, s);
+        }
+        const float4 sharp =
+            clamp(c + (c - nb * (1.0 / 8.0)) * push.modeViewport.w, lo, hi);
+        hdr4 = decompressHdr(sharp);
         hdr4.a = saturate(hdr4.a);
         if (hdr4.a <= 0.0)
             return float4(background, 1.0);

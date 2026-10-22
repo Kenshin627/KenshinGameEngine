@@ -168,6 +168,7 @@ struct Args {
   float exposure = -1.0f;       // --exposure: seeds the panel value
   float envIntensity = -1.0f;   // --env-intensity: seeds the panel value
   bool noBloom = false;         // --no-bloom
+  float taaSharpen = -1.0f;     // --taa-sharpen: seeds the panel value
   float bloomStrength = -1.0f;  // --bloom-strength: seeds the panel value
   float emissiveStrength = -1.0f;  // --emissive-strength: ditto
   float hwThresholdPx = -1.0f;  // --hw-threshold: the SW/HW routing edge
@@ -196,6 +197,8 @@ Args parseArgs(int argc, char** argv) {
       args.exposure = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--env-intensity") == 0 && i + 1 < argc)
       args.envIntensity = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--taa-sharpen") == 0 && i + 1 < argc)
+      args.taaSharpen = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--no-bloom") == 0)
       args.noBloom = true;
     else if (std::strcmp(argv[i], "--bloom-strength") == 0 && i + 1 < argc)
@@ -654,6 +657,7 @@ int main(int argc, char** argv) {
       if (args.exposure > 0.0f) vgDebug.exposure = args.exposure;
       if (args.envIntensity >= 0.0f) vgDebug.envIntensity = args.envIntensity;
       if (args.noBloom) vgDebug.bloom = false;
+      if (args.taaSharpen >= 0.0f) vgDebug.taaSharpen = args.taaSharpen;
       if (args.bloomStrength >= 0.0f) vgDebug.bloomStrength = args.bloomStrength;
       if (args.emissiveStrength >= 0.0f)
         vgDebug.emissiveStrength = args.emissiveStrength;
