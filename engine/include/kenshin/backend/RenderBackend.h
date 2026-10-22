@@ -317,6 +317,28 @@ class IRenderBackend {
   /// RGBA16F; the SSBO `bufferHandles` carry the matrices/blend block
   /// (a push block would exceed the guaranteed 128B). The tonemap pass
   /// that follows with fromTaa=true samples the fresh resolve.
+  /// Translucent forward pass (glTF BLEND): a vertex-pulled triangle
+  /// list blended PREMULTIPLIED (ONE / ONE_MINUS_SRC_ALPHA, alpha
+  /// accumulating coverage) into this slot's HDR target after
+  /// drawLighting; no depth attachment (the shader tests the VisBuffer
+  /// depth itself), no culling. Buffer handles fill the reflected
+  /// STORAGE_BUFFER bindings in ascending order, `envTexture` the
+  /// combined image sampler, `albedoTexture` the SAMPLED_IMAGE (+ the
+  /// albedo SAMPLER). Defaults: unsupported (no-op).
+  virtual u32 createTranslucentPipeline(const FullscreenPipelineInfo& info) {
+    (void)info;
+    return kInvalidPipelineHandle;
+  }
+  virtual void drawTranslucent(u32 pipeline, const u32* bufferHandles,
+                               u32 bufferCount, u32 envTexture,
+                               u32 albedoTexture, const void* push,
+                               usize pushBytes, u32 vertexCount,
+                               u32 instanceCount, u32 width, u32 height) {
+    (void)pipeline, (void)bufferHandles, (void)bufferCount, (void)envTexture;
+    (void)albedoTexture;
+    (void)push, (void)pushBytes, (void)vertexCount, (void)instanceCount;
+    (void)width, (void)height;
+  }
   virtual u32 createTaaPipeline(const FullscreenPipelineInfo& info) = 0;
   virtual void drawTaa(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                        const void* push, usize pushBytes, u32 width,
@@ -377,6 +399,11 @@ class IRenderBackend {
   /// queue exactly as before (the chain's fallback).
   virtual bool beginChain() = 0;
   virtual void submitChain() = 0;
+  /// Make THIS frame's chain submission wait the PREVIOUS frame's
+  /// graphics submission (call before submitChain). Needed when the
+  /// previous frame wrote chain inputs on the graphics queue - the HZB
+  /// rebuilt after the HW raster draw. No-op without a separate queue.
+  virtual void chainWaitGraphics() {}
   /// Write timestamp `index` (0..6) of this frame slot's CHAIN query
   /// pool onto the command buffer currently recording the chain (the
   /// async compute buffer, or the graphics frame buffer on the

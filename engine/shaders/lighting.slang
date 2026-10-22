@@ -54,10 +54,25 @@ struct GpuLight {
 [[vk::binding(0)]] Sampler2D gbufferA;
 [[vk::binding(1)]] Sampler2D gbufferB;
 [[vk::binding(2)]] StructuredBuffer<GpuLight> lights;
-// M8.3: the environment table - [0] sky rgb + pad, [1] ground rgb +
-// pad. The ambient term becomes a hemisphere blend (the cheap diffuse
-// IBL; specular env waits for a prefiltered probe).
+// The environment table: [0] = sky rgb + SH-valid flag, [1] = ground
+// rgb + env intensity, [2..10] = the probe's irradiance as L2 SH
+// (cosine-convolved, /pi - LightingPass::projectIrradianceSH). With a
+// probe, diffuse AND specular ambient both come from it under one
+// intensity (UE sky light); without one, the sky/ground hemisphere
+// times `ambient` is the fallback.
 [[vk::binding(3)]] StructuredBuffer<float4> env;
+
+float3 shIrradiance(float3 n) {
+  const float3 r =
+      env[2].rgb * 0.282095 + env[3].rgb * (0.488603 * n.y) +
+      env[4].rgb * (0.488603 * n.z) + env[5].rgb * (0.488603 * n.x) +
+      env[6].rgb * (1.092548 * n.x * n.y) +
+      env[7].rgb * (1.092548 * n.y * n.z) +
+      env[8].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) +
+      env[9].rgb * (1.092548 * n.x * n.z) +
+      env[10].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+  return max(r, float3(0.0));
+}
 // M9.1: the directional light's shadow map (this frame's shadow-chain
 // decode; the backend binds its view to the reflected sampler
 // bindings after the GBuffer pair) + the shadow parameter block
@@ -141,7 +156,13 @@ float shadowFactorLevel(float3 worldPos, float3 nrm, float ndl, uint base,
   // = sqrt(1-NoL^2)/NoL clamped; bias = constant + slopeScale*slope.
   const float slope =
       clamp(sqrt(saturate(1.0 - ndl * ndl)) / max(ndl, 1e-4), 0.0, 1.0);
-  const float bias = p4.y + slope * 0.01;
+  // UE ShadowRendering.cpp:2055: ShaderSlopeDepthBias = DepthBias *
+  // SlopeScaleDepthBias (CSM slope scale 3) - the slope term scales
+  // WITH the constant bias. The fixed 0.01 it replaced was 6.7x the
+  // constant bias at max slope = ~0.4 m along the light ray in this
+  // 40 m depth range: contact shadows detached from their casters
+  // (peter-panning) on every low-sun receiver.
+  const float bias = p4.y * (1.0 + 3.0 * slope);
   const float depth = clipN.z - bias;
   const float texel = 1.0 / p4.x;
   const float transitionScale = 400.0;
@@ -253,12 +274,12 @@ float3 fresnelSchlick(float ct, float3 f0) {
   for (uint i = 0; i < lightCount; ++i) {
     const float4 meta = lights[i].a;
     const float4 radiance = lights[i].b;
+    // The light vector FIRST: the half vector and the shadow's slope
+    // bias both depend on it (they used to read the still-unassigned
+    // `l` - an undefined half vector put the GGX lobe around N.V
+    // instead of N.H, and the slope bias read garbage).
     float3 l;
     float3 li = radiance.rgb;
-    const float3 h = normalize(viewDir + l);
-    const float ndlRaw = max(dot(nrm, l), 0.0);
-    const float shadow =
-        (meta.w < 0.5) ? shadowFactor(worldPos, nrm, ndlRaw) : 1.0;
     if (meta.w < 0.5) {
       l = normalize(meta.xyz);  // directional: TO light
     } else {
@@ -272,6 +293,10 @@ float3 fresnelSchlick(float ct, float3 f0) {
       li *= att / max(distL * distL, 1e-4);
     }
     const float ndl = max(dot(nrm, l), 0.0);
+    if (ndl <= 0.0) continue;  // facing away: no diffuse, no specular
+    const float3 h = normalize(viewDir + l);
+    const float shadow =
+        (meta.w < 0.5) ? shadowFactor(worldPos, nrm, ndl) : 1.0;
     const float ndh = max(dot(nrm, h), 0.0);
     const float3 f = fresnelSchlick(max(dot(h, viewDir), 0.0), f0);
     // UE DefaultLitBxDF (ShadingModels.ush:180): specular = D * Vis
@@ -289,8 +314,12 @@ float3 fresnelSchlick(float ct, float3 f0) {
   }
 
   // Hemisphere ambient (M8.3): sky from above, ground from below -
-  // the cheap diffuse-IBL stand-in for a prefiltered probe.
-  const float3 hemi = lerp(env[1].rgb, env[0].rgb, nrm.y * 0.5 + 0.5);
+  // the cheap diffuse-IBL stand-in for a prefiltered probe. The engine
+  // is Z-UP (the equirect probe below, the light rig and the glTF axis
+  // fix all agree): the blend axis is n.z (it was n.y - every
+  // horizontal surface got the half/half average and vertical faces
+  // flipped sky/ground with their azimuth).
+  const float3 hemi = lerp(env[1].rgb, env[0].rgb, nrm.z * 0.5 + 0.5);
   // Specular ambient (IBL): the environment probe sampled along the
   // REFLECTED view ray, LOD = roughness * maxLod (the mip chain is
   // the prefiltered radiance ladder), through the UE-mobile analytic
@@ -299,15 +328,36 @@ float3 fresnelSchlick(float ct, float3 f0) {
   const float3 rdir = reflect(-viewDir, nrm);
   const float2 equi = float2(atan2(rdir.y, rdir.x) / 6.28318530718 + 0.5,
                              acos(clamp(rdir.z, -1.0, 1.0)) / 3.14159265359);
-  const float3 rHemi =
-      envMap.SampleLevel(float3(equi, 0.0), rm.x * push.viewportAmb.w).rgb;
+  // Roughness -> mip: UE's ComputeReflectionCaptureMipFromRoughness
+  // (ReflectionEnvironmentShared.ush: LevelFrom1x1 = 1 - 1.2 *
+  // log2(roughness), mip = cubeMips - 1 - LevelFrom1x1). An equirect of
+  // width W holds the same texel density as a W/4 cube face, i.e. a
+  // cube with maxLod - 1 mips: mip = maxLod - 3 + 1.2 * log2(r). The
+  // old linear r * maxLod under-blurred every mid roughness (r 0.25 ->
+  // mip 2.3 vs 3.6) - mirror-sharp reflections on satin surfaces.
+  const float maxLod = push.viewportAmb.w;
+  const float envMip =
+      clamp(maxLod - 3.0 + 1.2 * log2(max(rm.x, 0.001)), 0.0, maxLod);
+  const float3 rHemi = envMap.SampleLevel(float3(equi, 0.0), envMip).rgb;
+  // UE EnvBRDFApprox (BRDF.ush:622): the Lazarov fit, with F90 =
+  // saturate(50 * f0.g) on the bias term (the same <2% "shadowing"
+  // rule as the direct Fresnel - the bias term ignored it).
   const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
   const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
   const float4 rr = float4(rm.x) * c0 + c1;
   const float a004 = min(rr.x * rr.x, exp2(-9.28 * ndv)) * rr.x + rr.y;
   const float2 ab = float2(-1.04, 1.04) * a004 + rr.zw;
-  const float3 envSpec = (f0 * ab.x + ab.y) * rHemi;
-  const float3 color = albedo * push.viewportAmb.z * hemi + envSpec + lo;
+  const bool probe = env[0].w > 0.5;
+  const float envIntensity = probe ? env[1].w : 1.0;
+  const float3 envSpec =
+      (f0 * ab.x + saturate(50.0 * f0.g) * ab.y) * rHemi * envIntensity;
+  // Diffuse ambient carries the same (1 - metallic) as the direct
+  // Lambert term - a metal has no diffuse lobe (it used to get the
+  // full albedo * ambient on top of its specular reflection).
+  const float3 diffuseColor = albedo * (1.0 - rm.y);
+  const float3 ambientIrr =
+      probe ? shIrradiance(nrm) * envIntensity : hemi * push.viewportAmb.z;
+  const float3 color = diffuseColor * ambientIrr + envSpec + lo;
   // HDR out - scrub garbage (crossing-triangle paths) to the
   // BACKGROUND sentinel (alpha 0); magenta was too easy to miss
   // under an exposure curve.

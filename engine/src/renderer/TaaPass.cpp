@@ -43,17 +43,18 @@ bool TaaPass::init(backend::IRenderBackend& backend,
 
 void TaaPass::draw(backend::IRenderBackend& backend, const TaaFrame& frame,
                    u32 width, u32 height) {
-  if (m_pipeline == ~0u || m_params == ~0u || width == 0 || height == 0)
-    return;
+  if (m_pipeline == ~0u || m_params == ~0u || width == 0 || height == 0) return;
   // taa.slang's TaaParams, glm raw (std430: mat4 rows at 16B).
   auto* p = static_cast<glm::vec4*>(backend.mappedPtr(m_params));
   const glm::vec4* inv = reinterpret_cast<const glm::vec4*>(&frame.invViewProj);
-  const glm::vec4* prev = reinterpret_cast<const glm::vec4*>(&frame.prevViewProj);
+  const glm::vec4* prev =
+      reinterpret_cast<const glm::vec4*>(&frame.prevViewProj);
   for (int r = 0; r < 4; ++r) p[r] = inv[r];
   for (int r = 0; r < 4; ++r) p[4 + r] = prev[r];
   p[8] = glm::vec4(frame.camPos, frame.blend);
-  p[9] = glm::vec4(1.0f / static_cast<f32>(width),
-                   1.0f / static_cast<f32>(height), 0.0f, frame.sharpen);
+  p[9] =
+      glm::vec4(1.0f / static_cast<f32>(width), 1.0f / static_cast<f32>(height),
+                frame.exposure, frame.sharpen);
   p[10] = glm::vec4(frame.jitter, 0.0f, 0.0f);
   const u32 handles[1] = {m_params};
   backend.drawTaa(m_pipeline, handles, 1, nullptr, 0, width, height);

@@ -272,12 +272,13 @@ bool occluded(uint2 item, float4x4 model)
                        model[2].xyz * cluster.bounds.z + model[3].xyz;
       const float sphereR = cluster.bounds.w * maxScale;
       const float dist = max(distance(c, params[0].xyz) - sphereR, 0.1);
-      // Near-plane guard: a cluster whose bounds sphere reaches the
-      // near plane stays on SW - its crossing triangles need the
-      // Sutherland-Hodgman clip; the HW VS's screen-space quantized
-      // varyings go NaN on w<=0 corners and its PS drops the whole
-      // triangle (holes at close range).
-      if (dist < sphereR + params[1].z) hw = false;
+      // Near-plane clusters route to HW (UE: bUseHWRaster |=
+      // Cull.bNeedsClipping): the fixed-function clipper handles crossing
+      // triangles (raster_hw's clipped mode), while SW would Sutherland-
+      // Hodgman-clip and scan the largest, closest triangles of the frame -
+      // its worst case. (The guard used to force these to SW: the old HW
+      // VS divided by w for its snap.)
+      const bool nearCross = dist < sphereR + params[1].z;
       // [6].w > 0 = perspective tanHalf (px/unit falls with distance);
       // < 0 = -extentY for ortho chains (shadow clipmaps) - px/unit is
       // distance-free there; dividing by dist under-estimated edgePx
@@ -288,7 +289,7 @@ bool occluded(uint2 item, float4x4 model)
               : (params[6].z * 0.5) / max(-params[6].w, 1e-6);
       const float edgePx =
           aabbs[3u * item.y + 2u].x * maxScale * pxPerUnit;
-      hw = hw && edgePx >= params[7].y;
+      hw = nearCross || edgePx >= params[7].y;
     }
     if (hw) {
       uint hs = 0;

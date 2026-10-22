@@ -20,9 +20,16 @@
 //     Scene.cpp defaults Slope 0.88 / Toe 0.55 / Shoulder 0.26 /
 //     BlackClip 0 / WhiteClip 0.04 - glow module, red modifier, log10
 //     toe/straight/shoulder with the 0.18 matching, pre/post
-//     desaturation). One divergence: our scene color is linear-sRGB,
-//     UE's is AP1 working space; the curve is fed our linear values
-//     directly (gamut transform skipped, v1).
+//     desaturation). Fed like UE's CombineLUTs: linear sRGB -> AP1
+//     (sRGB_2_AP1), FilmToneMap in AP1, back with AP1_2_sRGB (the v1
+//     port skipped the gamut transforms and pushed sRGB values through
+//     an AP1 curve - shifted hues/saturation).
+//
+// Coverage (M9 TAA v3): the TAA resolve carries a PREMULTIPLIED
+// coverage alpha (antialiased silhouettes against the background);
+// the tonemap un-premultiplies, maps the surface color and composites
+// it over the clear color in display space. Non-TAA frames only ever
+// hold alpha 0/1, so their output is unchanged.
 //
 // Bindings (set 0):
 //   0: Sampler2D hdrTex - this frame slot's RGBA16F HDR target (the
@@ -79,6 +86,16 @@ static const float3x3 kAP1_2_AP0 = {
     -0.0055258826, 0.0040252103, 1.0015006723};
 static const float3 kAP1_RGB2Y = {0.2722287168, 0.6740817658,
                                   0.0536895174};
+// UE TonemapCommon.ush: sRGB_2_AP1 = XYZ_2_AP1 * D65_2_D60 * sRGB_2_XYZ
+// and its inverse, evaluated from ACESCommon.ush's constants.
+static const float3x3 kSRGB_2_AP1 = {
+     0.6130974024, 0.3395231461, 0.0473794514,
+     0.0701937225, 0.9163538791, 0.0134523986,
+     0.0206155929, 0.1095697729, 0.8698146341};
+static const float3x3 kAP1_2_SRGB = {
+     1.7050509926, -0.6217921205, -0.0832588722,
+    -0.1302564175,  1.1408047365, -0.0105483190,
+    -0.0240033568, -0.1289689761,  1.1529723328};
 
 float ueRgb2Saturation(float3 rgb)
 {
@@ -221,7 +238,7 @@ float3 linearToSrgb(float3 c)
 float4 fsMain(float4 frag : SV_Position) : SV_Target
 {
     const float2 uv = frag.xy * push.modeViewport.yz;
-    const float4 hdr4 = hdrTex.SampleLevel(uv, 0.0);
+    float4 hdr4 = hdrTex.SampleLevel(uv, 0.0);
     // Background sentinel: ALPHA 0 passes the clear color through
     // (see the header - an rgb test would misclassify legitimately
     // black lit pixels).
@@ -232,22 +249,29 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     // RESOLVED frame claws it back. Applied HERE - never inside the
     // resolve, whose output is the next frame's history (a baked-in
     // unsharp re-applies itself every frame = exponential ringing).
-    float3 hdr = hdr4.rgb;
+    // Premultiplied: rgb AND coverage sharpen together, so an edge
+    // against the background does not get a bright rim from the
+    // zero-rgb background neighbors.
     if (push.modeViewport.w > 0.0)
     {
         const float2 t = push.modeViewport.yz;
-        float3 nb = float3(0.0);
-        nb += hdrTex.SampleLevel(uv + float2(-t.x, 0.0), 0.0).rgb;
-        nb += hdrTex.SampleLevel(uv + float2(t.x, 0.0), 0.0).rgb;
-        nb += hdrTex.SampleLevel(uv + float2(0.0, -t.y), 0.0).rgb;
-        nb += hdrTex.SampleLevel(uv + float2(0.0, t.y), 0.0).rgb;
-        nb += hdrTex.SampleLevel(uv + float2(-t.x, -t.y), 0.0).rgb;
-        nb += hdrTex.SampleLevel(uv + float2(t.x, -t.y), 0.0).rgb;
-        nb += hdrTex.SampleLevel(uv + float2(-t.x, t.y), 0.0).rgb;
-        nb += hdrTex.SampleLevel(uv + float2(t.x, t.y), 0.0).rgb;
-        hdr = max(hdr + (hdr - nb * (1.0 / 8.0)) * push.modeViewport.w,
-                  float3(0.0));
+        float4 nb = float4(0.0);
+        nb += hdrTex.SampleLevel(uv + float2(-t.x, 0.0), 0.0);
+        nb += hdrTex.SampleLevel(uv + float2(t.x, 0.0), 0.0);
+        nb += hdrTex.SampleLevel(uv + float2(0.0, -t.y), 0.0);
+        nb += hdrTex.SampleLevel(uv + float2(0.0, t.y), 0.0);
+        nb += hdrTex.SampleLevel(uv + float2(-t.x, -t.y), 0.0);
+        nb += hdrTex.SampleLevel(uv + float2(t.x, -t.y), 0.0);
+        nb += hdrTex.SampleLevel(uv + float2(-t.x, t.y), 0.0);
+        nb += hdrTex.SampleLevel(uv + float2(t.x, t.y), 0.0);
+        hdr4 = max(hdr4 + (hdr4 - nb * (1.0 / 8.0)) * push.modeViewport.w,
+                   float4(0.0));
+        hdr4.a = saturate(hdr4.a);
+        if (hdr4.a <= 0.0)
+            return float4(push.clearColorExp.rgb, 1.0);
     }
+    const float coverage = hdr4.a;
+    const float3 hdr = hdr4.rgb / coverage;  // un-premultiply
     const float3 mapped = hdr * push.clearColorExp.a;
     float3 outColor;
     if (push.modeViewport.x < 0.5)
@@ -261,10 +285,16 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     }
     else
     {
-        outColor = filmToneMap(mapped);
+        outColor = max(mul(kAP1_2_SRGB, filmToneMap(mul(kSRGB_2_AP1, mapped))),
+                       float3(0.0));
     }
     if (!(outColor.x >= 0.0) || !(outColor.y >= 0.0) ||
         !(outColor.z >= 0.0))
         return float4(0.5, 0.0, 0.5, 1.0);  // magenta sentinel
-    return float4(linearToSrgb(outColor), 1.0);
+    const float3 display = linearToSrgb(saturate(outColor));
+    if (coverage >= 1.0)
+        return float4(display, 1.0);
+    // Fractional coverage (TAA silhouettes): composite over the clear
+    // color in display space.
+    return float4(lerp(push.clearColorExp.rgb, display, coverage), 1.0);
 }

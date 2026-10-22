@@ -275,7 +275,7 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   m_meshMaterialBase.push_back(static_cast<u32>(m_materialData.size() / 8u));
   for (const auto& mat : dag.materials) {
     f32 r[8] = {mat.kd[0],     mat.kd[1],    mat.kd[2],      mat.texLayer,
-                mat.roughness, mat.metallic, mat.mrTexLayer, 0.0f};
+                mat.roughness, mat.metallic, mat.mrTexLayer, mat.nrmTexLayer};
     m_materialData.insert(m_materialData.end(), r, r + 8);
     m_materialTexPaths.push_back(mat.texPath);
   }

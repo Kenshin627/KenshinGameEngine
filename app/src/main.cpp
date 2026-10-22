@@ -34,8 +34,6 @@
 
 #include "DemoScene.h"
 #include "KgeoPreview.h"
-#include "stb/stb_image.h"  // env.hdr decode (impl: engine's stb_image_impl)
-
 #include "kenshin/DebugOverlay.h"
 #include "kenshin/Engine.h"
 #include "kenshin/Version.h"
@@ -57,11 +55,13 @@
 #include "kenshin/renderer/StreamingManager.h"
 #include "kenshin/renderer/TaaPass.h"
 #include "kenshin/renderer/TonemapPass.h"
+#include "kenshin/renderer/TranslucentPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
 #include "kenshin/scene/Camera.h"
 #include "kenshin/scene/CameraController.h"
 #include "kenshin/util/BmpWriter.h"
+#include "stb/stb_image.h"  // env.hdr decode (impl: engine's stb_image_impl)
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -142,6 +142,7 @@ struct Args {
                                 // the 2026-09-19 A/B (+82% pure-SW, bit-exact)
   bool rasterBase = false;      // A/B: force the baseline walk (mode 0)
   bool rasterProbe = false;     // coverage histogram probe ([rasthist])
+  bool hwPxStats = false;       // --hw-px-stats: count HW pixel writes
   bool noTaa = false;           // M9 A/B: disable temporal AA
   bool forceTaa = false;        // --taa: force ON over the parked default
   bool imposterDebug = false;   // --imposter-debug: imposters replace the
@@ -163,6 +164,8 @@ struct Args {
   float camYaw = 0, camPitch = 0, camDist = 0;
   float camTarget[3] = {0, 0, 0};
   int viewMode = -1;            // --view; -1 = leave the panel state at Final
+  float exposure = -1.0f;       // --exposure: seeds the panel value
+  float envIntensity = -1.0f;   // --env-intensity: seeds the panel value
   float hwThresholdPx = -1.0f;  // --hw-threshold: the SW/HW routing edge
                                 // threshold (UE's r.Nanite.MinPixelsPerEdgeHW
                                 // twin; <0 = keep the engine default)
@@ -185,6 +188,10 @@ Args parseArgs(int argc, char** argv) {
       args.routeHw = true;
     else if (std::strcmp(argv[i], "--force-hw") == 0)
       args.forceHw = true;
+    else if (std::strcmp(argv[i], "--exposure") == 0 && i + 1 < argc)
+      args.exposure = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--env-intensity") == 0 && i + 1 < argc)
+      args.envIntensity = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--hw-threshold") == 0 && i + 1 < argc)
       args.hwThresholdPx = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
@@ -219,6 +226,8 @@ Args parseArgs(int argc, char** argv) {
       args.rasterBase = true;
     else if (std::strcmp(argv[i], "--raster-probe") == 0)
       args.rasterProbe = true;
+    else if (std::strcmp(argv[i], "--hw-px-stats") == 0)
+      args.hwPxStats = true;
     else if (std::strcmp(argv[i], "--no-shadows") == 0)
       args.noShadows = true;
     else if (std::strcmp(argv[i], "--no-taa") == 0)
@@ -333,6 +342,42 @@ kenshin::u32 shadowTileMask(const glm::mat4& lightVP,
   return mask;
 }
 
+/// f32 -> IEEE half bits (round-to-nearest-even, denormals kept,
+/// overflow to inf, NaN preserved). The old inline versions computed
+/// the biased exponent as an UNSIGNED ex - 112: every value below 2^-14
+/// wrapped to a huge exponent and became +INF - one dark texel in an
+/// env.hdr poisoned its whole mip pyramid (inf/NaN reflections).
+kenshin::u16 f32ToHalf(float v) {
+  kenshin::u32 b;
+  std::memcpy(&b, &v, sizeof(b));
+  const kenshin::u32 sign = (b >> 16) & 0x8000u;
+  const kenshin::u32 absBits = b & 0x7FFFFFFFu;
+  if (absBits >= 0x7F800000u)  // inf / NaN
+    return kenshin::u16(sign | 0x7C00u | (absBits > 0x7F800000u ? 0x200u : 0u));
+  if (absBits >= 0x477FF000u)  // rounds to >= 65520: overflow
+    return kenshin::u16(sign | 0x7C00u);
+  if (absBits < 0x33000000u)  // < 2^-25: rounds to zero
+    return kenshin::u16(sign);
+  const int ex = int(absBits >> 23) - 127;
+  kenshin::u32 man = (absBits & 0x7FFFFFu) | 0x800000u;  // implicit 1
+  int shift;
+  kenshin::u32 he;
+  if (ex < -14) {  // denormal half
+    shift = 13 + (-14 - ex);
+    he = 0;
+  } else {
+    shift = 13;
+    he = kenshin::u32(ex + 15);
+    man &= 0x7FFFFFu;
+  }
+  kenshin::u32 hm = man >> shift;
+  const kenshin::u32 rem = man & ((1u << shift) - 1u);
+  const kenshin::u32 half = 1u << (shift - 1);
+  if (rem > half || (rem == half && (hm & 1u))) ++hm;  // RNE
+  // A mantissa carry rolls into the exponent naturally.
+  return kenshin::u16(sign | ((he << 10) + hm));
+}
+
 /// M9 TAA jitter: Halton(2,3) - the standard low-discrepancy 8-phase
 /// subpixel sequence (UE's r.PostProcessing... TAA jitter twin).
 glm::vec2 halton23(int i) {
@@ -389,6 +434,9 @@ struct VgDebugState {
   kenshin::u32 missPages = 0;     // M6.3 touched-absent pages
   bool occlusion = true;
   bool hierCull = true;  // M5.2: BVH8 traversal (off = linear A/B)
+  // HW-path pixel writes in the writes/coverage stats (costly: one
+  // atomic per HW fragment) - off = SW pixels only.
+  bool hwPxStats = false;
   // M8.1 lighting rig (panel-adjustable; the light TABLE stays
   // deterministic - static positions, no time animation, keeping the
   // render regression byte-comparable).
@@ -404,7 +452,10 @@ struct VgDebugState {
   // dark enough for their color to read.
   kenshin::f32 lightIntensity = 2.4f;
   kenshin::f32 pointIntensity = 1.2f;
-  kenshin::f32 ambient = 0.15f;
+  kenshin::f32 ambient = 0.15f;  // hemisphere fallback only (no probe)
+  // The IBL probe's intensity on BOTH ambient terms (SH diffuse +
+  // prefiltered specular).
+  kenshin::f32 envIntensity = 0.7f;
   kenshin::f32 exposure = 1.5f;
   // M8.3: the hemisphere ambient's two poles + tonemap operator.
   // Neutral-gray hemisphere by default: colored poles (the old blue
@@ -531,8 +582,13 @@ int main(int argc, char** argv) {
   kenshin::renderer::MaterialDecodePass decodePass;
   kenshin::renderer::LightingPass lightingPass;  // M8.1 deferred pair
   bool lightingReady = false;
-  kenshin::renderer::TonemapPass tonemapPass;    // M8.3 HDR chain tail
-  kenshin::renderer::TaaPass taaPass;            // M9 temporal resolve
+  kenshin::renderer::TonemapPass tonemapPass;  // M8.3 HDR chain tail
+  kenshin::renderer::TaaPass taaPass;          // M9 temporal resolve
+  // glTF BLEND materials: the builder's <name>.tmesh side file, drawn
+  // forward-lit after the deferred lighting (UE: translucency never
+  // goes through Nanite).
+  kenshin::renderer::TranslucentPass translucentPass;
+  bool translucentTried = false;
   kenshin::renderer::ImposterPass imposterPass;  // M9.2 tiny instances
   bool imposterReady = false;
   std::vector<kenshin::u32> meshAtlasBase;    // per meshId -> atlas word
@@ -545,6 +601,11 @@ int main(int argc, char** argv) {
   glm::mat4 taaPrevViewProj{1.0f};  // UNJITTERED previous frame VP
   bool taaPrevValid = false;
   int taaWarmup = 0;  // frames since (re)validation
+  // The history is only valid if the resolve ran on the PREVIOUS frame:
+  // toggling TAA off/on or visiting a debug view leaves a stale history
+  // that would ghost in for a frame (the warmup only covered startup).
+  bool taaHistoryLive = false;
+  bool taaRanThisFrame = false;
   bool tonemapReady = false;
   kenshin::renderer::DecodeParams decodeParams;
   // M6.3: page-streaming driver (v3 assets; null otherwise).
@@ -569,6 +630,8 @@ int main(int argc, char** argv) {
       kgeoMode = true;
       vgDebug.pixelThreshold = args.lodThreshold;
       if (args.hwThresholdPx > 0.0f) vgDebug.hwThresholdPx = args.hwThresholdPx;
+      if (args.exposure > 0.0f) vgDebug.exposure = args.exposure;
+      if (args.envIntensity >= 0.0f) vgDebug.envIntensity = args.envIntensity;
 
       // S4.1: the dag also goes to the GPU-resident virtual geometry
       // pools (cluster/group tables + shared vertex/index pools), CRC
@@ -593,9 +656,13 @@ int main(int argc, char** argv) {
       if (pagedAsset && !kgeoPreview.dag.materials.empty()) {
         const auto kgeoDir = std::filesystem::path(args.kgeo).parent_path();
         for (auto& mat : kgeoPreview.dag.materials) {
-          for (int slot = 0; slot < 2; ++slot) {
-            std::string& path = slot == 0 ? mat.texPath : mat.mrPath;
-            kenshin::f32& layerF = slot == 0 ? mat.texLayer : mat.mrTexLayer;
+          for (int slot = 0; slot < 3; ++slot) {
+            std::string& path = slot == 0   ? mat.texPath
+                                : slot == 1 ? mat.mrPath
+                                            : mat.nrmPath;
+            kenshin::f32& layerF = slot == 0   ? mat.texLayer
+                                   : slot == 1 ? mat.mrTexLayer
+                                               : mat.nrmTexLayer;
             if (path.empty()) continue;
             const auto resolved =
                 path.find(':') == std::string::npos &&
@@ -914,6 +981,8 @@ int main(int argc, char** argv) {
               vgDebug.hwClusters);
           ImGui::Checkbox("occlusion", &vgDebug.occlusion);
           ImGui::Checkbox("BVH8 cull", &vgDebug.hierCull);
+          ImGui::SameLine();
+          ImGui::Checkbox("count HW px", &vgDebug.hwPxStats);
           ImGui::SliderFloat("pixel error", &vgDebug.pixelThreshold, 0.05f,
                              32.0f, "%.2f px", ImGuiSliderFlags_Logarithmic);
           ImGui::SliderFloat("HW route >=", &vgDebug.hwThresholdPx, 1.0f,
@@ -936,10 +1005,16 @@ int main(int argc, char** argv) {
             if (vgDebug.taa)
               ImGui::SliderFloat("sharpen", &vgDebug.taaSharpen, 0.0f, 1.0f);
             ImGui::SliderInt("shadow levels", &vgDebug.shadowLevels, 1, 3);
-            ImGui::Combo("tonemap", &vgDebug.tonemapMode, "Reinhard\0ACES\0");
-            ImGui::ColorEdit3("sky", &vgDebug.skyColor.x);
-            ImGui::ColorEdit3("ground", &vgDebug.groundColor.x);
-            ImGui::SliderFloat("ambient", &vgDebug.ambient, 0.0f, 0.5f, "%.3f");
+            // Three items: the default (2, UE Filmic) was unselectable
+            // and rendered as a blank combo.
+            ImGui::Combo("tonemap", &vgDebug.tonemapMode,
+                         "Reinhard\0ACES\0Filmic (UE)\0");
+            ImGui::SliderFloat("env intensity", &vgDebug.envIntensity, 0.0f,
+                               4.0f, "%.2f");
+            ImGui::ColorEdit3("sky (no probe)", &vgDebug.skyColor.x);
+            ImGui::ColorEdit3("ground (no probe)", &vgDebug.groundColor.x);
+            ImGui::SliderFloat("ambient (no probe)", &vgDebug.ambient, 0.0f,
+                               0.5f, "%.3f");
             ImGui::SliderFloat("exposure", &vgDebug.exposure, 0.1f, 4.0f,
                                "%.2f");
           }
@@ -1027,6 +1102,9 @@ int main(int argc, char** argv) {
   kenshin::u32 envTexture =
       kenshin::backend::IRenderBackend::kInvalidTextureHandle;
   float envMaxLod = 1.0f;
+  // Diffuse IBL from the SAME probe (SH irradiance) - see LightingPass.
+  kenshin::renderer::LightingPass::IrradianceSH envSH{};
+  bool envShValid = false;
   if (virtualPath) {
     vgScene = &engine.get<kenshin::renderer::VirtualGeometryScene>();
     vgBackend = &engine.get<kenshin::backend::IRenderBackend>();
@@ -1034,67 +1112,157 @@ int main(int argc, char** argv) {
     // IBL environment: an env.hdr next to the loaded asset wins (a
     // real Radiance HDRI - rich structured reflections); the
     // procedural studio probe is the fallback.
-  {
-    const std::filesystem::path envPath =
-        std::filesystem::path(args.kgeo).parent_path() / "env.hdr";
-    if (std::filesystem::exists(envPath)) {
-      int ew = 0, eh = 0, ec = 0;
-      float* data = stbi_loadf(envPath.string().c_str(), &ew, &eh, &ec, 4);
-      if (data && ew > 0 && eh > 0) {
-        std::vector<kenshin::u16> half(kenshin::usize(ew) * eh * 4);
-        for (kenshin::usize i = 0; i < half.size(); ++i) {
-          const kenshin::u32 b =
-              *reinterpret_cast<const kenshin::u32*>(&data[i]);
-          const kenshin::u32 sign = (b >> 16) & 0x8000u;
-          const kenshin::u32 ex = (b >> 23) & 0xFFu;
-          const kenshin::u32 man = b & 0x7FFFFFu;
-          kenshin::u16 hf;
-          if (ex >= 255)
-            hf = kenshin::u16(sign | 0x7C00u | (man ? 0x200u : 0));
-          else if (ex < 98)
-            hf = 0;
-          else {
-            const kenshin::u32 e2 = ex - 127 + 15;
-            hf = e2 >= 31 ? kenshin::u16(sign | 0x7C00u)
-                          : kenshin::u16(sign | (e2 << 10) | (man >> 13));
+    {
+      const std::filesystem::path envPath =
+          std::filesystem::path(args.kgeo).parent_path() / "env.hdr";
+      if (std::filesystem::exists(envPath)) {
+        int ew = 0, eh = 0, ec = 0;
+        // Decode from memory with the Radiance header normalized:
+        // stb_image requires the resolution line to START with "-Y "
+        // and rejects writers that emit whitespace before it (a blank
+        // line followed by " -Y 512 +X 1024" -> "unsupported data
+        // layout"), which left the env.hdr IBL silently on the
+        // procedural fallback.
+        std::vector<unsigned char> hdrBytes;
+        if (FILE* hf = std::fopen(envPath.string().c_str(), "rb")) {
+          std::fseek(hf, 0, SEEK_END);
+          const long len = std::ftell(hf);
+          std::fseek(hf, 0, SEEK_SET);
+          if (len > 0) {
+            hdrBytes.resize(static_cast<size_t>(len));
+            if (std::fread(hdrBytes.data(), 1, hdrBytes.size(), hf) !=
+                hdrBytes.size())
+              hdrBytes.clear();
           }
-          half[i] = hf;
+          std::fclose(hf);
         }
-        stbi_image_free(data);
-        if (vgBackend) {
-          kenshin::backend::IRenderBackend::TextureArrayDesc ed;
-          ed.width = kenshin::u32(ew);
-          ed.height = kenshin::u32(eh);
-          ed.layers = 1;
-          ed.hdr = true;
-          ed.rgba = reinterpret_cast<const kenshin::u8*>(half.data());
-          ed.bytes = half.size() * sizeof(kenshin::u16);
-          ed.debugName = "ibl-env-hdr";
-          envTexture = vgBackend->createTextureArray(ed);
-          envMaxLod = std::floor(std::log2(float(ew))) + 1.0f - 1.0f;
-          KENSHIN_INFO("[ibl] loaded {} ({}x{}, {} mips) -> handle {}",
-                       envPath.string(), ew, eh, int(envMaxLod) + 1,
-                       envTexture);
+        // The header ends at the first blank line; strip spaces/tabs
+        // between it and the resolution string.
+        for (size_t i = 0; i + 1 < hdrBytes.size() && i < 4096; ++i) {
+          if (hdrBytes[i] == '\n' && hdrBytes[i + 1] == '\n') {
+            size_t j = i + 2;
+            while (j < hdrBytes.size() &&
+                   (hdrBytes[j] == ' ' || hdrBytes[j] == '\t'))
+              ++j;
+            hdrBytes.erase(hdrBytes.begin() + static_cast<long>(i + 2),
+                           hdrBytes.begin() + static_cast<long>(j));
+            break;
+          }
         }
-      } else if (data == nullptr) {
-        KENSHIN_WARN("[ibl] {} failed to decode (stbi: {})", envPath.string(),
-                     stbi_failure_reason() ? stbi_failure_reason() : "?");
+        float* data = hdrBytes.empty() ? nullptr
+                                       : stbi_loadf_from_memory(
+                                             hdrBytes.data(),
+                                             static_cast<int>(hdrBytes.size()),
+                                             &ew, &eh, &ec, 4);
+        if (data && ew > 0 && eh > 0) {
+          std::vector<kenshin::u16> half(kenshin::usize(ew) * eh * 4);
+          for (kenshin::usize i = 0; i < half.size(); ++i) {
+            // Radiance is non-negative and finite by definition: clamp
+            // stray negatives/NaN/inf out of the probe (one bad texel
+            // smears through every mip).
+            float v = data[i];
+            if (!(v >= 0.0f)) v = 0.0f;
+            if (v > 65000.0f) v = 65000.0f;
+            data[i] = v;
+          }
+          // Sun extraction (the Filament / UE sky+sun split): an outdoor
+          // HDRI's sun disk is orders of magnitude above the sky (this
+          // one peaks at 5e4 vs a ~1 sky). Left in, it lights everything
+          // a SECOND time - through the SH diffuse and the blurred mips -
+          // from a direction the demo key light and its shadow map know
+          // nothing about. Texels above kSun are summed into the sun's
+          // irradiance (sum L * dw) and luminance-weighted direction,
+          // clamped to kSun in the probe, and the directional light
+          // takes the sun over (its shadows then agree with the
+          // reflections). Same equirect Z-up convention as the shader.
+          {
+            constexpr float kSun = 100.0f;
+            const double kPi = 3.14159265358979323846;
+            glm::dvec3 irr(0.0), dirSum(0.0);
+            kenshin::usize sunTexels = 0;
+            for (int y = 0; y < eh; ++y) {
+              const double theta = (y + 0.5) / eh * kPi;
+              const double dw = (2.0 * kPi / ew) * (kPi / eh) * std::sin(theta);
+              for (int x = 0; x < ew; ++x) {
+                float* t = data + (kenshin::usize(y) * ew + x) * 4;
+                const float lum =
+                    0.2126f * t[0] + 0.7152f * t[1] + 0.0722f * t[2];
+                if (!(lum > kSun)) continue;
+                const double a = ((x + 0.5) / ew - 0.5) * 2.0 * kPi;
+                const glm::dvec3 d(std::cos(a) * std::sin(theta),
+                                   std::sin(a) * std::sin(theta),
+                                   std::cos(theta));
+                irr += glm::dvec3(t[0], t[1], t[2]) * dw;
+                dirSum += d * (double(lum) * dw);
+                const float s = kSun / lum;
+                t[0] *= s;
+                t[1] *= s;
+                t[2] *= s;
+                ++sunTexels;
+              }
+            }
+            if (sunTexels > 0 && glm::length(dirSum) > 0.0) {
+              const glm::vec3 sunDir = glm::normalize(glm::vec3(dirSum));
+              const glm::vec3 e(irr);
+              const float peak = std::max(e.r, std::max(e.g, e.b));
+              vgDebug.lightDir = sunDir;
+              vgDebug.lightColor = e / peak;
+              vgDebug.lightIntensity = peak;
+              // A captured HDRI is already in its own radiometric scale:
+              // 1.0 = as shot (0.7 is the procedural probe's calibration).
+              // An explicit --env-intensity still wins.
+              if (args.envIntensity < 0.0f) vgDebug.envIntensity = 1.0f;
+              KENSHIN_INFO(
+                  "[ibl] sun extracted: {} texels, dir ({:.2f}, "
+                  "{:.2f}, {:.2f}), irradiance ({:.2f}, {:.2f}, "
+                  "{:.2f}) -> directional light",
+                  sunTexels, sunDir.x, sunDir.y, sunDir.z, e.r, e.g, e.b);
+            }
+          }
+          for (kenshin::usize i = 0; i < half.size(); ++i)
+            half[i] = f32ToHalf(data[i]);
+          envSH = kenshin::renderer::LightingPass::projectIrradianceSH(
+              data, kenshin::u32(ew), kenshin::u32(eh));
+          envShValid = true;
+          stbi_image_free(data);
+          if (vgBackend) {
+            kenshin::backend::IRenderBackend::TextureArrayDesc ed;
+            ed.width = kenshin::u32(ew);
+            ed.height = kenshin::u32(eh);
+            ed.layers = 1;
+            ed.hdr = true;
+            ed.rgba = reinterpret_cast<const kenshin::u8*>(half.data());
+            ed.bytes = half.size() * sizeof(kenshin::u16);
+            ed.debugName = "ibl-env-hdr";
+            envTexture = vgBackend->createTextureArray(ed);
+            envMaxLod = std::floor(std::log2(float(ew))) + 1.0f - 1.0f;
+            KENSHIN_INFO("[ibl] loaded {} ({}x{}, {} mips) -> handle {}",
+                         envPath.string(), ew, eh, int(envMaxLod) + 1,
+                         envTexture);
+          }
+        } else if (data == nullptr) {
+          KENSHIN_WARN("[ibl] {} failed to decode (stbi: {})", envPath.string(),
+                       stbi_failure_reason() ? stbi_failure_reason() : "?");
+        }
       }
     }
-  }
-  // IBL: a procedural HDR studio environment, equirectangular Z-up
+    // IBL: a procedural HDR studio environment, equirectangular Z-up
     // (u = atan2(y,x)/2pi + 0.5, v = acos(z)/pi - the lighting shader's
     // sampling convention): a dim sky/ground gradient plus a bright
     // softbox centered on the key-light direction (reflections stay
     // consistent with the direct light + shadows). The GPU mip chain is
     // the prefiltered radiance ladder; roughness -> LOD at sample time.
     // env.hdr in effect? skip the procedural probe.
-    if (envTexture !=
-        kenshin::backend::IRenderBackend::kInvalidTextureHandle) {
+    if (envTexture != kenshin::backend::IRenderBackend::kInvalidTextureHandle) {
       KENSHIN_INFO("[ibl] env.hdr in effect (probe skipped)");
     } else {
       constexpr int kW = 512, kH = 256;
       std::vector<float> probe(kenshin::usize(kW) * kH * 4);
+      // The diffuse source: the same probe WITHOUT the key softbox -
+      // the softbox is the key light's reflection stand-in, and the
+      // key's diffuse is already the direct term (counting it in the
+      // irradiance too would double-light every surface).
+      std::vector<float> probeDiffuse(probe.size());
       const glm::vec3 kd = glm::normalize(glm::vec3(0.35f, 0.8f, 0.45f));
       for (int y = 0; y < kH; ++y) {
         const float v = (y + 0.5f) / kH;
@@ -1115,18 +1283,28 @@ int main(int argc, char** argv) {
           // blow it.
           // 6.5x: the dark camo's linear f0 (~0.04 after the sRGB
           // decode) needs studio-HDI radiance for the metal to read.
+          // ONE scale for the whole probe: it now lights both the
+          // diffuse (SH) and specular ambient, so it must sit in the
+          // same range as the key light (radiance ~2.4). The old 6.5x
+          // only lit reflections (diffuse rode a separate ~0.09
+          // hemisphere) - metals rendered as white chrome next to
+          // dim dielectrics.
           const float es = getenv("KENSHIN_ENV_SCALE")
-                               ? atof(getenv("KENSHIN_ENV_SCALE"))
-                               : 6.5f;
-          glm::vec3 c =
-              glm::mix(glm::vec3(0.35f, 0.34f, 0.32f) * es,
-                       glm::vec3(1.6f, 1.65f, 1.75f) * es, t * t);
+                               ? float(atof(getenv("KENSHIN_ENV_SCALE")))
+                               : 0.5f;
+          glm::vec3 c = glm::mix(glm::vec3(0.35f, 0.34f, 0.32f) * es,
+                                 glm::vec3(1.6f, 1.65f, 1.75f) * es, t * t);
+          const float dFill = std::max(0.0f, glm::dot(dir, -kd));
+          c += glm::vec3(0.55f, 0.65f, 0.85f) *
+               std::exp((dFill - 1.0f) * 20.0f) * 1.2f * es;
+          float* od = probeDiffuse.data() + (kenshin::usize(y) * kW + x) * 4;
+          od[0] = c.r;
+          od[1] = c.g;
+          od[2] = c.b;
+          od[3] = 1.0f;
           const float dKey = std::max(0.0f, glm::dot(dir, kd));
           c += glm::vec3(1.0f, 0.97f, 0.92f) * std::exp((dKey - 1.0f) * 12.0f) *
                5.0f;
-          const float dFill = std::max(0.0f, glm::dot(dir, -kd));
-          c += glm::vec3(0.55f, 0.65f, 0.85f) *
-               std::exp((dFill - 1.0f) * 20.0f) * 1.2f;
           float* o = probe.data() + (kenshin::usize(y) * kW + x) * 4;
           o[0] = c.r;
           o[1] = c.g;
@@ -1139,26 +1317,10 @@ int main(int argc, char** argv) {
       // as denormal garbage, a black environment).
       std::vector<kenshin::u16> half;
       half.reserve(probe.size());
-      for (const float v : probe) {
-        const kenshin::u32 b = *reinterpret_cast<const kenshin::u32*>(&v);
-        const kenshin::u32 sign = (b >> 16) & 0x8000u;
-        const kenshin::u32 ex = (b >> 23) & 0xFFu;
-        const kenshin::u32 man = b & 0x7FFFFFu;
-        kenshin::u16 hf;
-        if (ex >= 255)
-          hf = kenshin::u16(sign | 0x7C00u | (man ? 0x200u : 0));
-        else if (ex < 98)  // underflow to zero/denormal (env range:
-                           // values 0..8, plain zero is fine)
-          hf = 0;
-        else {
-          const kenshin::u32 e2 = ex - 127 + 15;
-          if (e2 >= 31)
-            hf = kenshin::u16(sign | 0x7C00u);
-          else
-            hf = kenshin::u16(sign | (e2 << 10) | (man >> 13));
-        }
-        half.push_back(hf);
-      }
+      for (const float v : probe) half.push_back(f32ToHalf(v));
+      envSH = kenshin::renderer::LightingPass::projectIrradianceSH(
+          probeDiffuse.data(), kW, kH);
+      envShValid = true;
       kenshin::backend::IRenderBackend::TextureArrayDesc ed;
       ed.width = kW;
       ed.height = kH;
@@ -1260,6 +1422,7 @@ int main(int argc, char** argv) {
 
   int frame = 0;
   while (window.pumpEvents()) {
+    taaRanThisFrame = false;
     auto& input = kenshin::core::Input::get();
     if (input.keyPressed(VK_ESCAPE)) {
       KENSHIN_INFO("ESC pressed -> close");
@@ -1375,10 +1538,13 @@ int main(int argc, char** argv) {
               si2.model = glm::mat4(0.0f);
               si2.bounds = glm::vec4(1e9f, 1e9f, 1e9f, 0.0f);
             }
-          KENSHIN_INFO("[dbg] shadowInsts: {} entries, b1=({},{},{},{})",
-                       shadowInsts.size(), shadowInsts[1].bounds.x,
-                       shadowInsts[1].bounds.y, shadowInsts[1].bounds.z,
-                       shadowInsts[1].bounds.w);
+          // (Index 1 only exists with a second mesh - the unguarded
+          // print read past a 1-entry vector.)
+          if (shadowInsts.size() > 1)
+            KENSHIN_INFO("[dbg] shadowInsts: {} entries, b1=({},{},{},{})",
+                         shadowInsts.size(), shadowInsts[1].bounds.x,
+                         shadowInsts[1].bounds.y, shadowInsts[1].bounds.z,
+                         shadowInsts[1].bounds.w);
           for (int lv = 0; lv < 3; ++lv)
             shadowChainReady =
                 shadowChains[lv].init(
@@ -1411,10 +1577,18 @@ int main(int argc, char** argv) {
         kenshin::renderer::ChainInputs ci;
         ci.view = camera.viewMatrix();
         // M9 TAA: subpixel NDC jitter (8-phase Halton(2,3)) rides the
-        // projection's [2][0]/[2][1] (clip.xy += jitter * clip.w); the
-        // resolve unprojects with the UNJITTERED pair so the jitter
-        // never leaks into reprojection.
-        const bool taaOn = (vgDebug.taa || args.forceTaa) && !args.noTaa;
+        // projection's [2][0]/[2][1]. glm RH: clip.w = -z_view, so the
+        // term adds jn * z_view = -jn * clip.w - content moves by -jn
+        // and the texel at uv shows the unjittered position uv + jn/2
+        // (taa.slang's convention). The resolve unprojects with the
+        // UNJITTERED pair so the jitter never leaks into reprojection.
+        // Jitter ONLY when this frame's resolve will undo it: the resolve
+        // runs in the Final view (the deferred branch below). Debug views
+        // (cluster / LOD / triangle ...) decode straight to the screen -
+        // jittering them showed the raw +-0.5 px per-frame shake, and
+        // resolving them would blend ID colors into meaningless mixes.
+        const bool taaOn = (vgDebug.taa || args.forceTaa) && !args.noTaa &&
+                           vgDebug.viewMode == 0 && taaReady && lightingReady;
         glm::mat4 projJ = camera.projMatrix();
         glm::vec2 taaJitterUV(0.0f);
         if (taaOn) {
@@ -1445,17 +1619,23 @@ int main(int argc, char** argv) {
         ci.imposterThresholdPx =
             (args.imposterDebug || vgDebug.imposterDebug) ? 4096.0f : 0.0f;
         ci.occlusionEnabled = vgDebug.occlusion && !args.noOcclusion;
-        // Pure SW is the default since the 2026-09-19 threshold sweep:
-        // mode-1 SW beat every routing configuration on all five scene
-        // shapes (micro-heavy carpet 147 vs 102 fps, coarse-LOD 144 vs
-        // 129, close-up zoom 357 vs 326, occlusion-on 155 vs 95) - the
-        // LOD bounds triangle screen sizes well below the point where
-        // fixed-function raster pays, and the near-plane guard keeps the
-        // genuinely huge triangles in SW anyway. --route-hw / --force-hw
-        // keep the HW path reachable for A/B; --no-hw is the default's
-        // no-op alias.
-        ci.hwMode = args.forceHw ? 2u : (args.routeHw ? 1u : 0u);
-        (void)args.noHw;
+        // HW/SW ROUTING is the default again (2026-10-22, UE's shape).
+        // The 2026-09-19 "pure SW beats every routing config" verdict
+        // measured a crippled HW path, not the routing idea: (1) the
+        // null pipeline ran conservative OVERESTIMATE (the VS emitted
+        // the unsnapped triangle), ~40% of HW time; (2) the PS counted
+        // pixels with a ONE-address atomic per fragment, ~70% of the
+        // rest; (3) HZB #1/#2 were built before the HW draw, so routed
+        // occluders vanished from occlusion; (4) the near guard sent
+        // the closest, largest triangles to SW (UE sends them to HW).
+        // With those fixed, 7-scene sweep (1080p, RTX 5060 Ti): routed
+        // beats pure SW everywhere - bigknot grid256 5.2 -> 4.0 ms, wall
+        // 2.4 -> 1.1, low-poly close-up 3.65 -> 0.95, far grid 2.1 ->
+        // 1.6; thresholds <= 8 px tie with force-HW, 32 px (UE's cvar)
+        // trails by 5-10%. --no-hw keeps pure SW for A/B; --route-hw is
+        // the default's alias.
+        ci.hwMode = args.forceHw ? 2u : (args.noHw ? 0u : 1u);
+        (void)args.routeHw;
         ci.hwThresholdPx = vgDebug.hwThresholdPx;  // CLI seeds, panel drives
         ci.cullMode = !vgDebug.hierCull || args.cullLinear
                           ? 0u
@@ -1467,6 +1647,10 @@ int main(int argc, char** argv) {
         // keeps the baseline walk reachable for same-binary A/B.
         ci.rasterMode = args.rasterBase ? 0u : 1u;
         ci.rasterProbe = args.rasterProbe ? 1u : 0u;
+        // The HW pixel-write stat is a per-fragment one-address atomic
+        // (serializes the HW path) - off unless asked; the panel's
+        // writes/coverage then count SW pixels only.
+        ci.hwPixelStats = args.hwPxStats || vgDebug.hwPxStats;
         // Panel stats: NON-BLOCKING mapped snapshot, taken BEFORE this
         // frame's execute. At this point the CURRENT slot's counters
         // still hold the frame-before-last's final values, and
@@ -1561,9 +1745,13 @@ int main(int argc, char** argv) {
           }
           if (quadCount > 0) {
             imposterPass.setPairs(*vgBackend, pairs, pairCount);
+            // The JITTERED matrix: the injected depth competes in the
+            // same VisBuffer atomic as the (jittered) chain raster, and
+            // an unjittered impostor would wobble against it after the
+            // resolve's jitter compensation.
             imposterPass.draw(*vgBackend, chain.visBufferCurrent(*vgBackend),
-                              camera.viewProjMatrix(), camera.position(),
-                              ci.width, ci.height, quads, quadCount);
+                              viewProjJ, camera.position(), ci.width, ci.height,
+                              quads, quadCount);
           }
         }
 
@@ -1807,19 +1995,58 @@ int main(int argc, char** argv) {
               vgDebug.ambient, vgDebug.skyColor, vgDebug.groundColor,
               shadowLevels,
               shadowsOn && vgDebug.viewMode == 0 ? shadowLevelCount : 0u, 12.0f,
-              shadowOrigin, ci.width, ci.height, envTexture, envMaxLod);
+              shadowOrigin, ci.width, ci.height, envTexture, envMaxLod,
+              envShValid ? &envSH : nullptr, vgDebug.envIntensity);
+          // Translucency (BLEND materials) - after the opaque lighting,
+          // BEFORE the TAA resolve, with the same jittered matrix the
+          // opaque frame used (TAA's jitter compensation then covers it).
+          if (!translucentTried) {
+            translucentTried = true;
+            const std::filesystem::path tpath =
+                std::filesystem::path(args.kgeo).replace_extension(".tmesh");
+            if (std::filesystem::exists(tpath))
+              translucentPass.init(*vgBackend, shaders, tpath.string());
+          }
+          if (translucentPass.ready()) {
+            // The loaded asset's instances (mesh 0); --ground and other
+            // extra meshes carry no translucency.
+            std::vector<glm::mat4> tInst;
+            for (const auto& inst : chainInstances)
+              if (inst.meshId == 0u) tInst.push_back(inst.model);
+            kenshin::renderer::TranslucentFrame tfr;
+            tfr.viewProj = viewProjJ;
+            tfr.camPos = camera.position();
+            tfr.nearZ = camera.nearPlane();
+            tfr.farZ = camera.farPlane();
+            tfr.lights = lights;
+            tfr.envSH = envShValid ? &envSH : nullptr;
+            tfr.envIntensity = vgDebug.envIntensity;
+            tfr.envTexture = envTexture;
+            tfr.envMaxLod = envMaxLod;
+            tfr.visBuffer = chain.visBufferCurrent(*vgBackend);
+            if (vgScene->paged()) {
+              tfr.sceneMaterials = vgScene->materialTableBuffer();
+              tfr.albedoTexture = albedoTexture;
+            }
+            tfr.instances = tInst;
+            translucentPass.draw(*vgBackend, tfr, ci.width, ci.height);
+          }
           // M9 TAA resolve (skip the first frames after (re)validation:
           // the history is garbage until the ping-pong fills).
           bool resolvedByTaa = false;
           if (taaReady && taaOn) {
+            if (!taaHistoryLive) taaWarmup = 0;  // stale history: reseed
             kenshin::renderer::TaaFrame tf;
             tf.invViewProj = glm::inverse(camera.viewProjMatrix());
             tf.prevViewProj = taaPrevViewProj;
             tf.camPos = camera.position();
             tf.blend = taaPrevValid && taaWarmup > 1 ? 0.95f : 0.0f;
             tf.jitter = taaJitterUV;
+            tf.sharpen = vgDebug.taaSharpen;
+            tf.exposure = vgDebug.exposure;
             taaPass.draw(*vgBackend, tf, ci.width, ci.height);
             resolvedByTaa = true;
+            taaRanThisFrame = true;
           }
           taaPrevViewProj = camera.viewProjMatrix();
           taaPrevValid = true;
@@ -1923,6 +2150,7 @@ int main(int argc, char** argv) {
         writeScreenshot("ui screenshot", args.screenshotUi, true);
     }
 
+    taaHistoryLive = taaRanThisFrame;
     ++frame;
     if (isLastFrame) {
       KENSHIN_INFO("reached --frames {} -> close", args.frames);
@@ -1937,6 +2165,7 @@ int main(int argc, char** argv) {
     if (lightingReady) lightingPass.onShutdown(*vgBackend);
     if (tonemapReady) tonemapPass.onShutdown(*vgBackend);
     if (taaReady) taaPass.onShutdown(*vgBackend);
+    translucentPass.onShutdown(*vgBackend);
     if (imposterReady) imposterPass.onShutdown(*vgBackend);
     if (chainReady) chain.onShutdown(*vgBackend);
   }

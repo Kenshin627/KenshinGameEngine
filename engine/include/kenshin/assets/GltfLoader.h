@@ -40,14 +40,18 @@ struct GltfMaterial {
   glm::vec3 kd{0.8f, 0.8f, 0.8f};
   f32 roughness = 0.5f;
   f32 metallic = 0.0f;
-  int image = -1;    // base-color image (index into `images` out)
-  int mrImage = -1;  // metallicRoughness image (glTF packs roughness in
-                     // G, metallic in B; LINEAR data - never sRGB-decoded)
-  f32 alpha = 1.0f;  // baseColorFactor[3] when alphaMode == BLEND (the
-                     // builder sinks BLEND geometry slightly behind the
-                     // opaque surface - skintight plates otherwise lose
-                     // their intended depth order to LOD simplification
-                     // error and paint opaque blocks over the shell)
+  int image = -1;     // base-color image (index into `images` out)
+  int mrImage = -1;   // metallicRoughness image (glTF packs roughness in
+                      // G, metallic in B; LINEAR data - never sRGB-decoded)
+  f32 alpha = 1.0f;   // baseColorFactor[3] when alphaMode == BLEND (the
+                      // builder sinks BLEND geometry slightly behind the
+                      // opaque surface - skintight plates otherwise lose
+                      // their intended depth order to LOD simplification
+                      // error and paint opaque blocks over the shell)
+  int nrmImage = -1;  // normalTexture image (tangent space, LINEAR)
+  bool doubleSided = false;  // glTF material.doubleSided (the builder
+                             // appends reversed-winding copies: every
+                             // raster path culls back faces)
 };
 
 /// Load a .glb or .gltf. `albedo` (optional out) receives the first

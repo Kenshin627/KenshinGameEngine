@@ -485,6 +485,16 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // Warmup: the final build below runs even while occActive is off,
   // so the flag turns true after the very first frame per slot.
   const bool occActive = in.occlusionEnabled && m_hzbValid[prevSlot];
+  // UE builds every HZB from the COMPLETE raster (HW + SW). Our HW draw
+  // runs on the graphics queue AFTER the async chain, so an in-chain
+  // HZB #2 never saw the HW-routed clusters - exactly the large, near
+  // triangles that make the best occluders: with routing on, the next
+  // frame's Main cull ran against a pyramid with holes where those
+  // occluders were (conservative, but it silently cancelled occlusion
+  // culling behind them). With HW routing active the final pyramid is
+  // built after the HW draw instead (below).
+  const bool hzbAfterHw = in.hwMode > 0 && in.occlusionEnabled;
+  const bool postAfterHw = hzbAfterHw && occActive;
 
   // ---- CPU-side per-frame writes (this slot's host-visible memory is
   // free: beginFrame's pacing wait proved its prior frame completed).
@@ -495,8 +505,8 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   {
     auto* pl = static_cast<glm::vec4*>(backend.mappedPtr(m_planes[slot]));
     pl[6] = glm::vec4(in.camPos, f32(in.imposterThresholdPx));
-    pl[7] = glm::vec4(1.0f / std::max(in.worldPerPixel, 1e-6f),
-                      0.0f, 0.0f, 0.0f);
+    pl[7] =
+        glm::vec4(1.0f / std::max(in.worldPerPixel, 1e-6f), 0.0f, 0.0f, 0.0f);
   }
   const u32 cntA[2] = {0, m_instanceCount};
   std::memcpy(backend.mappedPtr(m_cntA[slot]), cntA, sizeof(cntA));
@@ -572,6 +582,15 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   }
   pp[6] = glm::vec4(1.0f, f32(in.width), f32(in.height),
                     1.0f / std::abs(in.proj[1][1]));
+  // Routing inputs (post_cull routes revived clusters like the Main
+  // cull): the near-guard margin word + (hwMode, threshold). The post
+  // pass only runs with occlusion on = perspective main chains, so
+  // [6].w stays the positive tanHalf.
+  pp[1].z = cullParams[1].z;
+  pp[7] = cullParams[7];
+  // Recorded after the HW draw (routed frames): nothing is left to draw
+  // a HW-routed revive - the post pass sends everything to SW.
+  if (postAfterHw) pp[7].x = 0.0f;
   // raster_hw's params: [0..3] the CURRENT viewProj (the VS's clip
   // space), [4] = (w, h) - the VisBuffer/viewport the PS indexes.
   glm::vec4* hp = static_cast<glm::vec4*>(backend.mappedPtr(m_hwParams[slot]));
@@ -588,7 +607,11 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   hp[4] = glm::vec4(f32(in.width), f32(in.height), f32(m_clusterCount),
                     f32(m_indexCount));
   hp[5] = glm::vec4(f32(m_positionCount), m_paged ? 1.0f : 0.0f,
-                    f32(m_instanceCount), 0.0f);
+                    f32(m_instanceCount), in.hwPixelStats ? 1.0f : 0.0f);
+  // [6].x: the near plane's clip w (perspective: w = view depth). A
+  // small margin over it keeps the snap's divide well-conditioned.
+  hp[6] = glm::vec4(in.proj[2][3] == 0.0f ? 0.0f : in.nearZ * 1.01f, 0.0f, 0.0f,
+                    0.0f);
   {
     // rasterize_sw's params (float4[12]): [0..3] view, [4..7] proj
     // (glm raw), [8] = (w, h, pairCount(unused by the guard), nearZ),
@@ -708,13 +731,14 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     b(m_persistQueue[slot]);
     b(m_persistState[slot]);
 
-    const u32 persistHandles[15] = {
+    const u32 persistHandles[16] = {
         m_hierParams[slot], m_clusterBuffer,      m_groupBuffer,
         m_instanceBuffer,   m_pairs[slot],        m_cullCnt[slot],
         m_hzb[prevSlot],    m_aabbBuffer,         m_pendingPairs[slot],
         m_hwPairs[slot],    m_planes[slot],       m_hierBuffer,
-        m_groupRangeBuffer, m_persistQueue[slot], m_persistState[slot]};
-    backend.dispatchCompute(m_pipePersist, persistHandles, 15, kPersistGroups,
+        m_groupRangeBuffer, m_persistQueue[slot], m_persistState[slot],
+        m_pairCapBuffer};
+    backend.dispatchCompute(m_pipePersist, persistHandles, 16, kPersistGroups,
                             1, 1);
 
     b(m_pairs[slot]);
@@ -813,7 +837,13 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // are pure compute); the M4.2 HW draw moved AFTER the chain submit
   // (it needs the graphics queue's rasterizer - running it there is
   // the whole point of the async split).
-  if (occActive) {
+  // The post half (HZB #1 from the Main raster -> post cull -> post
+  // raster). Routed frames record it AFTER the graphics-side HW draw:
+  // UE builds HZB #1 from the complete Main raster (HW + SW), and an
+  // HZB #1 missing the HW-routed occluders revives everything behind
+  // them (measured: 2 routed wall clusters -> all 148 occluded
+  // clusters revived, +58% triangles).
+  const auto recordPost = [&]() {
     // ---- M3.3 post half (Karis Slide 75). The pyramid builds LEVEL
     // BY LEVEL (plain min-of-4). NOTE: the 087c551 pending-gating
     // (flag conversion + one shared indirect args buffer) never
@@ -830,7 +860,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
       backend.dispatchCompute(m_pipeReduce1[l], reduceHandles, 3, groups, 1, 1);
       b(m_hzb[slot]);
     }
-    if (m_timingEnabled) backend.writeChainTimestamp(3);
+    if (m_timingEnabled && !postAfterHw) backend.writeChainTimestamp(3);
 
     // M5.2: the post cull's envelope is PENDING-sized (counters[4]) -
     // REQUIRED in hierarchy mode: argsCull is only written by the
@@ -842,13 +872,14 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     backend.dispatchCompute(m_pipeConvert[4], cvPostCull, 4, 1, 1, 1);
     backend.barrierIndirectArgs(m_argsPostCull[slot]);
 
-    const u32 postCullHandles[8] = {m_postParams[slot], m_pendingPairs[slot],
-                                    m_postPairs[slot],  m_instanceBuffer,
-                                    m_hzb[slot],        m_aabbBuffer,
-                                    m_cullCnt[slot],    m_clusterBuffer};
-    backend.dispatchComputeIndirect(m_pipePostCull, postCullHandles, 8,
+    const u32 postCullHandles[9] = {
+        m_postParams[slot], m_pendingPairs[slot], m_postPairs[slot],
+        m_instanceBuffer,   m_hzb[slot],          m_aabbBuffer,
+        m_cullCnt[slot],    m_clusterBuffer,      m_hwPairs[slot]};
+    backend.dispatchComputeIndirect(m_pipePostCull, postCullHandles, 9,
                                     m_argsPostCull[slot], 0);
     b(m_postPairs[slot]);
+    b(m_hwPairs[slot]);
     b(m_cullCnt[slot]);
 
     const u32 cv4[4] = {m_cullCnt[slot], m_cfgPost, m_argsPostRaster[slot],
@@ -873,10 +904,13 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     backend.dispatchComputeIndirect(m_pipeRasterPost, postRasterHandles, 13,
                                     m_argsPostRaster[slot], 0);
     b(m_vis[slot]);
+  };
+  if (occActive && !postAfterHw) {
+    recordPost();
     if (m_timingEnabled) backend.writeChainTimestamp(4);
   } else {
-    // Stamps 3/4 bracket the (skipped) HZB#1 + post section so the
-    // segment deltas read ~0 instead of folding into a neighbor.
+    // Stamps 3/4 bracket the (skipped or moved) HZB#1 + post section so
+    // the segment deltas read ~0 instead of folding into a neighbor.
     if (m_timingEnabled) backend.writeChainTimestamp(3);
     if (m_timingEnabled) backend.writeChainTimestamp(4);
   }
@@ -889,7 +923,7 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   // section after this loop and the race surfaced as a zero pyramid.
   b(m_vis[slot]);
 
-  if (in.occlusionEnabled) {
+  if (in.occlusionEnabled && !hzbAfterHw) {
     // HZB #2: from the COMPLETE VisBuffer (post pass included), for
     // the next frame's Main cull - always-on (the bootstrap that
     // turns m_hzbValid on), DIRECT dispatches. Its own reduce
@@ -935,8 +969,11 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
   }
 
   // Submit the chain (no-op on the graphics fallback path) BEFORE
-  // recording the graphics-side HW draw.
+  // recording the graphics-side HW draw. The previous frame's HZB came
+  // from ITS graphics submission when it routed to HW - this chain's
+  // Main cull reads it, so wait that submission.
   if (m_timingEnabled) backend.writeChainTimestamp(6);
+  if (occActive && m_hzbOnGraphics[prevSlot]) backend.chainWaitGraphics();
   backend.submitChain();
 
   // ---- M4.2 hardware raster (graphics queue): the routed clusters
@@ -964,6 +1001,24 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     backend.drawNullIndirect(m_pipeHwRaster, hwHandles, 12, m_hwDrawArgs[slot],
                              0, in.width, in.height);
   }
+  if (hzbAfterHw) {
+    // HZB #2 from the COMPLETE VisBuffer: SW main + the HW draw above +
+    // the post raster (graphics queue; each reduce/convert pipeline is
+    // still used once per frame - only the recording site moved).
+    backend.barrierGraphicsToCompute(m_vis[slot]);
+    if (postAfterHw) recordPost();
+    for (u32 l = 0; l < m_hzbLevelCount; ++l) {
+      const u32 groups =
+          l == 0 ? m_hzbL0Groups : (m_hzbLevelTexels[l] + 63u) / 64u;
+      const u32 reduceHandles[3] = {m_hzbLevelParams[l], m_vis[slot],
+                                    m_hzb[slot]};
+      backend.dispatchCompute(m_pipeReduce2[l], reduceHandles, 3, groups, 1, 1);
+      b(m_hzb[slot]);
+    }
+    // The decode's fragment-stage vis read follows on this queue.
+    backend.bufferBarrier(m_vis[slot], true);
+  }
+  m_hzbOnGraphics[slot] = hzbAfterHw;
 
   // This frame's matrices become the slot's stored prev: the final
   // HZB just built from this slot's VisBuffer was rendered with

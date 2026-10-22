@@ -161,7 +161,7 @@ float2 v5Uv(uint vi, uint uvBase, uint poolTotal, uint vertexOffset,
 // shape, packed identically in VirtualGeometryScene).
 struct GpuMaterial {
   float4 kdTex;   // rgb kd, a = texture-array layer (-1 = untextured)
-  float4 params;  // x roughness, y metallic, zw pad (the lighting pass)
+  float4 params;  // x roughness, y metallic, z MR layer, w normal layer (-1 = none)
 };
 
 struct DecodePush {
@@ -781,7 +781,7 @@ struct GBufferOut {
   const float detM = dot(c0, cross0);
   const float invDet =
       abs(detM) < 1e-20 ? (detM < 0.0 ? -1e20 : 1e20) : 1.0 / detM;
-  const float3 nrm = normalize((cross0 * nrmObj.x + cross(c2, c0) * nrmObj.y +
+  float3 nrm = normalize((cross0 * nrmObj.x + cross(c2, c0) * nrmObj.y +
                                 cross(c0, c1) * nrmObj.z) *
                                invDet);
 
@@ -834,7 +834,10 @@ struct GBufferOut {
   // and the texture's own dimensions (GetDimensions - one uniform
   // size for the whole array), value-clamped never discarded.
   float3 kd = push.kdScale.rgb;
-  float matIdOut = 0.0;
+  // Unpaged (v2, no material table): the documented default material -
+  // roughness 0.5 / metallic 0 (round(0.5 * 31) * 8 + 0). A zero word
+  // decoded as roughness 0 -> the 0.04 clamp = a mirror dielectric.
+  float matIdOut = 128.0 / 255.0;
   if (paged) {
     const uint matCount = max(uint(decodeParams[1].y), 1u);
     const uint matId =
@@ -875,6 +878,38 @@ struct GBufferOut {
               .rgb;
       rough *= mr.g;
       metal *= mr.b;
+    }
+    // v11 normal map (params.w = its array layer, -1 = none): glTF
+    // tangent space (+X = +u, +Y = +v - verified against the F-35
+    // asset's own TANGENT data: B == +dP/dv on 96% of triangles, never
+    // the opposite), LINEAR texels. No tangent stream: the frame comes
+    // from THIS triangle's world positions and UVs (dP/du, dP/dv),
+    // Gram-Schmidt against the interpolated normal, handedness from
+    // dP/dv - the decode already holds both, and the page format stays
+    // as is.
+    if (mat.params.w >= 0.0) {
+      const float2 du1 = uv1 - uv0, du2 = uv2 - uv0;
+      const float3 e1w = w1 - w0, e2w = w2 - w0;
+      const float uvDet = du1.x * du2.y - du2.x * du1.y;
+      if (abs(uvDet) > 1e-12) {
+        const float3 dPdu = (e1w * du2.y - e2w * du1.y) / uvDet;
+        const float3 dPdv = (e2w * du1.x - e1w * du2.x) / uvDet;
+        const float3 t0 = dPdu - nrm * dot(nrm, dPdu);
+        if (dot(t0, t0) > 1e-20) {
+          const float3 T = normalize(t0);
+          const float hand = dot(cross(nrm, T), dPdv) < 0.0 ? -1.0 : 1.0;
+          const float3 B = cross(nrm, T) * hand;
+          const float3 nm =
+              albedoTex
+                  .SampleLevel(
+                      float3(uv, min(mat.params.w, float(alayers) - 1.0)), lod)
+                  .rgb *
+                  2.0 -
+              1.0;
+          const float3 pn = T * nm.x + B * nm.y + nrm * nm.z;
+          if (dot(pn, pn) > 1e-12) nrm = normalize(pn);
+        }
+      }
     }
     // Pack per-pixel RM into the GBuffer B alpha (5 bits rough /
     // 3 bits metal - the old material-id payload had no other

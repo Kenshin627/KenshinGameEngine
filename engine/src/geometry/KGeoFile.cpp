@@ -33,6 +33,9 @@ constexpr u32 kVersion7 =
 constexpr u32 kVersion8 = 8;
 constexpr u32 kVersion9 = 9;    // M9.2: v8 + the imposter atlas section
 constexpr u32 kVersion10 = 10;  // v9 + per-material metallicRoughness map
+constexpr u32 kVersion11 = 11;  // v10 + per-material NORMAL map (a third
+                                // path-offset array after mrOff; the
+                                // record's 8th float flags presence)
 // M7.2b: v7 with meshopt-CODEC page blobs on disk (transcoded to the
 // v7 byte layout on every read; the in-memory/runtime format and all
 // tables are identical to v7). The tail directory entry grows to 12
@@ -40,9 +43,13 @@ constexpr u32 kVersion10 = 10;  // v9 + per-material metallicRoughness map
 // page stored raw (codec inflation fallback).
 
 constexpr bool isV7Plus(u32 v) {
-  return v == kVersion7 || v == kVersion8 || v == kVersion9 || v == kVersion10;
+  return v == kVersion7 || v == kVersion8 || v == kVersion9 ||
+         v == kVersion10 || v == kVersion11;
 }
-constexpr bool isV9Plus(u32 v) { return v == kVersion9 || v == kVersion10; }
+constexpr bool isV9Plus(u32 v) {
+  return v == kVersion9 || v == kVersion10 || v == kVersion11;
+}
+constexpr bool isV10Plus(u32 v) { return v == kVersion10 || v == kVersion11; }
 
 #pragma pack(push, 4)
 struct FileHeader {
@@ -317,11 +324,17 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
 
   const bool hasImposter = !dag.imposterDepth.empty() &&
                            dag.imposterDepth.size() == dag.imposterTri.size();
-  bool hasMr = false;
-  for (const auto& m : mats)
+  bool hasMr = false, hasNrm = false;
+  for (const auto& m : mats) {
     if (!m.mrPath.empty()) hasMr = true;
-  const bool isV10 = hasMr;
-  const u32 version = isV10         ? kVersion10
+    if (!m.nrmPath.empty()) hasNrm = true;
+  }
+  // v11 carries the v10 layout plus the normal-map paths (a normal map
+  // without an MR map still writes the v10 arrays - mrOff all-absent).
+  const bool isV11 = hasNrm;
+  const bool isV10 = hasMr || isV11;
+  const u32 version = isV11         ? kVersion11
+                      : isV10       ? kVersion10
                       : hasImposter ? kVersion9
                                     : (compress ? kVersion8 : kVersion7);
   const FileHeaderV3 header{
@@ -395,6 +408,7 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   // material path offsets + 8-f32 records (kd, texFlag, rough, metal).
   std::vector<u32> texOff(mats.size(), 0xFFFFFFFFu);
   std::vector<u32> mrOff(mats.size(), 0xFFFFFFFFu);
+  std::vector<u32> nrmOff(mats.size(), 0xFFFFFFFFu);
   std::string strings;
   for (usize m = 0; m < mats.size(); ++m) {
     if (mats[m].texPath.empty()) continue;
@@ -408,6 +422,12 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
     strings += mats[m].mrPath;
     strings.push_back('\0');
   }
+  for (usize m = 0; m < mats.size(); ++m) {
+    if (mats[m].nrmPath.empty()) continue;
+    nrmOff[m] = static_cast<u32>(strings.size());
+    strings += mats[m].nrmPath;
+    strings.push_back('\0');
+  }
   while (strings.size() % 4 != 0) strings.push_back('\0');
   if (ok) {
     std::vector<f32> records(mats.size() * 8);
@@ -419,15 +439,16 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
       r[3] = texOff[m] == 0xFFFFFFFFu ? -1.0f : 0.0f;  // has-texture flag
       r[4] = mats[m].roughness;
       r[5] = mats[m].metallic;
-      r[6] = (hasMr && mrOff[m] == 0xFFFFFFFFu) ? -1.0f : 0.0f;
-      r[7] = 0.0f;
+      r[6] = (isV10 && mrOff[m] == 0xFFFFFFFFu) ? -1.0f : 0.0f;
+      // v11: normal-map presence (-1 absent); pre-v11 writes 0 = pad.
+      r[7] = (isV11 && nrmOff[m] == 0xFFFFFFFFu) ? -1.0f : 0.0f;
     }
     const u32 stringBytes = static_cast<u32>(strings.size());
     ok = std::fwrite(&stringBytes, sizeof(stringBytes), 1, file) == 1 &&
          (stringBytes == 0 ||
           std::fwrite(strings.data(), 1, stringBytes, file) == stringBytes) &&
          writeVector(file, texOff) && (!isV10 || writeVector(file, mrOff)) &&
-         writeVector(file, records);
+         (!isV11 || writeVector(file, nrmOff)) && writeVector(file, records);
     if (ok && isV10) {
       const u32 imposterFlag = hasImposter ? 1u : 0u;
       ok = std::fwrite(&imposterFlag, sizeof(imposterFlag), 1, file) == 1;
@@ -761,10 +782,13 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
       std::fclose(file);
       return false;
     }
-    // File order (v10): texOff[] then mrOff[] then records.
-    std::vector<u32> mrOff;
+    // File order (v10): texOff[] then mrOff[] then records; v11 adds
+    // nrmOff[] after mrOff[].
+    std::vector<u32> mrOff, nrmOff;
     if (!readVector(file, texOff, materialCount) ||
-        (h3.version == kVersion10 && !readVector(file, mrOff, materialCount)) ||
+        (isV10Plus(h3.version) && !readVector(file, mrOff, materialCount)) ||
+        (h3.version == kVersion11 &&
+         !readVector(file, nrmOff, materialCount)) ||
         !readVector(file, records, usize(materialCount) * 8)) {
       log = "truncated (material table)";
       std::fclose(file);
@@ -779,7 +803,10 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
       mat.kd[2] = r[2];
       mat.roughness = r[4];
       mat.metallic = r[5];
-      if (h3.version == kVersion10 && r[6] >= 0.0f && mrOff[m] != 0xFFFFFFFFu &&
+      if (h3.version == kVersion11 && r[7] >= 0.0f &&
+          nrmOff[m] != 0xFFFFFFFFu && nrmOff[m] < strings.size())
+        mat.nrmPath = std::string(strings.data() + nrmOff[m]);
+      if (isV10Plus(h3.version) && r[6] >= 0.0f && mrOff[m] != 0xFFFFFFFFu &&
           mrOff[m] < strings.size()) {
         mat.mrPath = std::string(strings.data() + mrOff[m]);
       }
@@ -794,7 +821,7 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
   // the blobs (u32 word count, then depth[] and tri[]). v10 carries an
   // explicit presence flag (v10 does not imply the imposter feature).
   bool wantImposter = h3.version == kVersion9;
-  if (h3.version == kVersion10) {
+  if (isV10Plus(h3.version)) {
     u32 imposterFlag = 0;
     if (std::fread(&imposterFlag, sizeof(imposterFlag), 1, file) != 1) {
       log = "truncated (imposter flag)";

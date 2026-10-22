@@ -16,9 +16,12 @@
 // shared no-binding helper module lands).
 //
 // Bindings (SSBO set 0):
-//   0: float4 params[8]   - [2..5] CURRENT viewProj columns (glm raw,
-//                           Y-flipped), [6]=(occEnabled, screenW,
-//                           screenH, tanHalfFov); [0]/[1]/[7] unused
+//   0: float4 params[8]   - [0].xyz camPos, [1].z the near-guard
+//                           margin (the Main cull's word), [1].w pair
+//                           capacity, [2..5] CURRENT viewProj columns
+//                           (glm raw, Y-flipped), [6]=(occEnabled,
+//                           screenW, screenH, tanHalfFov), [7] = the
+//                           Main cull's (hwMode, hwThresholdPx)
 //   1: uint2 pendingPairs[] - the Main cull's occluded items (in)
 //   2: uint2 postPairs[]    - out: revived (instanceIdx, clusterIdx)
 //   3: GpuInstance instances[] - model transforms (AABB corners)
@@ -30,6 +33,15 @@
 //                             pass adds the revived clusters' tris)
 //   7: GpuCluster clusters[] - 48B, mirrors packGpuCluster (the
 //                             revived items' indexCount for [6])
+//   8: uint2 hwPairs[]      - out: revived items that ROUTE to the
+//                             hardware rasterizer, appended after the
+//                             Main cull's via the same counters[7]
+//                             cursor. The HW draw runs after the whole
+//                             chain (count_to_draw reads the final
+//                             [7]), so one draw covers both - UE's post
+//                             pass routes exactly like its Main pass;
+//                             v1 sent every revived cluster to SW,
+//                             force-HW included.
 
 struct GpuCluster {
   float4 bounds;
@@ -60,6 +72,28 @@ struct GpuInstance {
 [[vk::binding(5)]] StructuredBuffer<float4> aabbs;
 [[vk::binding(6)]] RWStructuredBuffer<uint> counters;
 [[vk::binding(7)]] StructuredBuffer<GpuCluster> clusters;
+[[vk::binding(8)]] RWStructuredBuffer<uint2> hwPairs;
+
+/// The Main cull's routing test, VERBATIM (cull_clusters /
+/// cull_hier_level emitCluster - keep the four copies together).
+bool routeHw(uint2 item, float4x4 model)
+{
+    if (params[7].x < 0.5) return false;
+    if (params[7].x > 1.5) return true;
+    const GpuCluster cluster = clusters[item.y];
+    const float maxScale = max(length(model[0].xyz),
+                               max(length(model[1].xyz), length(model[2].xyz)));
+    const float3 c = model[0].xyz * cluster.bounds.x +
+                     model[1].xyz * cluster.bounds.y +
+                     model[2].xyz * cluster.bounds.z + model[3].xyz;
+    const float sphereR = cluster.bounds.w * maxScale;
+    const float dist = max(distance(c, params[0].xyz) - sphereR, 0.1);
+    if (dist < sphereR + params[1].z) return true;  // near plane -> HW clips
+    const float pxPerUnit =
+        (params[6].z * 0.5) / (max(params[6].w, 1e-6) * dist);
+    const float edgePx = aabbs[3u * item.y + 2u].x * maxScale * pxPerUnit;
+    return edgePx >= params[7].y;
+}
 
 bool occluded(uint2 item, float4x4 model)
 {
@@ -151,6 +185,14 @@ void main(uint tid : SV_DispatchThreadID)
     const uint2 item = pendingPairs[tid];
     if (occluded(item, instances[item.x].model)) return;  // still hidden
 
+    if (routeHw(item, instances[item.x].model))
+    {
+        uint hs = 0;
+        InterlockedAdd(counters[7], 1, hs);
+        if (hs < uint(params[1].w)) hwPairs[hs] = item;
+        InterlockedAdd(counters[6], clusters[item.y].indexCount / 3u);
+        return;
+    }
     uint slot = 0;
     InterlockedAdd(counters[5], 1, slot);
     if (slot < uint(params[1].w)) postPairs[slot] = item;

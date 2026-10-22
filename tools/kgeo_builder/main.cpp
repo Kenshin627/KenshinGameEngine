@@ -7,9 +7,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <map>
 #include <glm/glm.hpp>
+#include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "kenshin/Version.h"
@@ -60,13 +61,51 @@ static void recenterGltf(kenshin::assets::MeshData& mesh, float fit) {
   }
 }
 
+/// Squared distance from p to triangle abc (Ericson, Real-Time
+/// Collision Detection 5.1.5 - closest point by Voronoi region).
+float pointTriDist2(const glm::vec3& p, const glm::vec3& a, const glm::vec3& b,
+                    const glm::vec3& c) {
+  const glm::vec3 ab = b - a, ac = c - a, ap = p - a;
+  const float d1 = glm::dot(ab, ap), d2 = glm::dot(ac, ap);
+  if (d1 <= 0.0f && d2 <= 0.0f) return glm::dot(ap, ap);
+  const glm::vec3 bp = p - b;
+  const float d3 = glm::dot(ab, bp), d4 = glm::dot(ac, bp);
+  if (d3 >= 0.0f && d4 <= d3) return glm::dot(bp, bp);
+  const float vc = d1 * d4 - d3 * d2;
+  if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+    const glm::vec3 q = a + ab * (d1 / (d1 - d3));
+    return glm::dot(p - q, p - q);
+  }
+  const glm::vec3 cp = p - c;
+  const float d5 = glm::dot(ab, cp), d6 = glm::dot(ac, cp);
+  if (d6 >= 0.0f && d5 <= d6) return glm::dot(cp, cp);
+  const float vb = d5 * d2 - d1 * d6;
+  if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+    const glm::vec3 q = a + ac * (d2 / (d2 - d6));
+    return glm::dot(p - q, p - q);
+  }
+  const float va = d3 * d6 - d5 * d4;
+  if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+    const glm::vec3 q = b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+    return glm::dot(p - q, p - q);
+  }
+  const float denom = 1.0f / (va + vb + vc);
+  const glm::vec3 q = a + ab * (vb * denom) + ac * (vc * denom);
+  return glm::dot(p - q, p - q);
+}
+
 int main(int argc, char** argv) {
   kenshin::log::init();
   KENSHIN_INFO("{}", kenshin::getBanner());
 
   std::string input, output = "out/mesh.kgeo";
-  float fit = 0.0f;  // --fit N: uniform scale so the longest bbox
-                     // dimension lands at N units (0 = as loaded)
+  bool opaqueBlend = false;  // --opaque-blend: keep BLEND materials in
+                             // the opaque DAG (the pre-translucency
+                             // path, with the hug sink) - A/B
+  bool doubleSided = true;   // --no-double-sided: skip the glTF
+                             // doubleSided back-face copies (A/B)
+  float fit = 0.0f;          // --fit N: uniform scale so the longest bbox
+                             // dimension lands at N units (0 = as loaded)
   // Multi-material glTF set (filled only when the asset carries more
   // than one used material; single-material inputs take the legacy
   // single-table path unchanged).
@@ -100,6 +139,10 @@ int main(int argc, char** argv) {
       rough = std::atof(argv[++i]);
     else if (std::strcmp(argv[i], "--metal") == 0 && i + 1 < argc)
       metal = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--opaque-blend") == 0)
+      opaqueBlend = true;
+    else if (std::strcmp(argv[i], "--no-double-sided") == 0)
+      doubleSided = false;
     else if (std::strcmp(argv[i], "--fit") == 0 && i + 1 < argc)
       fit = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--debug-dump") == 0)
@@ -181,6 +224,82 @@ int main(int argc, char** argv) {
                      albedo.height, bmp.string());
       }
       recenterGltf(mesh, fit);
+      // Translucency (UE's split: Nanite never rasterizes translucent
+      // materials - they render in a forward pass over plain meshes).
+      // BLEND triangles leave the opaque DAG and go to <out>.tmesh:
+      // "KTM1" | u32 version 2 | u32 materialCount | per material 8 f32
+      // (kd rgb, alpha, roughness, metallic, 0, 0) | u32 vertexCount |
+      // per vertex 12 f32 (pos xyz, material id, normal xyz, 0, uv, 0,
+      // 0) - a NON-indexed triangle list the pass vertex-pulls. Material
+      // ids index the SAME table as the kgeo's material section, so the
+      // runtime samples the scene's texture layers for them.
+      if (!opaqueBlend && !mesh.triMaterial.empty()) {
+        using kenshin::u32;
+        using kenshin::usize;
+        std::vector<float> tverts;
+        std::vector<u32> keepIdx, keepMat;
+        keepIdx.reserve(mesh.indices.size());
+        keepMat.reserve(mesh.triMaterial.size());
+        const bool hasNrm = mesh.normals.size() == mesh.positions.size();
+        const bool hasUv = mesh.uvs.size() == mesh.vertexCount() * 2;
+        for (usize t = 0; t < mesh.triMaterial.size(); ++t) {
+          const u32 m = mesh.triMaterial[t];
+          const bool blend =
+              m < gltfMaterials.size() && gltfMaterials[m].alpha < 0.999f;
+          if (!blend) {
+            for (int k = 0; k < 3; ++k)
+              keepIdx.push_back(mesh.indices[t * 3 + k]);
+            keepMat.push_back(m);
+            continue;
+          }
+          for (int k = 0; k < 3; ++k) {
+            const u32 v = mesh.indices[t * 3 + k];
+            for (int c = 0; c < 3; ++c)
+              tverts.push_back(mesh.positions[usize(v) * 3 + c]);
+            tverts.push_back(float(m));
+            for (int c = 0; c < 3; ++c)
+              tverts.push_back(hasNrm ? mesh.normals[usize(v) * 3 + c]
+                                      : (c == 2 ? 1.0f : 0.0f));
+            tverts.push_back(0.0f);
+            tverts.push_back(hasUv ? mesh.uvs[usize(v) * 2] : 0.0f);
+            tverts.push_back(hasUv ? mesh.uvs[usize(v) * 2 + 1] : 0.0f);
+            tverts.push_back(0.0f);
+            tverts.push_back(0.0f);
+          }
+        }
+        if (!tverts.empty()) {
+          const std::filesystem::path tpath =
+              std::filesystem::path(output).replace_extension(".tmesh");
+          FILE* tf = std::fopen(tpath.string().c_str(), "wb");
+          bool ok = tf != nullptr;
+          if (ok) {
+            const u32 head[3] = {0x314D544Bu /* "KTM1" */, 2u,
+                                 static_cast<u32>(gltfMaterials.size())};
+            ok = std::fwrite(head, sizeof(head), 1, tf) == 1;
+            for (const auto& gm : gltfMaterials) {
+              const float rec[8] = {gm.kd.r,  gm.kd.g,      gm.kd.b,
+                                    gm.alpha, gm.roughness, gm.metallic,
+                                    0.0f,     0.0f};
+              ok = ok && std::fwrite(rec, sizeof(rec), 1, tf) == 1;
+            }
+            const u32 vcount = static_cast<u32>(tverts.size() / 12);
+            ok = ok && std::fwrite(&vcount, sizeof(vcount), 1, tf) == 1 &&
+                 std::fwrite(tverts.data(), sizeof(float), tverts.size(), tf) ==
+                     tverts.size();
+            std::fclose(tf);
+          }
+          if (!ok) {
+            KENSHIN_ERROR("[builder] translucent mesh write failed: {}",
+                          tpath.string());
+            kenshin::log::shutdown();
+            return 1;
+          }
+          KENSHIN_INFO("[builder] translucent: {} BLEND tris -> {}",
+                       tverts.size() / 36, tpath.string());
+          mesh.indices.swap(keepIdx);
+          mesh.triMaterial.swap(keepMat);
+        }
+      }
       // BLEND-material sink: translucent plates that hug an opaque
       // surface (this asset's visor plate rides ~1e-3 behind the shell
       // face) lose that hair-thin depth order to LOD simplification
@@ -202,11 +321,86 @@ int main(int argc, char** argv) {
           std::vector<bool> sink(mesh.vertexCount(), false);
           for (usize t = 0; t < mesh.triMaterial.size(); ++t) {
             const u32 m = mesh.triMaterial[t];
-            if (m >= gltfMaterials.size() ||
-                gltfMaterials[m].alpha >= 0.999f)
+            if (m >= gltfMaterials.size() || gltfMaterials[m].alpha >= 0.999f)
               continue;
-            for (int k = 0; k < 3; ++k)
-              sink[mesh.indices[t * 3 + k]] = true;
+            for (int k = 0; k < 3; ++k) sink[mesh.indices[t * 3 + k]] = true;
+          }
+          // Only materials that HUG opaque geometry sink. Free-standing
+          // glass (the F-35 visor stands well off its shell) sinking
+          // 1.5 per-mille behind its own front drove the visor rim
+          // under the shell's mounting parts - a ring of dark triangles
+          // through the glass. Decided PER MATERIAL (>= 25% of its
+          // vertices within kHug of an opaque triangle): a per-vertex
+          // sink bends a plate at the hug boundary and lets the geometry
+          // under it poke through in cluster-sized steps. Uniform grid of
+          // opaque triangles, each inserted into every cell its
+          // kHug-expanded bounds touch, so a vertex checks its own cell
+          // only.
+          const float kHug = fit > 0.0f ? fit * 0.005f : 0.01f;
+          const float cell = kHug * 4.0f;
+          std::map<std::tuple<int, int, int>, std::vector<u32>> grid;
+          const auto P = [&](u32 v) {
+            return glm::vec3(mesh.positions[usize(v) * 3],
+                             mesh.positions[usize(v) * 3 + 1],
+                             mesh.positions[usize(v) * 3 + 2]);
+          };
+          const auto key = [&](float x) {
+            return static_cast<int>(std::floor(x / cell));
+          };
+          for (usize t = 0; t < mesh.triMaterial.size(); ++t) {
+            const u32 m = mesh.triMaterial[t];
+            if (m < gltfMaterials.size() && gltfMaterials[m].alpha < 0.999f)
+              continue;
+            const glm::vec3 a = P(mesh.indices[t * 3]),
+                            b = P(mesh.indices[t * 3 + 1]),
+                            c = P(mesh.indices[t * 3 + 2]);
+            const glm::vec3 lo = glm::min(a, glm::min(b, c)) - kHug;
+            const glm::vec3 hi = glm::max(a, glm::max(b, c)) + kHug;
+            const int x0 = key(lo.x), x1 = key(hi.x), y0 = key(lo.y),
+                      y1 = key(hi.y), z0 = key(lo.z), z1 = key(hi.z);
+            if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 4096)
+              continue;  // a huge opaque triangle cannot be "hugged" here
+            for (int x = x0; x <= x1; ++x)
+              for (int y = y0; y <= y1; ++y)
+                for (int z = z0; z <= z1; ++z)
+                  grid[{x, y, z}].push_back(static_cast<u32>(t));
+          }
+          // Per-material vote: a vertex counts toward every BLEND
+          // material that references it.
+          std::vector<u32> vertMat(mesh.vertexCount(), 0xFFFFFFFFu);
+          for (usize t = 0; t < mesh.triMaterial.size(); ++t) {
+            const u32 m = mesh.triMaterial[t];
+            if (m >= gltfMaterials.size() || gltfMaterials[m].alpha >= 0.999f)
+              continue;
+            for (int k = 0; k < 3; ++k) vertMat[mesh.indices[t * 3 + k]] = m;
+          }
+          std::vector<usize> hugCount(gltfMaterials.size(), 0),
+              blendCount(gltfMaterials.size(), 0);
+          for (usize v = 0; v < sink.size(); ++v) {
+            if (!sink[v] || vertMat[v] >= gltfMaterials.size()) continue;
+            ++blendCount[vertMat[v]];
+            const glm::vec3 p = P(static_cast<u32>(v));
+            const auto it = grid.find({key(p.x), key(p.y), key(p.z)});
+            if (it == grid.end()) continue;
+            for (const u32 t : it->second)
+              if (pointTriDist2(p, P(mesh.indices[t * 3]),
+                                P(mesh.indices[t * 3 + 1]),
+                                P(mesh.indices[t * 3 + 2])) <= kHug * kHug) {
+                ++hugCount[vertMat[v]];
+                break;
+              }
+          }
+          for (usize m = 0; m < gltfMaterials.size(); ++m) {
+            if (blendCount[m] == 0) continue;
+            const bool hugs = hugCount[m] * 4 >= blendCount[m];
+            KENSHIN_INFO(
+                "[builder] BLEND material {}: {}/{} verts hug opaque "
+                "geometry -> {}",
+                m, hugCount[m], blendCount[m],
+                hugs ? "sink" : "free-standing, kept in place");
+            if (hugs) continue;
+            for (usize v = 0; v < sink.size(); ++v)
+              if (vertMat[v] == m) sink[v] = false;
           }
           usize sunk = 0;
           for (usize v = 0; v < sink.size(); ++v) {
@@ -219,6 +413,59 @@ int main(int argc, char** argv) {
             KENSHIN_INFO("[builder] BLEND sink: {} verts -{} units (normal)",
                          sunk, kSink);
         }
+      }
+      // glTF doubleSided: every raster path (SW edge sign, HW cull
+      // BACK) drops back faces, so single-sheet double-sided geometry
+      // (visors, liners, cloth) shows holes wherever it curves away
+      // from the camera. Build-time answer, zero runtime cost beyond
+      // the triangles: append a reversed-winding copy on its OWN
+      // vertices with flipped normals. A copy always faces away from
+      // wherever its original is visible, so the pair never competes
+      // for a pixel - even after independent LOD simplification.
+      // The copy is pushed a hair along ITS normal (behind the
+      // original's front side): bit-identical positions get welded by
+      // clusterlod's position remap, every edge turns non-manifold
+      // (two opposite triangles) and the simplifier locks it - the
+      // first try left 5577 of 5742 clusters unsimplified LOD-0 roots.
+      if (doubleSided && !mesh.triMaterial.empty()) {
+        const float kSplit = fit > 0.0f ? fit * 1e-4f : 2e-4f;
+        using kenshin::u32;
+        using kenshin::usize;
+        const usize triCount = mesh.triMaterial.size();
+        const bool hasNrm = mesh.normals.size() == mesh.positions.size();
+        const bool hasUv = mesh.uvs.size() == mesh.vertexCount() * 2;
+        std::vector<u32> remap(mesh.vertexCount(), 0xFFFFFFFFu);
+        usize added = 0;
+        for (usize t = 0; t < triCount; ++t) {
+          const u32 m = mesh.triMaterial[t];
+          if (m >= gltfMaterials.size() || !gltfMaterials[m].doubleSided)
+            continue;
+          u32 tri[3];
+          for (int k = 0; k < 3; ++k) {
+            const u32 v = mesh.indices[t * 3 + k];
+            if (remap[v] == 0xFFFFFFFFu) {
+              remap[v] = static_cast<u32>(mesh.vertexCount());
+              for (int c = 0; c < 3; ++c)
+                mesh.positions.push_back(
+                    mesh.positions[usize(v) * 3 + c] -
+                    (hasNrm ? mesh.normals[usize(v) * 3 + c] * kSplit : 0.0f));
+              if (hasNrm)
+                for (int c = 0; c < 3; ++c)
+                  mesh.normals.push_back(-mesh.normals[usize(v) * 3 + c]);
+              if (hasUv)
+                for (int c = 0; c < 2; ++c)
+                  mesh.uvs.push_back(mesh.uvs[usize(v) * 2 + c]);
+            }
+            tri[k] = remap[v];
+          }
+          mesh.indices.push_back(tri[0]);  // reversed winding
+          mesh.indices.push_back(tri[2]);
+          mesh.indices.push_back(tri[1]);
+          mesh.triMaterial.push_back(m);
+          ++added;
+        }
+        if (added)
+          KENSHIN_INFO("[builder] doubleSided: +{} back-face triangles", added);
       }
     } else if (!kenshin::assets::loadObj(input, mesh, log)) {
       KENSHIN_ERROR("load failed: {}", log);
@@ -433,6 +680,8 @@ int main(int argc, char** argv) {
         if (!albedoFile.empty()) dm.texPath = albedoFile;
         const std::string mrFile = imageFile(gm.mrImage, "_mr");
         if (!mrFile.empty()) dm.mrPath = mrFile;
+        const std::string nrmFile = imageFile(gm.nrmImage, "_nrm");
+        if (!nrmFile.empty()) dm.nrmPath = nrmFile;
         dag.materials.push_back(dm);
       }
     } else {
@@ -499,7 +748,8 @@ int main(int argc, char** argv) {
         KENSHIN_INFO(
             "[builder] material {} '{}': {} clusters, {} tris, bounds "
             "({:.2f},{:.2f},{:.2f})..({:.2f},{:.2f},{:.2f}){}",
-            m, dag.materials[m].texPath.empty() ? "?" : dag.materials[m].texPath,
+            m,
+            dag.materials[m].texPath.empty() ? "?" : dag.materials[m].texPath,
             cnt, tris, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z, lv);
     }
   }

@@ -28,7 +28,9 @@
 //                         camera's Y-FLIPPED matrix - framebuffer rows
 //                         match the VisBuffer's convention),
 //                         [4] = (width, height, clusterCount,
-//                                indexCount), [5].x = positionCount
+//                                indexCount), [5].x = positionCount,
+//                         [5].w = HW pixel-write stat on/off,
+//                         [6].x = near-plane w (clipped-mode test)
 //                         (every payload-driven index is CLAMPED into
 //                         these bounds - the driver device-losts on
 //                         multi-level payload-dependent addressing
@@ -165,19 +167,17 @@ struct HwVsOut {
   float4 pos : SV_Position;
   nointerpolation uint payload : PAYLOAD;
   // The three vertices in PIXEL space, floored to the 1/256 subpixel
-  // grid - the same snap rasterize_sw applies (flat: each fragment
-  // receives its provoking vertex's copy of the SAME corner values...
-  // no: all three varyings are per-triangle constants because every
-  // vertex of the triangle writes the same quantized corner set is
-  // impossible - instead each varying interpolates the OTHER two
-  // corners. See the VS: q1/q2 are the same at every vertex of the
-  // triangle ONLY if flat-interpolated from the same slot - we cheat
-  // by emitting them from the SAME corner: all three vertices emit
-  // the full (q0, q1, q2) triple through separate varyings, so each
-  // varying is constant across the triangle.
+  // grid - the same snap rasterize_sw applies. Flat: every fragment
+  // receives the PROVOKING vertex's (corner 0) copy, which is the only
+  // invocation that decodes all three corners.
   nointerpolation float2 q0 : Q0;
   nointerpolation float2 q1 : Q1;
   nointerpolation float2 q2 : Q2;
+  // 1 = the snapped, exact-tested path; 0 = the cluster reaches the
+  // near plane: raw clip output, the HARDWARE clips (UE routes exactly
+  // these to HW - Cull.bNeedsClipping) and the PS trusts its coverage
+  // (the 1/256 snap needs a divide by w that a crossing corner breaks).
+  nointerpolation uint exact : EXACT;
 };
 
 [shader("vertex")]
@@ -188,6 +188,7 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
   o.q0 = float2(0.0, 0.0);
   o.q1 = float2(0.0, 0.0);
   o.q2 = float2(0.0, 0.0);
+  o.exact = 1u;
 
   // Clamp EVERY payload-driven index into its pool's proven range
   // (params[4].zw / [5].xz): this driver device-losts on the
@@ -244,17 +245,38 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
     // as rows - every transform below is an explicit combination of
     // the stored columns (the project-wide convention).
     const float4x4 model = instances[itemC.x].model;
-    const float4x4 vpCols = float4x4(params[0], params[1], params[2],
-                                     params[3]);
-    float2 q[3];
+    // Near-plane test on the cluster's world bounds sphere: clip.w is
+    // affine in world space (perspective: -z_view; ortho: 1), so the
+    // sphere's minimum w is w(center) - radius * |grad w|. Per CLUSTER
+    // so all three corners of every triangle agree on the mode.
+    const float maxScale = max(length(model[0].xyz),
+                               max(length(model[1].xyz), length(model[2].xyz)));
+    const float3 cWorld = model[0].xyz * cluster.bounds.x +
+                          model[1].xyz * cluster.bounds.y +
+                          model[2].xyz * cluster.bounds.z + model[3].xyz;
+    const float wCenter = params[0].w * cWorld.x + params[1].w * cWorld.y +
+                          params[2].w * cWorld.z + params[3].w;
+    const float wGrad = length(float3(params[0].w, params[1].w, params[2].w));
+    const bool clipped =
+        wCenter - cluster.bounds.w * maxScale * wGrad <= params[6].x;
+    // The index triple ONCE (v6: it was re-decoded inside the corner
+    // loop - three identical bit-unpacks per invocation).
+    const bool packed = uint(params[5].y) != 0u;
+    const uint3 tri3 =
+        packed ? packedTriOf(tri, qm.idxBits >> 8, qm.idxBits & 0xFu,
+                             (qm.idxBits >> 4) & 0xFu, idxBase,
+                             max(indexCount, 1u))
+               : uint3(0u, 0u, 0u);
+    // Only the PROVOKING vertex (corner 0 - Vulkan's default first-
+    // vertex convention) feeds the flat q varyings the PS reads; the
+    // other two corners decode just themselves (5 vertex decodes per
+    // triangle instead of 9).
+    float2 q[3] = {float2(0.0), float2(0.0), float2(0.0)};
+    float4 ownClip = float4(0.0, 0.0, 0.5, 1.0);
     for (uint k = 0; k < 3u; ++k) {
+      if (corner != 0u && k != corner) continue;
       float3 lp;
-      if (uint(params[5].y) != 0u) {
-        // v6: the packed triple decoded per corner (u32 math only -
-        // this driver's Slang vertex-stage emit chokes on u64 locals).
-        const uint3 tri3 = packedTriOf(tri, qm.idxBits >> 8, qm.idxBits & 0xFu,
-                                       (qm.idxBits >> 4) & 0xFu, idxBase,
-                                       max(indexCount, 1u));
+      if (packed) {
         const uint vi8 = k == 0u ? tri3.x : (k == 1u ? tri3.y : tri3.z);
         // v5: three SOA bit fields on the mesh's integer grid (page
         // offsets fit 32 bits: < 128 KB -> < 2^21 bits).
@@ -293,21 +315,31 @@ HwVsOut vsMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID) {
                         model[2].xyz * lp.z + model[3].xyz;
       const float4 clip = params[0] * wp.x + params[1] * wp.y +
                           params[2] * wp.z + params[3];
-      // All three corners: needed for the payload corner + the PS's
-      // quantized triangle. SV_Position of THIS corner; the q's are
-      // floored to the 1/256 grid (rasterize_sw's DX x.8 snap).
+      // The q's are floored to the 1/256 grid (rasterize_sw's DX x.8
+      // snap).
       const float2 px = float2((clip.x / clip.w * 0.5 + 0.5) * params[4].x,
                                (clip.y / clip.w * 0.5 + 0.5) * params[4].y);
       q[k] = floor(px * 256.0) * (1.0 / 256.0);
-      if (k == corner) o.pos = clip;
+      if (k == corner) ownClip = clip;
     }
+    // SV_Position = the SNAPPED corner (xy rebuilt from q, z/w kept):
+    // the fixed-function rasterizer then sees exactly the triangle the
+    // PS's exact test and the SW rasterizer judge. 1/256-grid values
+    // survive the hardware's own snap unchanged at >= 8 subpixel bits
+    // (the float round trip errs < 1e-3 of a subpixel), so fragment
+    // generation no longer needs conservative OVERESTIMATE to cover the
+    // unsnapped/snapped gap - the backend drops it on such devices
+    // (measured: -40% HW-path frame time).
+    const float2 sndc =
+        float2(q[corner].x / params[4].x, q[corner].y / params[4].y) * 2.0 - 1.0;
+    o.pos = clipped ? ownClip : float4(sndc * ownClip.w, ownClip.z, ownClip.w);
+    o.exact = clipped ? 0u : 1u;
     // The wide-instance payload (rasterize_sw's packing): this draw's
     // instanceId IS the hwPairs index; listSel 1 marks the HW table
     // for the decode indirection.
     o.payload = ((instanceId & 0x7FFFFFu) << 9) | (1u << 7) | (tri & 0x7Fu);
-    // Every vertex emits the full quantized triangle -> each varying
-    // is constant across the triangle (flat interpolation of equal
-    // values), so the PS sees the exact geometry it needs.
+    // Flat varyings: the PS receives the provoking vertex's (corner 0)
+    // full quantized triple; the other corners' copies are unused.
     o.q0 = q[0];
     o.q1 = q[1];
     o.q2 = q[2];
@@ -324,6 +356,7 @@ void psMain(HwVsOut i) {
   // varyings carry 1/256-exact multiples; x256 makes them integers),
   // ties resolved by the DX top-left rule (top: ey == 0 && ex > 0;
   // left: ey < 0 - winding-canonicalized to positive area below).
+  if (i.exact != 0u) {
   int64_t X0 = int64_t(i.q0.x * 256.0), Y0 = int64_t(i.q0.y * 256.0);
   int64_t X1 = int64_t(i.q1.x * 256.0), Y1 = int64_t(i.q1.y * 256.0);
   int64_t X2 = int64_t(i.q2.x * 256.0), Y2 = int64_t(i.q2.y * 256.0);
@@ -354,6 +387,7 @@ void psMain(HwVsOut i) {
   const int64_t t2 = (e2y == 0 && e2x > 0) || e2y < 0 ? 0 : 1;
   if (!(w0 >= t0 && w1 >= t1 && w2 >= t2))
     return;  // helper lanes / tie pixels owned by the other side
+  }  // exact
 
   const uint W = uint(params[4].x);
   const uint H = max(uint(params[4].y), 1u);
@@ -367,6 +401,9 @@ void psMain(HwVsOut i) {
   // Count the passing pixel like rasterize_sw's counters[1] (the panel's
   // pxWrites = main + post + HW; without this an all-HW-routed cut
   // reports "writes 0" and reads as a dead draw - a diagnosis trap that
-  // cost an hour on 2026-09-19).
-  InterlockedAdd(pending[1], 1);
+  // cost an hour on 2026-09-19). OPTIONAL (params[5].w): the one-address
+  // atomic serializes every HW fragment - it cost 2.3 ms of a 3.2 ms
+  // lowpoly frame (the HW path lost to SW on 150 px triangles over a
+  // statistic). Diagnostics/tests switch it on.
+  if (params[5].w > 0.5) InterlockedAdd(pending[1], 1);
 }

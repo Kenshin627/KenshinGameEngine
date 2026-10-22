@@ -158,6 +158,10 @@ struct ClusterDag {
     // data). mrTexLayer is resolved by the app (like texLayer).
     std::string mrPath;
     f32 mrTexLayer = -1.0f;
+    // v11: the tangent-space normal map (glTF convention, linear data).
+    // The shading frame is derived per triangle from positions + UVs.
+    std::string nrmPath;
+    f32 nrmTexLayer = -1.0f;
   };
   std::vector<DagMaterial> materials;
   /// Per-cluster material id into `materials` (u8 range; stamped into

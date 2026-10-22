@@ -48,6 +48,9 @@ struct VulkanBackend::Impl {
   // compute-timeline values for the graphics submission's waits.
   VkCommandBuffer computeOverride = VK_NULL_HANDLE;
   u64 chainValueA = 0, chainValueB = 0;
+  // chainWaitGraphics(): the frame-timeline value this frame's chain
+  // submission must wait (0 = none).
+  u64 chainGraphicsWait = 0;
   bool asyncActive = false;
   // One chain submission per frame slot: a second beginChain before
   // endFrame would re-begin the SAME command buffer whose previous
@@ -157,6 +160,8 @@ struct VulkanBackend::Impl {
   std::unordered_map<u32, u32> snapMirrors[kMaxFramesInFlight];
   u32 taaParity = 0;
   u32 taaSize = 0;
+  u32 taaHeight = 0;  // both extents key the pair (height-only resizes
+                      // used to keep a stale-height pair)
   bool taaActive = false;
   // Cross-submission TAA history dependency (see drawTaa): the frame
   // submit waits this timeline value before the resolve's history read.
@@ -1725,6 +1730,124 @@ u32 VulkanBackend::createTaaPipeline(const FullscreenPipelineInfo& info) {
   return m_impl->pipelines.createTaa(m_impl->device.device, info);
 }
 
+u32 VulkanBackend::createTranslucentPipeline(
+    const FullscreenPipelineInfo& info) {
+  return m_impl->pipelines.createTranslucent(m_impl->device.device, info);
+}
+
+void VulkanBackend::drawTranslucent(u32 pipeline, const u32* bufferHandles,
+                                    u32 bufferCount, u32 envTexture,
+                                    u32 albedoTexture, const void* push,
+                                    usize pushBytes, u32 vertexCount,
+                                    u32 instanceCount, u32 width, u32 height) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
+      pipeline > impl.pipelines.fullscreenCount() || vertexCount == 0 ||
+      instanceCount == 0 || width == 0 || height == 0)
+    return;
+  const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
+  if (!fs.valid || fs.bindingCount == 0) return;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (slot.hdr.view == VK_NULL_HANDLE) return;
+  std::vector<VkDescriptorBufferInfo> infos(bufferCount);
+  for (u32 i = 0; i < bufferCount; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) return;
+    infos[i] = VkDescriptorBufferInfo{
+        .buffer = impl.buffers.buffer(bufferHandles[i]),
+        .offset = 0,
+        .range = impl.buffers.size(bufferHandles[i]),
+    };
+  }
+  const VkDescriptorImageInfo envInfo{
+      .sampler = impl.albedoSampler,
+      .imageView =
+          envTexture < impl.textures.size() && impl.textureAlive[envTexture]
+              ? impl.textures[envTexture].view
+              : impl.dummyTexture.view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  // The scene's albedo/MR array (or the dummy - the set must always be
+  // validly written) as SAMPLED_IMAGE + SAMPLER, decode's pairing.
+  const VkDescriptorImageInfo albedoInfo{
+      .sampler = VK_NULL_HANDLE,
+      .imageView = albedoTexture < impl.textures.size() &&
+                           impl.textureAlive[albedoTexture]
+                       ? impl.textures[albedoTexture].view
+                       : impl.dummyTexture.view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  const VkDescriptorImageInfo albedoSamplerInfo{
+      .sampler = impl.albedoSampler,
+      .imageView = VK_NULL_HANDLE,
+      .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+  };
+  // Validate the binding map BEFORE opening the pass.
+  std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
+  const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+  u32 nextBuffer = 0;
+  for (u32 b = 0; b < fs.bindingCount; ++b) {
+    writes[b] = VkWriteDescriptorSet{
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet = set,
+        .dstBinding = b,
+        .descriptorCount = 1,
+        .descriptorType = fs.bindingTypes[b],
+    };
+    if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+      writes[b].pImageInfo = &envInfo;
+    } else if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+      writes[b].pImageInfo = &albedoInfo;
+    } else if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_SAMPLER) {
+      writes[b].pImageInfo = &albedoSamplerInfo;
+    } else {
+      if (nextBuffer >= bufferCount) {
+        KENSHIN_ERROR("[vulkan] drawTranslucent: {} handles < {} bindings",
+                      bufferCount, fs.bindingCount);
+        return;
+      }
+      writes[b].pBufferInfo = &infos[nextBuffer++];
+    }
+  }
+
+  // The HDR target sits in SHADER_READ after drawLighting: LOAD it (the
+  // lit opaque frame is the blend destination), then park it back for
+  // TAA/tonemap.
+  impl.cmd.endPass();
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(
+          slot.hdr.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+          VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+  {
+    const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "translucent"};
+    impl.cmd.beginColorPass(slot.hdr.view, width, height,
+                            VK_ATTACHMENT_LOAD_OP_LOAD,
+                            VkRect2D{{0, 0}, {width, height}}, 0.0f);
+    vkUpdateDescriptorSets(impl.device.device, fs.bindingCount, writes.data(),
+                           0, nullptr);
+    vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            fs.layout, 0, 1, &set, 0, nullptr);
+    vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      fs.pipeline);
+    vkCmdPushConstants(
+        impl.cmd.cmd(), fs.layout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        static_cast<u32>(pushBytes), push);
+    vkCmdDraw(impl.cmd.cmd(), vertexCount, instanceCount, 0, 0);
+    impl.cmd.endPass();
+  }
+  CommandContext::pipelineBarrier(
+      impl.cmd.cmd(),
+      CommandContext::imageBarrier(slot.hdr.image,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
+}
+
 u32 VulkanBackend::createShadowDecodePipeline(
     const FullscreenPipelineInfo& info) {
   return m_impl->pipelines.createShadowDecode(m_impl->device.device, info);
@@ -2079,7 +2202,7 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
   static const VkFormat kTaaFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
   bool taaPairFresh = false;
   if (impl.taa[0].image == VK_NULL_HANDLE || impl.taaSize != width ||
-      impl.taa[1].image == VK_NULL_HANDLE) {
+      impl.taaHeight != height || impl.taa[1].image == VK_NULL_HANDLE) {
     // Deferred destruction (the mesh-buffer idiom): the old pair may
     // still be bound by an in-flight frame - freeing it now lets the
     // allocator hand the memory to the new pair while frame k's
@@ -2113,6 +2236,7 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
       impl.taaLayout[i] = VK_IMAGE_LAYOUT_UNDEFINED;
     }
     impl.taaSize = width;
+    impl.taaHeight = height;
     impl.taaParity = 0;
     taaPairFresh = true;
     KENSHIN_INFO("[vulkan] taa pair resized {}x{}", width, height);
@@ -2334,7 +2458,21 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
 
 u32 VulkanBackend::createNullPipeline(const FullscreenPipelineInfo& info) {
   FullscreenPipelineInfo patched = info;
-  patched.conservativeRaster = m_impl->context.supportsConservativeRaster;
+  // raster_hw's VS emits the 1/256-SNAPPED corners, so a rasterizer
+  // with >= 8 subpixel bits reproduces the SW-agreed triangle exactly
+  // and needs no overestimation (which cost ~40% of the HW path in
+  // extra fragment invocations). Coarser snaps keep the conservative
+  // fallback - the PS's exact test still rejects the extra pixels.
+  patched.conservativeRaster =
+      m_impl->context.supportsConservativeRaster &&
+      m_impl->context.props.limits.subPixelPrecisionBits < 8;
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    KENSHIN_INFO("[vulkan] HW raster: {} subpixel bits -> conservative {}",
+                 m_impl->context.props.limits.subPixelPrecisionBits,
+                 patched.conservativeRaster ? "ON (fallback)" : "off");
+  }
   return m_impl->pipelines.createNullRaster(m_impl->device.device, patched);
 }
 
@@ -2454,10 +2592,22 @@ void VulkanBackend::submitChain() {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
       .commandBuffer = slot.computeCullCb,
   };
+  VkSemaphoreSubmitInfo waits[2] = {waitInfo, {}};
+  u32 waitCount = 0;
+  if (prev > 0) waits[waitCount++] = waitInfo;
+  if (impl.chainGraphicsWait > 0) {
+    waits[waitCount++] = VkSemaphoreSubmitInfo{
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+        .semaphore = impl.frameSync.frameTimeline,
+        .value = impl.chainGraphicsWait,
+        .stageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+    };
+    impl.chainGraphicsWait = 0;
+  }
   const VkSubmitInfo2 submit{
       .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
-      .waitSemaphoreInfoCount = prev > 0 ? 1u : 0u,
-      .pWaitSemaphoreInfos = &waitInfo,
+      .waitSemaphoreInfoCount = waitCount,
+      .pWaitSemaphoreInfos = waits,
       .commandBufferInfoCount = 1,
       .pCommandBufferInfos = &cmdSubmit,
       .signalSemaphoreInfoCount = 1,
@@ -2470,6 +2620,13 @@ void VulkanBackend::submitChain() {
     impl.chainSubmittedThisFrame = true;
   }
   impl.computeOverride = VK_NULL_HANDLE;
+}
+
+void VulkanBackend::chainWaitGraphics() {
+  Impl& impl = *m_impl;
+  // During recording, timelineValue is the value the PREVIOUS frame's
+  // graphics submission signals (this frame's is assigned at endFrame).
+  if (impl.asyncActive) impl.chainGraphicsWait = impl.frameSync.timelineValue;
 }
 
 bool VulkanBackend::chainOnComputeQueue() const {

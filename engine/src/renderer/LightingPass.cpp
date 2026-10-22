@@ -1,5 +1,6 @@
 #include "kenshin/renderer/LightingPass.h"
 
+#include <cmath>
 #include <cstring>
 
 #include "kenshin/backend/RenderBackend.h"
@@ -37,7 +38,7 @@ bool LightingPass::init(backend::IRenderBackend& backend,
   m_lightBuffer = backend.createBuffer(desc);
   // M8.3: the environment table (binding 4): [0] sky rgb + pad,
   // [1] ground rgb + pad - the hemisphere ambient's two poles.
-  desc.size = 2 * sizeof(glm::vec4);
+  desc.size = 11 * sizeof(glm::vec4);
   desc.debugName = "env-table";
   m_envBuffer = backend.createBuffer(desc);
   // M9.1: the shadow parameter block (binding 6).
@@ -61,10 +62,13 @@ bool LightingPass::init(backend::IRenderBackend& backend,
     mat[6] = 0.0f;
     mat[7] = 0.0f;
   }
+  // (The shadow-params check used to sit AFTER the return's semicolon
+  // - a dead expression statement; a failed allocation passed init and
+  // draw() then wrote through a null mapping.)
   return m_lightBuffer != backend::IRenderBackend::kInvalidBufferHandle &&
          m_materialDummy != backend::IRenderBackend::kInvalidBufferHandle &&
-         m_envBuffer != backend::IRenderBackend::kInvalidBufferHandle;
-  m_shadowParams != backend::IRenderBackend::kInvalidBufferHandle;
+         m_envBuffer != backend::IRenderBackend::kInvalidBufferHandle &&
+         m_shadowParams != backend::IRenderBackend::kInvalidBufferHandle;
 }
 
 void LightingPass::draw(backend::IRenderBackend& backend,
@@ -74,8 +78,8 @@ void LightingPass::draw(backend::IRenderBackend& backend,
                         float ambient, const glm::vec3& skyColor,
                         const glm::vec3& groundColor, const ShadowLevel* levels,
                         u32 levelCount, float extent0, const glm::vec3& origin,
-                        u32 width, u32 height, u32 envTexture,
-                        float envMaxLod) {
+                        u32 width, u32 height, u32 envTexture, float envMaxLod,
+                        const IrradianceSH* envSH, float envIntensity) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   const u32 count =
       static_cast<u32>(std::min<usize>(lights.size(), kMaxLights));
@@ -104,8 +108,10 @@ void LightingPass::draw(backend::IRenderBackend& backend,
     std::memcpy(table, lights.data(), count * sizeof(GpuLightC));
   }
   auto* env = static_cast<glm::vec4*>(backend.mappedPtr(m_envBuffer));
-  env[0] = glm::vec4(skyColor, 0.0f);
-  env[1] = glm::vec4(groundColor, 0.0f);
+  env[0] = glm::vec4(skyColor, envSH ? 1.0f : 0.0f);
+  env[1] = glm::vec4(groundColor, envIntensity);
+  for (u32 k = 0; k < 9; ++k)
+    env[2 + k] = envSH ? (*envSH)[k] : glm::vec4(0.0f);
   // shadowParams layout (lighting.slang's header comment): [0]
   // header, [1] origin, level L at 2 + 6*L: [base] pad, [base+1]
   // (mapSize, bias, texelWorld, enabled), [base+2..5] viewProj cols.
@@ -133,9 +139,53 @@ void LightingPass::draw(backend::IRenderBackend& backend,
   // viewportAmb.w: the env probe's max prefiltered LOD (roughness ->
   // LOD ladder scale).
   push.viewportAmb.w = envMaxLod;
-  const u32 buffers[3] = {m_lightBuffer, m_envBuffer, m_shadowParams};
+  // Per-slot snapshots: these shared mapped blocks are rewritten every
+  // frame (panel-driven light/shadow/env values) while the previous
+  // frame's read may still be in flight - the same tear the TAA params
+  // had (snapshotHostBuffer copies into the slot's private mirror).
+  const u32 buffers[3] = {backend.snapshotHostBuffer(m_lightBuffer),
+                          backend.snapshotHostBuffer(m_envBuffer),
+                          backend.snapshotHostBuffer(m_shadowParams)};
   backend.drawLighting(m_pipeline, buffers, 3, &push, sizeof(push), width,
                        height, envTexture);
+}
+
+LightingPass::IrradianceSH LightingPass::projectIrradianceSH(const float* rgba,
+                                                             u32 width,
+                                                             u32 height) {
+  // Ramamoorthi & Hanrahan 2001: L_k = sum L(w) Y_k(w) dw over the
+  // texels (dw = (2pi/W)(pi/H) sin(theta)), then irradiance-convolve
+  // with A0 = pi, A1 = 2pi/3, A2 = pi/4 and divide by pi (Lambert).
+  double acc[9][3] = {};
+  const double kPi = 3.14159265358979323846;
+  for (u32 y = 0; y < height; ++y) {
+    const double theta = (y + 0.5) / height * kPi;
+    const double z = std::cos(theta), st = std::sin(theta);
+    const double dw = (2.0 * kPi / width) * (kPi / height) * st;
+    for (u32 x = 0; x < width; ++x) {
+      const double a = ((x + 0.5) / width - 0.5) * 2.0 * kPi;
+      const double dx = std::cos(a) * st, dy = std::sin(a) * st;
+      const double basis[9] = {0.282095,
+                               0.488603 * dy,
+                               0.488603 * z,
+                               0.488603 * dx,
+                               1.092548 * dx * dy,
+                               1.092548 * dy * z,
+                               0.315392 * (3.0 * z * z - 1.0),
+                               1.092548 * dx * z,
+                               0.546274 * (dx * dx - dy * dy)};
+      const float* t = rgba + (usize(y) * width + x) * 4;
+      for (int k = 0; k < 9; ++k)
+        for (int c = 0; c < 3; ++c) acc[k][c] += t[c] * basis[k] * dw;
+    }
+  }
+  const double band[9] = {1.0,  2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.25,
+                          0.25, 0.25,      0.25,      0.25};
+  IrradianceSH sh{};
+  for (int k = 0; k < 9; ++k)
+    sh[k] = glm::vec4(f32(acc[k][0] * band[k]), f32(acc[k][1] * band[k]),
+                      f32(acc[k][2] * band[k]), 0.0f);
+  return sh;
 }
 
 void LightingPass::onShutdown(backend::IRenderBackend& backend) {
@@ -143,7 +193,7 @@ void LightingPass::onShutdown(backend::IRenderBackend& backend) {
   if (m_materialDummy != ~0u) backend.destroyBuffer(m_materialDummy);
   if (m_envBuffer != ~0u) backend.destroyBuffer(m_envBuffer);
   if (m_shadowParams != ~0u) backend.destroyBuffer(m_shadowParams);
-  m_lightBuffer = m_materialDummy = ~0u;
+  m_lightBuffer = m_materialDummy = m_envBuffer = m_shadowParams = ~0u;
   m_pipeline = ~0u;  // the pipeline dies with PipelineStore; nothing owned
 }
 

@@ -943,6 +943,9 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
           // washed warm gray after lighting.
           GltfMaterial gm;
           gm.kd = glm::vec3(1.0f);
+          if (const JVal* ds = jm.find("doubleSided");
+              ds && ds->type == JVal::Bool)
+            gm.doubleSided = ds->boolean;
           int imgIdx = -1;
           if (const JVal* pbr = jm.find("pbrMetallicRoughness")) {
             if (const JVal* f = pbr->find("baseColorFactor");
@@ -1009,6 +1012,25 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
                     usedImages[usize(slot)].name =
                         "mat" + std::to_string(usedMaterials.size()) + "_mr";
                 }
+              }
+            }
+          }
+          // normalTexture (tangent-space; LINEAR data). texCoord != 0 is
+          // not supported (one UV set) - warn when the asset asks for it.
+          if (const JVal* nt = jm.find("normalTexture");
+              nt && g.textures && g.images) {
+            u32 nTex = 0xFFFFFFFFu, nImg = 0xFFFFFFFFu;
+            if (checkedU32(nt->numOr("index", 4294967295.0), nTex) &&
+                nTex < g.textures->size() &&
+                checkedU32(g.textures->at(nTex).numOr("source", 4294967295.0),
+                           nImg) &&
+                nImg < g.images->size()) {
+              const int slot = slotForImage(int(nImg));
+              if (slot >= 0) {
+                gm.nrmImage = slot;
+                if (usedImages[usize(slot)].name.empty())
+                  usedImages[usize(slot)].name =
+                      "mat" + std::to_string(usedMaterials.size()) + "_nrm";
               }
             }
           }

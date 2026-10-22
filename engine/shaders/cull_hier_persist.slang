@@ -97,6 +97,12 @@ struct GpuHierNode {
 [[vk::binding(12)]] StructuredBuffer<uint2> groupRanges;
 [[vk::binding(13)]] RWStructuredBuffer<uint> queueWords;
 [[vk::binding(14)]] RWStructuredBuffer<uint> state;
+// The pair-list capacity (the shared m_pairCapBuffer, cull_hier_level's
+// binding 17): every append reserves, then range-checks the write (the
+// 09-11 saturation discipline - persist was the one cull path left
+// writing unchecked; with maxPairs = min(instances x clusters, 4M) a
+// large scene could append past all three lists).
+[[vk::binding(15)]] StructuredBuffer<uint> pairCaps;
 
 static const uint kEmpty = 0xFFFFFFFFu;
 
@@ -206,7 +212,7 @@ void emitCluster(uint2 item, float4x4 model) {
   if (params[6].x > 0.5 && occluded(item, model)) {
     uint pend = 0;
     InterlockedAdd(counters[4], 1, pend);
-    pendingPairs[pend] = item;
+    if (pend < pairCaps[0]) pendingPairs[pend] = item;
     return;
   }
 
@@ -221,7 +227,13 @@ void emitCluster(uint2 item, float4x4 model) {
                        model[2].xyz * cluster.bounds.z + model[3].xyz;
       const float sphereR = cluster.bounds.w * maxScale;
       const float dist = max(distance(c, params[0].xyz) - sphereR, 0.1);
-      if (dist < sphereR + params[1].z) hw = false;
+      // Near-plane clusters route to HW (UE: bUseHWRaster |=
+      // Cull.bNeedsClipping): the fixed-function clipper handles crossing
+      // triangles (raster_hw's clipped mode), while SW would Sutherland-
+      // Hodgman-clip and scan the largest, closest triangles of the frame -
+      // its worst case. (The guard used to force these to SW: the old HW
+      // VS divided by w for its snap.)
+      const bool nearCross = dist < sphereR + params[1].z;
       // [6].w > 0 = perspective tanHalf; < 0 = -extentY for ortho
       // chains (shadow clipmaps) - px/unit is distance-free there
       // (dividing by dist never routed: the M9.1 shadow hw=0 case).
@@ -230,12 +242,12 @@ void emitCluster(uint2 item, float4x4 model) {
               ? (params[6].z * 0.5) / (max(params[6].w, 1e-6) * dist)
               : (params[6].z * 0.5) / max(-params[6].w, 1e-6);
       const float edgePx = aabbs[3u * item.y + 2u].x * maxScale * pxPerUnit;
-      hw = hw && edgePx >= params[7].y;
+      hw = nearCross || edgePx >= params[7].y;
     }
     if (hw) {
       uint hs = 0;
       InterlockedAdd(counters[7], 1, hs);
-      hwPairs[hs] = item;
+      if (hs < pairCaps[0]) hwPairs[hs] = item;
       InterlockedAdd(counters[6], cluster.indexCount / 3u);
       return;
     }
@@ -243,7 +255,7 @@ void emitCluster(uint2 item, float4x4 model) {
 
   uint slot = 0;
   InterlockedAdd(counters[0], 1, slot);
-  visiblePairs[slot] = item;
+  if (slot < pairCaps[0]) visiblePairs[slot] = item;
   InterlockedAdd(counters[6], cluster.indexCount / 3u);
 }
 

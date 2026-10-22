@@ -59,16 +59,16 @@ struct ChainInputs {
   /// M9.1: shadow chains set this to skip receiver-only instances
   /// (castShadows == 0 in the chain's instance buffer) at emit time.
   u32 cullNonCasters = 0;
-  u32 hwMode = 0;                // M4.2: 0 = all SW (the default since
-                                 // the 2026-09-19 threshold sweep - the
-                                 // mode-1 rasterizer beat every routing
-                                 // config on all tested scene shapes),
-                                 // 1 = route by threshold, 2 = force HW
-  f32 hwThresholdPx = 1.0f;      // SW/HW routing edge threshold (mode 1
-                                 // only; UE's r.NaniteMinPixelsPerEdgeHW
-                                 // twin - our LOD keeps triangle edges far
-                                 // below the HW crossover, so routing lost
-                                 // its workload)
+  u32 hwMode = 0;            // M4.2: 0 = all SW (the default since
+                             // the 2026-09-19 threshold sweep - the
+                             // mode-1 rasterizer beat every routing
+                             // config on all tested scene shapes),
+                             // 1 = route by threshold, 2 = force HW
+  f32 hwThresholdPx = 1.0f;  // SW/HW routing edge threshold (mode 1
+                             // only; UE's r.NaniteMinPixelsPerEdgeHW
+                             // twin - our LOD keeps triangle edges far
+                             // below the HW crossover, so routing lost
+                             // its workload)
   /// M5.2/M5.3: 0 = linear expand+per-cluster cull (differential
   /// reference), 1 = BVH8 level-wise dispatch (the default), 2 = the
   /// M5.3 persistent-threads traversal (single dispatch + MPMC ticket
@@ -88,6 +88,13 @@ struct ChainInputs {
   /// tooling - adds two atomics per triangle; leave off for
   /// benchmarks.
   u32 rasterProbe = 0;
+  /// Count HW-path pixel writes into the main raster's write stat
+  /// (readStats [5]). A per-fragment atomic on ONE address: it
+  /// serializes every HW fragment (lowpoly close-up: 3.22 ms with it,
+  /// 0.91 ms without - the HW path lost to SW on 150 px triangles
+  /// because of a stat). Tests keep it on; the app turns it off unless
+  /// asked.
+  bool hwPixelStats = true;
 };
 
 /// M6.3 paged geometry: the buffer handles the raster/decode passes
@@ -296,6 +303,10 @@ class VisBufferChain {
   u32 m_hzb[kSlots]{};
   u32 m_hzbParams[kSlots]{};  // (w,h) upload for build_hzb
   bool m_hzbValid[kSlots]{};
+  // The slot's final HZB was built on the GRAPHICS queue after the HW
+  // raster draw (routing on): the next chain must wait that frame's
+  // graphics submission before its Main cull reads the pyramid.
+  bool m_hzbOnGraphics[kSlots]{};
   glm::mat4 m_prevVP[kSlots]{};
   glm::vec3 m_prevCam[kSlots]{};
   u32 m_aabbBuffer = ~0u;  // runtime-derived per-cluster AABBs (static)

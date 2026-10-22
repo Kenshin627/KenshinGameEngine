@@ -216,8 +216,12 @@ bool FrameSync::ensureOffscreens(const VulkanDevice& device, u32 width,
 
 bool FrameSync::ensureGBuffer(const VulkanDevice& device, u32 width,
                               u32 height) {
+  // GBuffer B is sRGB-encoded: fsGBuffer writes LINEAR base color, and
+  // an 8-bit UNORM store of linear albedo bands the darks (linear 0.02
+  // sits 5 codes above black - the dark camo). The alpha channel (the
+  // packed roughness/metallic bits) is linear in an _SRGB format.
   static const VkFormat kFormats[2] = {VK_FORMAT_R16G16B16A16_SFLOAT,
-                                       VK_FORMAT_R8G8B8A8_UNORM};
+                                       VK_FORMAT_R8G8B8A8_SRGB};
   bool anyStale = false;
   for (u32 i = 0; i < kMaxFramesInFlight; ++i)
     for (u32 g = 0; g < 2; ++g)

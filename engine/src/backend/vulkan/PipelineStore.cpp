@@ -311,7 +311,7 @@ u32 PipelineStore::createFullscreen(
 u32 PipelineStore::createFullscreenVariant(
     VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info,
     const VkFormat* colorFormats, u32 colorCount, VkFormat depthFormat,
-    bool mixedLayout) {
+    bool mixedLayout, bool premultipliedBlend) {
   if (info.vsSpirv == nullptr || info.vsBytes == 0 || info.fsSpirv == nullptr ||
       info.fsBytes == 0)
     return IRenderBackend::kInvalidPipelineHandle;
@@ -420,10 +420,22 @@ u32 PipelineStore::createFullscreenVariant(
       .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
   };
   VkPipelineColorBlendAttachmentState blendAttachments[2] = {};
-  for (u32 a = 0; a < colorCount; ++a)
+  for (u32 a = 0; a < colorCount; ++a) {
     blendAttachments[a].colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    if (premultipliedBlend) {
+      blendAttachments[a].blendEnable = VK_TRUE;
+      blendAttachments[a].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+      blendAttachments[a].dstColorBlendFactor =
+          VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+      blendAttachments[a].colorBlendOp = VK_BLEND_OP_ADD;
+      blendAttachments[a].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+      blendAttachments[a].dstAlphaBlendFactor =
+          VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+      blendAttachments[a].alphaBlendOp = VK_BLEND_OP_ADD;
+    }
+  }
   const VkPipelineColorBlendStateCreateInfo colorBlend{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
       .attachmentCount = colorCount,
@@ -496,8 +508,12 @@ u32 PipelineStore::createFullscreenVariant(
 
 u32 PipelineStore::createGBuffer(
     VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
+  // GBuffer B is sRGB-encoded: fsGBuffer writes LINEAR base color, and
+  // an 8-bit UNORM store of linear albedo bands the darks (linear 0.02
+  // sits 5 codes above black - the dark camo). The alpha channel (the
+  // packed roughness/metallic bits) is linear in an _SRGB format.
   static const VkFormat kFormats[2] = {VK_FORMAT_R16G16B16A16_SFLOAT,
-                                       VK_FORMAT_R8G8B8A8_UNORM};
+                                       VK_FORMAT_R8G8B8A8_SRGB};
   // M8.2: MIXED layout - fsGBuffer samples the albedo Texture2DArray
   // (binding 17/18: SAMPLED_IMAGE + SAMPLER) alongside its SSBOs.
   return createFullscreenVariant(device, info, kFormats, 2, VK_FORMAT_UNDEFINED,
@@ -521,14 +537,21 @@ u32 PipelineStore::createTonemap(
                                  VK_FORMAT_UNDEFINED, true);
 }
 
-u32 PipelineStore::createTaa(VkDevice device,
-                             const IRenderBackend::FullscreenPipelineInfo& info) {
+u32 PipelineStore::createTaa(
+    VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
   // RGBA16F color (the resolve target), mixed sampler+SSBO layout
   // (3 Sampler2D + the matrices SSBO - a push block would need 160B;
   // the guaranteed push limit is 128).
   static const VkFormat kFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-  return createFullscreenVariant(device, info, &kFormat, 1,
-                                 VK_FORMAT_UNDEFINED, true);
+  return createFullscreenVariant(device, info, &kFormat, 1, VK_FORMAT_UNDEFINED,
+                                 true);
+}
+
+u32 PipelineStore::createTranslucent(
+    VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
+  static const VkFormat kHdr = VK_FORMAT_R16G16B16A16_SFLOAT;
+  return createFullscreenVariant(device, info, &kHdr, 1, VK_FORMAT_UNDEFINED,
+                                 true, true);
 }
 
 u32 PipelineStore::createShadowDecode(
