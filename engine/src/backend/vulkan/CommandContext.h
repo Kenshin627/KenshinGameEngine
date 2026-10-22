@@ -47,8 +47,8 @@ class CommandContext {
   void beginColorPass(VkImageView color, u32 width, u32 height,
                       VkAttachmentLoadOp loadOp, const VkRect2D& scissorRect,
                       f32 clearValue);
-  void beginGBufferPass(VkImageView colorA, VkImageView colorB, u32 width,
-                        u32 height);
+  void beginGBufferPass(VkImageView colorA, VkImageView colorB,
+                        VkImageView colorC, u32 width, u32 height);
   /// Close the viewport scope (no-op when it never opened).
   void endPass();
   bool passOpen() const { return m_passOpen; }

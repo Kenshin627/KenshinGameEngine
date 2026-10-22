@@ -142,7 +142,8 @@ void TranslucentPass::draw(backend::IRenderBackend& backend,
   push.viewport = glm::vec4(f32(width), f32(height), frame.nearZ, frame.farZ);
   const bool sceneTable = frame.sceneMaterials != ~0u;
   push.envParams = glm::vec4(frame.envMaxLod, frame.envIntensity,
-                             sceneTable ? 1.0f : 0.0f, 0.0f);
+                             sceneTable ? 1.0f : 0.0f,
+                             frame.emissiveStrength);
 
   // Per-slot snapshots of the per-frame host blocks (the LightingPass /
   // TAA lesson: the next frame's CPU write must not tear this frame's

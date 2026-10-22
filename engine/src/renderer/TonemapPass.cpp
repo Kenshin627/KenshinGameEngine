@@ -34,18 +34,21 @@ bool TonemapPass::init(backend::IRenderBackend& backend,
 
 void TonemapPass::draw(backend::IRenderBackend& backend, Operator op,
                        float exposure, const glm::vec4& clearColor, u32 width,
-                       u32 height, bool fromTaa, float sharpen) {
+                       u32 height, bool fromTaa, float sharpen,
+                       float bloomStrength, float bloomInvLevels) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   // TonemapPush: tonemap.slang's TonemapPush, packed identically.
   struct TonemapPushC {
     glm::vec4 clearColorExp;
     glm::vec4 modeViewport;
+    glm::vec4 bloomParams;
   } push;
   push.clearColorExp =
       glm::vec4(clearColor.r, clearColor.g, clearColor.b, exposure);
   push.modeViewport = glm::vec4(static_cast<f32>(static_cast<int>(op)),
                                 1.0f / static_cast<f32>(width),
                                 1.0f / static_cast<f32>(height), sharpen);
+  push.bloomParams = glm::vec4(bloomStrength, bloomInvLevels, 0.0f, 0.0f);
   backend.drawTonemap(m_pipeline, &push, sizeof(push), width, height,
                       fromTaa);
 }

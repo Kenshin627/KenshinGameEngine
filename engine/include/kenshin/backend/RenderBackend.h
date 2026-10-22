@@ -339,6 +339,26 @@ class IRenderBackend {
     (void)push, (void)pushBytes, (void)vertexCount, (void)instanceCount;
     (void)width, (void)height;
   }
+  /// Bloom (bloom.slang): `additive` picks the upsample variant.
+  virtual u32 createBloomPipeline(const FullscreenPipelineInfo& info,
+                                  bool additive) {
+    (void)info, (void)additive;
+    return kInvalidPipelineHandle;
+  }
+  /// Record the whole bloom chain over this frame's resolved HDR (the
+  /// TAA output when `fromTaa`, else the slot HDR): `levels` 13-tap
+  /// downsamples into backend-owned half-resolution targets (one
+  /// pipeline instance per pass - a descriptor set is written once per
+  /// frame), then levels-1 tent upsamples blended additively into the
+  /// next larger level. `push` holds one 32B block per pass, downs
+  /// first. A following drawTonemap samples the top level. Returns
+  /// false when nothing was recorded (tonemap then gets no bloom).
+  virtual bool drawBloom(const u32* downPipelines, const u32* upPipelines,
+                         u32 levels, bool fromTaa, u32 width, u32 height) {
+    (void)downPipelines, (void)upPipelines, (void)levels, (void)fromTaa;
+    (void)width, (void)height;
+    return false;
+  }
   virtual u32 createTaaPipeline(const FullscreenPipelineInfo& info) = 0;
   virtual void drawTaa(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                        const void* push, usize pushBytes, u32 width,

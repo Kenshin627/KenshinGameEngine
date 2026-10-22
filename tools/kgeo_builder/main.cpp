@@ -414,6 +414,94 @@ int main(int argc, char** argv) {
                          sunk, kSink);
         }
       }
+      // Opaque layer separation. Materials are simplified in separate
+      // clodBuild runs (no cluster mixes materials), so geometry that
+      // sits a hair BEHIND another material's surface - the Vulture
+      // keeps helmet triangles 0.0009 fit units under each eye lens,
+      // below one quantization step and one pixel of LOD error - pokes
+      // through as soon as either surface is simplified (black wedges
+      // in the lens that change with the error threshold). A vertex
+      // with a DIFFERENT opaque material in front of it (closest point
+      // within kLayer, on its normal's side) moves back along its
+      // normal until the gap is kLayer. Only geometry hidden at full
+      // detail moves; the covering surface is untouched.
+      if (!mesh.triMaterial.empty() &&
+          mesh.normals.size() == mesh.positions.size()) {
+        using kenshin::u32;
+        using kenshin::usize;
+        const float kLayer = fit > 0.0f ? fit * 0.004f : 0.008f;
+        const float cell = kLayer * 4.0f;
+        const auto P = [&](u32 v) {
+          return glm::vec3(mesh.positions[usize(v) * 3],
+                           mesh.positions[usize(v) * 3 + 1],
+                           mesh.positions[usize(v) * 3 + 2]);
+        };
+        const auto key = [&](float x) {
+          return static_cast<int>(std::floor(x / cell));
+        };
+        std::map<std::tuple<int, int, int>, std::vector<u32>> grid;
+        std::vector<u32> vertMat(mesh.vertexCount(), 0xFFFFFFFFu);
+        for (usize t = 0; t < mesh.triMaterial.size(); ++t) {
+          const u32 m = mesh.triMaterial[t];
+          for (int k = 0; k < 3; ++k) vertMat[mesh.indices[t * 3 + k]] = m;
+          const glm::vec3 a = P(mesh.indices[t * 3]),
+                          b = P(mesh.indices[t * 3 + 1]),
+                          c = P(mesh.indices[t * 3 + 2]);
+          const glm::vec3 lo = glm::min(a, glm::min(b, c)) - kLayer;
+          const glm::vec3 hi = glm::max(a, glm::max(b, c)) + kLayer;
+          const int x0 = key(lo.x), x1 = key(hi.x), y0 = key(lo.y),
+                    y1 = key(hi.y), z0 = key(lo.z), z1 = key(hi.z);
+          if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 4096) continue;
+          for (int x = x0; x <= x1; ++x)
+            for (int y = y0; y <= y1; ++y)
+              for (int z = z0; z <= z1; ++z)
+                grid[{x, y, z}].push_back(static_cast<u32>(t));
+        }
+        bool multi = false;
+        for (u32 m : mesh.triMaterial) multi |= m != mesh.triMaterial[0];
+        usize moved = 0;
+        std::vector<std::pair<usize, glm::vec3>> pushes;  // applied after
+                                                          // the scan
+        if (multi)
+          for (usize v = 0; v < vertMat.size(); ++v) {
+            if (vertMat[v] == 0xFFFFFFFFu) continue;
+            const glm::vec3 p = P(static_cast<u32>(v));
+            glm::vec3 n(mesh.normals[v * 3], mesh.normals[v * 3 + 1],
+                        mesh.normals[v * 3 + 2]);
+            const float nl = glm::length(n);
+            if (!(nl > 1e-6f)) continue;
+            n /= nl;
+            const auto it = grid.find({key(p.x), key(p.y), key(p.z)});
+            if (it == grid.end()) continue;
+            float gap = kLayer;
+            for (const u32 t : it->second) {
+              if (mesh.triMaterial[t] == vertMat[v]) continue;
+              const glm::vec3 a = P(mesh.indices[t * 3]),
+                              b = P(mesh.indices[t * 3 + 1]),
+                              c = P(mesh.indices[t * 3 + 2]);
+              const float d2 = pointTriDist2(p, a, b, c);
+              if (d2 >= gap * gap) continue;
+              // In FRONT: the other surface lies on the normal's side
+              // (its plane crosses the normal ray ahead of p).
+              const glm::vec3 fn = glm::cross(b - a, c - a);
+              const float denom = glm::dot(fn, n);
+              if (std::abs(denom) < 1e-12f) continue;
+              const float tHit = glm::dot(fn, a - p) / denom;
+              if (tHit <= 0.0f) continue;
+              gap = std::sqrt(d2);
+            }
+            if (gap < kLayer) pushes.emplace_back(v, n * (kLayer - gap));
+          }
+        for (const auto& [v, d] : pushes) {
+          for (int k = 0; k < 3; ++k) mesh.positions[v * 3 + k] -= d[k];
+          ++moved;
+        }
+        if (moved)
+          KENSHIN_INFO(
+              "[builder] layer separation: {} covered verts pushed "
+              "back to a {} gap",
+              moved, kLayer);
+      }
       // glTF doubleSided: every raster path (SW edge sign, HW cull
       // BACK) drops back faces, so single-sheet double-sided geometry
       // (visors, liners, cloth) shows holes wherever it curves away
@@ -682,6 +770,7 @@ int main(int argc, char** argv) {
         if (!mrFile.empty()) dm.mrPath = mrFile;
         const std::string nrmFile = imageFile(gm.nrmImage, "_nrm");
         if (!nrmFile.empty()) dm.nrmPath = nrmFile;
+        for (int c = 0; c < 3; ++c) dm.emissive[c] = gm.emissive[c];
         dag.materials.push_back(dm);
       }
     } else {

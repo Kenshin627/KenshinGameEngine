@@ -162,6 +162,7 @@ float2 v5Uv(uint vi, uint uvBase, uint poolTotal, uint vertexOffset,
 struct GpuMaterial {
   float4 kdTex;   // rgb kd, a = texture-array layer (-1 = untextured)
   float4 params;  // x roughness, y metallic, z MR layer, w normal layer (-1 = none)
+  float4 emissive;  // rgb emitted radiance (linear), w pad
 };
 
 struct DecodePush {
@@ -607,12 +608,15 @@ struct VSOut {
 struct GBufferOut {
   float4 a : SV_Target0;
   float4 b : SV_Target1;
+  float4 c : SV_Target2;  // emissive radiance (RGBA16F) - added unlit
 };
 
 [shader("fragment")] GBufferOut fsGBuffer(float4 frag : SV_Position) {
   GBufferOut o;
   o.a = float4(0, 0, 0, 0);
   o.b = float4(0, 0, 0, 0);
+  o.c = float4(0, 0, 0, 0);
+  float3 emissiveOut = float3(0.0);
 
   const float2 wh = push.viewport.xy;
   const uint2 pixel = uint2(frag.xy);
@@ -850,6 +854,7 @@ struct GBufferOut {
     // without it every untextured material rendered the global gray).
     // Linear by spec - only the TEXTURE sample goes through the EOTF.
     kd *= mat.kdTex.rgb;
+    emissiveOut = max(mat.emissive.rgb, float3(0.0));
     // params.z carries the resolved metallicRoughness array layer
     // (-1 = factor-only material).
     float rough = mat.params.x;
@@ -921,6 +926,7 @@ struct GBufferOut {
 
   o.a = float4(nrm, dist);
   o.b = float4(kd, matIdOut);
+  o.c = float4(emissiveOut, 0.0);
   // NaN scrub (crossing-triangle garbage paths) - the lighting pass
   // must never read non-finite GBuffer data.
   if (!(nrm.x >= -1.0 && nrm.x <= 1.0) || !(dist >= 0.0) || !(o.b.x >= 0.0)) {

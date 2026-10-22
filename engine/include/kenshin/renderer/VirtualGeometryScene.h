@@ -176,7 +176,12 @@ class VirtualGeometryScene {
   /// are baked into the records at addMeshPaged time from the dag's
   /// texLayer values).
   u32 materialTableBuffer() const { return m_materialBuffer; }
-  u32 materialCount() const { return u32(m_materialData.size() / 8); }
+  /// GPU material record width (decode_material's GpuMaterial: kdTex,
+  /// params, emissive - 3 float4).
+  static constexpr u32 kMaterialFloats = 12;
+  u32 materialCount() const {
+    return u32(m_materialData.size() / kMaterialFloats);
+  }
   const std::vector<std::string>& materialTexPaths() const {
     return m_materialTexPaths;
   }
@@ -222,11 +227,11 @@ class VirtualGeometryScene {
   std::vector<u32> m_clusterPage;
   std::vector<u32>
       m_clusterMetaFlat;  // v5 per-cluster meta ordinals    // global cluster -> global page
-  std::vector<f32> m_materialData;  // M8.2: 8-f32 GPU material records
+  std::vector<f32> m_materialData;              // 12-f32 GPU material records
   std::vector<std::string> m_materialTexPaths;  // disk-side albedo refs
   std::vector<u32> m_meshMaterialBase;  // per mesh: first material index
-  std::vector<u32> m_pageMetaFlat;              // 6 u32 per global page
-  std::vector<glm::vec4> m_aabbs;  // paged: conservative sphere boxes
+  std::vector<u32> m_pageMetaFlat;      // 6 u32 per global page
+  std::vector<glm::vec4> m_aabbs;       // paged: conservative sphere boxes
   u32 m_pageCount = 0;
   u32 m_pageSlotCount = 0;
   u32 m_pageSlotPool = backend::IRenderBackend::kInvalidBufferHandle;

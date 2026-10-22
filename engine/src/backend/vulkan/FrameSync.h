@@ -34,7 +34,7 @@ struct FrameSlot {
   // decode pass writes and the lighting pass samples (A = RGBA16F
   // normal + euclidean distance, B = RGBA8 base color + reserved).
   // Same retire discipline as `offscreen`.
-  GpuImage gbuffer[2];
+  GpuImage gbuffer[3];  // A normal+dist, B albedo+RM (sRGB), C emissive
   // M8.3: this slot's HDR intermediate (RGBA16F) - the lighting pass's
   // linear output, sampled by the tonemap pass that writes the final
   // LDR into `offscreen`. Same layout cycle and retire discipline as

@@ -35,19 +35,24 @@
 //   0: Sampler2D hdrTex - this frame slot's RGBA16F HDR target (the
 //      backend binds it to the first reflected sampler binding)
 //
-// Push (32B):
+// Push (48B):
 //   float4 clearColorExp - rgb the frame's clear color, a exposure
 //   float4 modeViewport  - x operator, yz = 1/w, 1/h, w = TAA sharpen
+//   float4 bloomParams   - x strength (0 = off), y 1 / level count
 
 struct TonemapPush
 {
     float4 clearColorExp;
     float4 modeViewport;
+    float4 bloomParams;  // x bloom strength (0 = off), y 1 / level count
 };
 
 [[vk::push_constant]] ConstantBuffer<TonemapPush> push;
 
 [[vk::binding(0)]] Sampler2D hdrTex;
+// The bloom chain's top level (half resolution, bilinear upsampled);
+// the backend binds the HDR view here when no bloom ran this frame.
+[[vk::binding(1)]] Sampler2D bloomTex;
 
 struct VSOut
 {
@@ -234,16 +239,55 @@ float3 linearToSrgb(float3 c)
                   c.z <= 0.0031308 ? lo.z : hi.z);
 }
 
+float3 srgbToLinearExact(float3 c)
+{
+    const float3 lo = c / 12.92;
+    const float3 hi = pow(max((c + 0.055) / 1.055, float3(0.0)), float3(2.4));
+    return float3(c.x <= 0.04045 ? lo.x : hi.x, c.y <= 0.04045 ? lo.y : hi.y,
+                  c.z <= 0.04045 ? lo.z : hi.z);
+}
+
+// The selected operator on an exposure-scaled linear color.
+float3 toneMapOp(float3 mapped)
+{
+    if (push.modeViewport.x < 0.5)
+        return mapped / (mapped + float3(1.0, 1.0, 1.0));  // ext. Reinhard
+    if (push.modeViewport.x < 1.5)
+        return acesFitted(mapped);
+    return max(mul(kAP1_2_SRGB, filmToneMap(mul(kSRGB_2_AP1, mapped))),
+               float3(0.0));
+}
+
 [shader("fragment")]
 float4 fsMain(float4 frag : SV_Position) : SV_Target
 {
     const float2 uv = frag.xy * push.modeViewport.yz;
     float4 hdr4 = hdrTex.SampleLevel(uv, 0.0);
+    // Bloom (bloom.slang's chain; bloomParams.x = strength s, .y = 1 /
+    // level count - the chain SUMS its levels). Energy-conserving on
+    // surfaces: scene * (1 - s) + bloom * s.
+    const float s = push.bloomParams.x;
+    float3 bloom = float3(0.0);
+    if (s > 0.0)
+        bloom = max(bloomTex.SampleLevel(uv, 0.0).rgb, float3(0.0)) *
+                push.bloomParams.y;
+    // Background display color: the clear color, plus the bloom halo
+    // spilling past silhouettes (added in display-linear space). Exact
+    // clear color wherever the halo is below half a code value - the
+    // regression net's byte-exact background survives away from glows.
+    float3 background = push.clearColorExp.rgb;
+    if (s > 0.0)
+    {
+        const float3 halo = toneMapOp(bloom * s * push.clearColorExp.a);
+        if (max(halo.x, max(halo.y, halo.z)) > 0.5 / 255.0)
+            background = linearToSrgb(
+                saturate(srgbToLinearExact(push.clearColorExp.rgb) + halo));
+    }
     // Background sentinel: ALPHA 0 passes the clear color through
     // (see the header - an rgb test would misclassify legitimately
     // black lit pixels).
     if (hdr4.a <= 0.0)
-        return float4(push.clearColorExp.rgb, 1.0);
+        return float4(background, 1.0);
     // TAA sharpen (modeViewport.w): the temporal accumulation costs
     // roughly half a pixel of softness; a small unsharp over the
     // RESOLVED frame claws it back. Applied HERE - never inside the
@@ -268,33 +312,19 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
                    float4(0.0));
         hdr4.a = saturate(hdr4.a);
         if (hdr4.a <= 0.0)
-            return float4(push.clearColorExp.rgb, 1.0);
+            return float4(background, 1.0);
     }
     const float coverage = hdr4.a;
-    const float3 hdr = hdr4.rgb / coverage;  // un-premultiply
-    const float3 mapped = hdr * push.clearColorExp.a;
-    float3 outColor;
-    if (push.modeViewport.x < 0.5)
-    {
-        // Extended Reinhard (per-channel; good-enough LDR target).
-        outColor = mapped / (mapped + float3(1.0, 1.0, 1.0));
-    }
-    else if (push.modeViewport.x < 1.5)
-    {
-        outColor = acesFitted(mapped);
-    }
-    else
-    {
-        outColor = max(mul(kAP1_2_SRGB, filmToneMap(mul(kSRGB_2_AP1, mapped))),
-                       float3(0.0));
-    }
+    float3 hdr = hdr4.rgb / coverage;  // un-premultiply
+    if (s > 0.0) hdr = hdr * (1.0 - s) + bloom * s;
+    const float3 outColor = toneMapOp(hdr * push.clearColorExp.a);
     if (!(outColor.x >= 0.0) || !(outColor.y >= 0.0) ||
         !(outColor.z >= 0.0))
         return float4(0.5, 0.0, 0.5, 1.0);  // magenta sentinel
     const float3 display = linearToSrgb(saturate(outColor));
     if (coverage >= 1.0)
         return float4(display, 1.0);
-    // Fractional coverage (TAA silhouettes): composite over the clear
-    // color in display space.
-    return float4(lerp(push.clearColorExp.rgb, display, coverage), 1.0);
+    // Fractional coverage (TAA silhouettes): composite over the
+    // background (clear color + halo) in display space.
+    return float4(lerp(background, display, coverage), 1.0);
 }

@@ -49,6 +49,9 @@ struct GltfMaterial {
                       // their intended depth order to LOD simplification
                       // error and paint opaque blocks over the shell)
   int nrmImage = -1;  // normalTexture image (tangent space, LINEAR)
+  glm::vec3 emissive{0.0f};  // emissiveFactor x KHR_materials_emissive_
+                             // strength (linear radiance; textures: v1
+                             // factor only)
   bool doubleSided = false;  // glTF material.doubleSided (the builder
                              // appends reversed-winding copies: every
                              // raster path culls back faces)

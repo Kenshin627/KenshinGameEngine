@@ -93,8 +93,10 @@ void CommandContext::beginColorPass(VkImageView color, u32 width, u32 height) {
 
 void CommandContext::beginColorPass(VkImageView color, u32 width, u32 height,
                                     VkAttachmentLoadOp loadOp,
-                                    const VkRect2D& scissorRect, f32 clearValue) {
-  const VkClearValue zero{.color = {{clearValue, clearValue, clearValue, clearValue}}};
+                                    const VkRect2D& scissorRect,
+                                    f32 clearValue) {
+  const VkClearValue zero{
+      .color = {{clearValue, clearValue, clearValue, clearValue}}};
   const VkRenderingAttachmentInfo attachment{
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
       .imageView = color,
@@ -126,9 +128,10 @@ void CommandContext::beginColorPass(VkImageView color, u32 width, u32 height,
 }
 
 void CommandContext::beginGBufferPass(VkImageView colorA, VkImageView colorB,
-                                      u32 width, u32 height) {
+                                      VkImageView colorC, u32 width,
+                                      u32 height) {
   const VkClearValue zero{.color = {{0.0f, 0.0f, 0.0f, 0.0f}}};
-  const VkRenderingAttachmentInfo attachments[2] = {
+  const VkRenderingAttachmentInfo attachments[3] = {
       VkRenderingAttachmentInfo{
           .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
           .imageView = colorA,
@@ -145,12 +148,20 @@ void CommandContext::beginGBufferPass(VkImageView colorA, VkImageView colorB,
           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
           .clearValue = zero,
       },
+      VkRenderingAttachmentInfo{
+          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+          .imageView = colorC,
+          .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+          .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+          .clearValue = zero,
+      },
   };
   const VkRenderingInfo renderingInfo{
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
       .renderArea = {0, 0, width, height},
       .layerCount = 1,
-      .colorAttachmentCount = 2,
+      .colorAttachmentCount = 3,
       .pColorAttachments = attachments,
   };
   vkCmdBeginRendering(m_cmd, &renderingInfo);

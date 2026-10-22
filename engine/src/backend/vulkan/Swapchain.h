@@ -45,8 +45,13 @@ struct Swapchain {
   VkResult acquire(VkDevice device, VkSemaphore imageAvailable);
 
   /// Recreate the swapchain for a new size (waits for the device idle).
+  /// While the surface reports a 0x0 extent (window minimized) nothing
+  /// is created - Vulkan forbids zero extents - and the recreate is
+  /// deferred (recreatePending) to the next frame with a real area.
   bool recreate(VkPhysicalDevice physicalDevice, VkDevice device, u32 width,
                 u32 height);
+  bool surfaceHasArea(VkPhysicalDevice physicalDevice) const;
+  bool recreatePending = false;
 
  private:
   const char* m_presentModeName = "FIFO";

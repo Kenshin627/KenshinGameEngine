@@ -90,6 +90,9 @@ float3 shIrradiance(float3 n) {
 // The IBL environment probe: an equirectangular HDR texture whose mip
 // chain is the prefiltered radiance ladder (LOD = roughness).
 [[vk::binding(8)]] Sampler2DArray envMap;  // layer 0 (arrayed views)
+// GBuffer C: emitted radiance (decode_material fsGBuffer) - added
+// unlit (UE adds Emissive into SceneColor in the base pass).
+[[vk::binding(9)]] Sampler2D gbufferC;
 
 // NOTE on matrices: glm stores column-major and Slang's mul reads
 // buffer vec4s as rows - every transform below is an explicit linear
@@ -357,7 +360,10 @@ float3 fresnelSchlick(float ct, float3 f0) {
   const float3 diffuseColor = albedo * (1.0 - rm.y);
   const float3 ambientIrr =
       probe ? shIrradiance(nrm) * envIntensity : hemi * push.viewportAmb.z;
-  const float3 color = diffuseColor * ambientIrr + envSpec + lo;
+  // env[11].x: the emissive strength multiplier (glTF emissiveFactor is
+  // clamped to 1 without KHR_materials_emissive_strength).
+  const float3 emissive = gbufferC.SampleLevel(uv, 0.0).rgb * env[11].x;
+  const float3 color = diffuseColor * ambientIrr + envSpec + lo + emissive;
   // HDR out - scrub garbage (crossing-triangle paths) to the
   // BACKGROUND sentinel (alpha 0); magenta was too easy to miss
   // under an exposure curve.

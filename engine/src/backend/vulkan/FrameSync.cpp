@@ -220,11 +220,12 @@ bool FrameSync::ensureGBuffer(const VulkanDevice& device, u32 width,
   // an 8-bit UNORM store of linear albedo bands the darks (linear 0.02
   // sits 5 codes above black - the dark camo). The alpha channel (the
   // packed roughness/metallic bits) is linear in an _SRGB format.
-  static const VkFormat kFormats[2] = {VK_FORMAT_R16G16B16A16_SFLOAT,
-                                       VK_FORMAT_R8G8B8A8_SRGB};
+  static const VkFormat kFormats[3] = {VK_FORMAT_R16G16B16A16_SFLOAT,
+                                       VK_FORMAT_R8G8B8A8_SRGB,
+                                       VK_FORMAT_R16G16B16A16_SFLOAT};
   bool anyStale = false;
   for (u32 i = 0; i < kMaxFramesInFlight; ++i)
-    for (u32 g = 0; g < 2; ++g)
+    for (u32 g = 0; g < 3; ++g)
       if (!slots[i].gbuffer[g].matches(width, height, kFormats[g]))
         anyStale = true;
   if (!anyStale) return true;
@@ -235,7 +236,7 @@ bool FrameSync::ensureGBuffer(const VulkanDevice& device, u32 width,
       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) {
     FrameSlot& slot = slots[i];
-    for (u32 g = 0; g < 2; ++g) {
+    for (u32 g = 0; g < 3; ++g) {
       if (slot.gbuffer[g].matches(width, height, kFormats[g])) continue;
       retired.push_back({slot.gbuffer[g], frameCounter});
       if (!slot.gbuffer[g].create(device.allocator, device.device, width,

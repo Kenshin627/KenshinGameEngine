@@ -51,6 +51,9 @@ class Window {
   bool create(const WindowDesc& desc);
   void destroy();
   bool isOpen() const { return m_hwnd != nullptr; }
+  /// Minimized, or dragged down to an empty client area: nothing can
+  /// be presented (Vulkan forbids a 0x0 swapchain) - skip the frame.
+  bool hasNoDrawableArea() const;
 
   /// Pump messages (non-blocking). Returns false when the app should exit.
   bool pumpEvents();

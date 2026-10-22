@@ -33,6 +33,11 @@ constexpr u32 kVersion7 =
 constexpr u32 kVersion8 = 8;
 constexpr u32 kVersion9 = 9;    // M9.2: v8 + the imposter atlas section
 constexpr u32 kVersion10 = 10;  // v9 + per-material metallicRoughness map
+// v13: v11 + per-material EMISSIVE - material records grow to 12 f32
+// (v11's 8 + emissive rgb + pad). Skips 12, which the reverted
+// per-triangle-material experiment (a3813c8) used, so no v12 file can be
+// misread as this layout. v11 files keep their 8-f32 records.
+constexpr u32 kVersion13 = 13;
 constexpr u32 kVersion11 = 11;  // v10 + per-material NORMAL map (a third
                                 // path-offset array after mrOff; the
                                 // record's 8th float flags presence)
@@ -44,12 +49,17 @@ constexpr u32 kVersion11 = 11;  // v10 + per-material NORMAL map (a third
 
 constexpr bool isV7Plus(u32 v) {
   return v == kVersion7 || v == kVersion8 || v == kVersion9 ||
-         v == kVersion10 || v == kVersion11;
+         v == kVersion10 || v == kVersion11 || v == kVersion13;
 }
 constexpr bool isV9Plus(u32 v) {
-  return v == kVersion9 || v == kVersion10 || v == kVersion11;
+  return v == kVersion9 || v == kVersion10 || v == kVersion11 ||
+         v == kVersion13;
 }
-constexpr bool isV10Plus(u32 v) { return v == kVersion10 || v == kVersion11; }
+constexpr bool isV10Plus(u32 v) {
+  return v == kVersion10 || v == kVersion11 || v == kVersion13;
+}
+// Carries the nrmOff[] array (v11 and its v13 extension).
+constexpr bool hasNrmTable(u32 v) { return v == kVersion11 || v == kVersion13; }
 
 #pragma pack(push, 4)
 struct FileHeader {
@@ -324,16 +334,21 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
 
   const bool hasImposter = !dag.imposterDepth.empty() &&
                            dag.imposterDepth.size() == dag.imposterTri.size();
-  bool hasMr = false, hasNrm = false;
+  bool hasMr = false, hasNrm = false, hasEmissive = false;
   for (const auto& m : mats) {
     if (!m.mrPath.empty()) hasMr = true;
     if (!m.nrmPath.empty()) hasNrm = true;
+    if (m.emissive[0] > 0.0f || m.emissive[1] > 0.0f || m.emissive[2] > 0.0f)
+      hasEmissive = true;
   }
   // v11 carries the v10 layout plus the normal-map paths (a normal map
   // without an MR map still writes the v10 arrays - mrOff all-absent).
-  const bool isV11 = hasNrm;
+  // v13 (emissive) records are 12 f32; v11 keeps 8. Both carry nrmOff.
+  const bool isV13 = hasEmissive;
+  const bool isV11 = hasNrm || isV13;
   const bool isV10 = hasMr || isV11;
-  const u32 version = isV11         ? kVersion11
+  const u32 version = isV13         ? kVersion13
+                      : isV11       ? kVersion11
                       : isV10       ? kVersion10
                       : hasImposter ? kVersion9
                                     : (compress ? kVersion8 : kVersion7);
@@ -430,9 +445,10 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   }
   while (strings.size() % 4 != 0) strings.push_back('\0');
   if (ok) {
-    std::vector<f32> records(mats.size() * 8);
+    const usize recF = isV13 ? 12 : 8;
+    std::vector<f32> records(mats.size() * recF);
     for (usize m = 0; m < mats.size(); ++m) {
-      f32* r = records.data() + m * 8;
+      f32* r = records.data() + m * recF;
       r[0] = mats[m].kd[0];
       r[1] = mats[m].kd[1];
       r[2] = mats[m].kd[2];
@@ -442,6 +458,8 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
       r[6] = (isV10 && mrOff[m] == 0xFFFFFFFFu) ? -1.0f : 0.0f;
       // v11: normal-map presence (-1 absent); pre-v11 writes 0 = pad.
       r[7] = (isV11 && nrmOff[m] == 0xFFFFFFFFu) ? -1.0f : 0.0f;
+      if (isV13)
+        for (int c = 0; c < 3; ++c) r[8 + c] = mats[m].emissive[c];
     }
     const u32 stringBytes = static_cast<u32>(strings.size());
     ok = std::fwrite(&stringBytes, sizeof(stringBytes), 1, file) == 1 &&
@@ -787,24 +805,30 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     std::vector<u32> mrOff, nrmOff;
     if (!readVector(file, texOff, materialCount) ||
         (isV10Plus(h3.version) && !readVector(file, mrOff, materialCount)) ||
-        (h3.version == kVersion11 &&
-         !readVector(file, nrmOff, materialCount)) ||
-        !readVector(file, records, usize(materialCount) * 8)) {
+        (hasNrmTable(h3.version) && !readVector(file, nrmOff, materialCount)) ||
+        !readVector(
+            file, records,
+            usize(materialCount) * (h3.version == kVersion13 ? 12u : 8u))) {
       log = "truncated (material table)";
       std::fclose(file);
       return false;
     }
     dag.materials.resize(materialCount);
     for (u32 m = 0; m < materialCount; ++m) {
-      const f32* r = records.data() + usize(m) * 8;
+      const usize recF = h3.version == kVersion13 ? 12 : 8;
+      const f32* r = records.data() + usize(m) * recF;
       auto& mat = dag.materials[m];
+      if (recF == 12)
+        for (int c = 0; c < 3; ++c)
+          mat.emissive[c] =
+              (r[8 + c] >= 0.0f && r[8 + c] < 1e4f) ? r[8 + c] : 0.0f;
       mat.kd[0] = r[0];
       mat.kd[1] = r[1];
       mat.kd[2] = r[2];
       mat.roughness = r[4];
       mat.metallic = r[5];
-      if (h3.version == kVersion11 && r[7] >= 0.0f &&
-          nrmOff[m] != 0xFFFFFFFFu && nrmOff[m] < strings.size())
+      if (hasNrmTable(h3.version) && r[7] >= 0.0f && nrmOff[m] != 0xFFFFFFFFu &&
+          nrmOff[m] < strings.size())
         mat.nrmPath = std::string(strings.data() + nrmOff[m]);
       if (isV10Plus(h3.version) && r[6] >= 0.0f && mrOff[m] != 0xFFFFFFFFu &&
           mrOff[m] < strings.size()) {

@@ -1015,6 +1015,17 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
               }
             }
           }
+          if (const JVal* ef = jm.find("emissiveFactor"); ef && ef->size() >= 3)
+            gm.emissive =
+                glm::vec3(f32(ef->at(0).number), f32(ef->at(1).number),
+                          f32(ef->at(2).number));
+          if (const JVal* ext = jm.find("extensions"))
+            if (const JVal* es = ext->find("KHR_materials_emissive_strength"))
+              gm.emissive *= f32(es->numOr("emissiveStrength", 1.0));
+          if (!(gm.emissive.x >= 0.0f && gm.emissive.y >= 0.0f &&
+                gm.emissive.z >= 0.0f && gm.emissive.x < 1e4f &&
+                gm.emissive.y < 1e4f && gm.emissive.z < 1e4f))
+            gm.emissive = glm::vec3(0.0f);  // hostile/garbage factor
           // normalTexture (tangent-space; LINEAR data). texCoord != 0 is
           // not supported (one UV set) - warn when the asset asks for it.
           if (const JVal* nt = jm.find("normalTexture");

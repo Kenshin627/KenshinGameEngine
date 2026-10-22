@@ -35,6 +35,7 @@ struct TranslucentFrame {
   std::span<const GpuLightC> lights;
   const LightingPass::IrradianceSH* envSH = nullptr;
   float envIntensity = 1.0f;
+  float emissiveStrength = 1.0f;  // lighting's env[11].x twin
   u32 envTexture = ~0u;
   float envMaxLod = 1.0f;
   u32 visBuffer = ~0u;  // this frame's VisBuffer (u64 per pixel)

@@ -163,6 +163,12 @@ struct VulkanBackend::Impl {
   u32 taaHeight = 0;  // both extents key the pair (height-only resizes
                       // used to keep a stale-height pair)
   bool taaActive = false;
+  // Bloom chain targets (half, quarter, ... resolution; RGBA16F) +
+  // whether this frame recorded the chain (drawTonemap binds level 0).
+  static constexpr u32 kBloomLevels = 6;
+  GpuImage bloom[kBloomLevels];
+  u32 bloomW = 0, bloomH = 0;
+  bool bloomActive = false;
   // Cross-submission TAA history dependency (see drawTaa): the frame
   // submit waits this timeline value before the resolve's history read.
   u64 taaHistWaitValue = 0;
@@ -479,6 +485,9 @@ void VulkanBackend::shutdown() {
   for (u32 i = 0; i < 2; ++i)
     if (m_impl->taa[i].image != VK_NULL_HANDLE)
       m_impl->taa[i].destroy(m_impl->device.allocator, m_impl->device.device);
+  for (auto& b : m_impl->bloom)
+    if (b.image != VK_NULL_HANDLE)
+      b.destroy(m_impl->device.allocator, m_impl->device.device);
   // Frame resources first: their command buffers still reference the
   // mesh/depth objects below (validation: objects stay "in use" until
   // the referencing command buffer is freed with its pool).
@@ -551,6 +560,7 @@ std::unique_ptr<IRenderBackend> createVulkanBackend() {
 bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   Impl& impl = *m_impl;
   impl.taaActive = false;  // drawTaa re-arms it; drawTonemap reads it
+  impl.bloomActive = false;  // drawBloom re-arms it
   // Headless (no window): no swapchain - record offscreen-only frames
   // (in-frame compute tests, CI). Everything else (pacing, offscreen
   // targets, per-slot recording) runs unchanged.
@@ -665,6 +675,11 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   // headless path has nothing to acquire.
   VkResult acquireResult = VK_SUCCESS;
   if (!headless) {
+    // A recreate deferred while the window was minimized runs first.
+    if (impl.swapchain.recreatePending &&
+        !impl.swapchain.recreate(impl.context.physicalDevice,
+                                 impl.device.device, info.width, info.height))
+      return false;
     acquireResult =
         impl.swapchain.acquire(impl.device.device, slot.imageAvailable);
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -1627,7 +1642,7 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
   // SHADER_READ_ONLY (after it) -> COLOR_ATTACHMENT (next frame).
   // DONT_CARE-style: discard last frame's contents on the way in.
   impl.cmd.endPass();
-  for (u32 g = 0; g < 2; ++g)
+  for (u32 g = 0; g < 3; ++g)
     CommandContext::pipelineBarrier(
         impl.cmd.cmd(), CommandContext::imageBarrier(
                             slot.gbuffer[g].image, VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1636,8 +1651,8 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
   {
     const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "gbuffer-decode"};
-    impl.cmd.beginGBufferPass(slot.gbuffer[0].view, slot.gbuffer[1].view, width,
-                              height);
+    impl.cmd.beginGBufferPass(slot.gbuffer[0].view, slot.gbuffer[1].view,
+                              slot.gbuffer[2].view, width, height);
     // Mixed binding writes (M8.2): STORAGE_BUFFER bindings take the
     // buffer handles in ascending order; the SAMPLED_IMAGE binding
     // gets the albedo view and the SAMPLER binding the albedo sampler.
@@ -1705,7 +1720,7 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
     }
     impl.cmd.endPass();
   }
-  for (u32 g = 0; g < 2; ++g)
+  for (u32 g = 0; g < 3; ++g)
     CommandContext::pipelineBarrier(
         impl.cmd.cmd(),
         CommandContext::imageBarrier(slot.gbuffer[g].image,
@@ -1848,6 +1863,146 @@ void VulkanBackend::drawTranslucent(u32 pipeline, const u32* bufferHandles,
                                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
 }
 
+u32 VulkanBackend::createBloomPipeline(const FullscreenPipelineInfo& info,
+                                       bool additive) {
+  return m_impl->pipelines.createBloom(m_impl->device.device, info, additive);
+}
+
+bool VulkanBackend::drawBloom(const u32* downPipelines,
+                              const u32* upPipelines, u32 levels, bool fromTaa,
+                              u32 width, u32 height) {
+  Impl& impl = *m_impl;
+  levels = (std::min)(levels, Impl::kBloomLevels);
+  if (!impl.frameActive || levels < 2 || width < 4 || height < 4) return false;
+  if (fromTaa && !impl.taaActive) return false;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (slot.hdr.view == VK_NULL_HANDLE) return false;
+  for (u32 k = 0; k < levels; ++k) {
+    const u32 d = downPipelines[k];
+    if (d == kInvalidPipelineHandle || d > impl.pipelines.fullscreenCount() ||
+        !impl.pipelines.fullscreen(d).valid)
+      return false;
+    if (k + 1 < levels) {
+      const u32 u = upPipelines[k];
+      if (u == kInvalidPipelineHandle || u > impl.pipelines.fullscreenCount() ||
+          !impl.pipelines.fullscreen(u).valid)
+        return false;
+    }
+  }
+  // (Re)create the chain on size change - deferred destruction, the
+  // TAA pair's discipline (an in-flight frame may still sample it).
+  if (impl.bloomW != width || impl.bloomH != height ||
+      impl.bloom[0].image == VK_NULL_HANDLE) {
+    for (u32 k = 0; k < Impl::kBloomLevels; ++k) {
+      if (impl.bloom[k].image != VK_NULL_HANDLE) {
+        const VkImage deadImage = impl.bloom[k].image;
+        const VkImageView deadView = impl.bloom[k].view;
+        const VmaAllocation deadAlloc = impl.bloom[k].allocation;
+        const VmaAllocator alloc = impl.device.allocator;
+        const VkDevice dev = impl.device.device;
+        slot.deletionQueue.push([deadImage, deadView, deadAlloc, alloc, dev] {
+          vkDestroyImage(dev, deadImage, nullptr);
+          vkDestroyImageView(dev, deadView, nullptr);
+          vmaFreeMemory(alloc, deadAlloc);
+        });
+        impl.bloom[k] = GpuImage{};
+      }
+      const u32 w = (std::max)(width >> (k + 1), 1u);
+      const u32 h = (std::max)(height >> (k + 1), 1u);
+      if (!impl.bloom[k].create(
+              impl.device.allocator, impl.device.device, w, h,
+              VK_FORMAT_R16G16B16A16_SFLOAT,
+              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+        KENSHIN_ERROR("[vulkan] bloom target creation failed");
+        impl.bloomW = impl.bloomH = 0;
+        return false;
+      }
+    }
+    impl.bloomW = width;
+    impl.bloomH = height;
+  }
+
+  const auto levelW = [&](u32 k) { return (std::max)(width >> (k + 1), 1u); };
+  const auto levelH = [&](u32 k) { return (std::max)(height >> (k + 1), 1u); };
+  const VkImageView sceneView =
+      fromTaa ? impl.taa[impl.taaParity].view : slot.hdr.view;
+  // One pass: target view/extent, source view, pipeline, push, load op.
+  const auto pass = [&](u32 pipeline, VkImageView srcView, u32 srcW, u32 srcH,
+                        u32 dstK, bool firstDown, bool additive,
+                        float radius) {
+    const PipelineStore::Fullscreen& fs = impl.pipelines.fullscreen(pipeline);
+    const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
+    const VkDescriptorImageInfo srcInfo{
+        .sampler = impl.linearSampler,
+        .imageView = srcView,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    std::vector<VkWriteDescriptorSet> writes;
+    for (u32 b = 0; b < fs.bindingCount; ++b)
+      if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+        writes.push_back(VkWriteDescriptorSet{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = set,
+            .dstBinding = b,
+            .descriptorCount = 1,
+            .descriptorType = fs.bindingTypes[b],
+            .pImageInfo = &srcInfo,
+        });
+    vkUpdateDescriptorSets(impl.device.device, static_cast<u32>(writes.size()),
+                           writes.data(), 0, nullptr);
+    // Down: the target's old contents are irrelevant (UNDEFINED); up:
+    // the target keeps its downsample - the additive blend accumulates.
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(),
+        CommandContext::imageBarrier(
+            impl.bloom[dstK].image,
+            additive ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                     : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT));
+    const u32 w = levelW(dstK), h = levelH(dstK);
+    impl.cmd.beginColorPass(impl.bloom[dstK].view, w, h,
+                            additive ? VK_ATTACHMENT_LOAD_OP_LOAD
+                                     : VK_ATTACHMENT_LOAD_OP_CLEAR,
+                            VkRect2D{{0, 0}, {w, h}}, 0.0f);
+    vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            fs.layout, 0, 1, &set, 0, nullptr);
+    vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      fs.pipeline);
+    const float push[8] = {1.0f / float(srcW), 1.0f / float(srcH),
+                           firstDown ? 1.0f : 0.0f, 0.0f,
+                           1.0f / float(w), 1.0f / float(h), radius, 0.0f};
+    vkCmdPushConstants(
+        impl.cmd.cmd(), fs.layout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+        sizeof(push), push);
+    vkCmdDraw(impl.cmd.cmd(), 3, 1, 0, 0);
+    impl.cmd.endPass();
+    CommandContext::pipelineBarrier(
+        impl.cmd.cmd(),
+        CommandContext::imageBarrier(impl.bloom[dstK].image,
+                                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
+  };
+
+  impl.cmd.endPass();
+  const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "bloom"};
+  for (u32 k = 0; k < levels; ++k)
+    pass(downPipelines[k], k == 0 ? sceneView : impl.bloom[k - 1].view,
+         k == 0 ? width : levelW(k - 1), k == 0 ? height : levelH(k - 1), k,
+         k == 0, false, 1.0f);
+  for (u32 k = levels - 1; k >= 1; --k)
+    pass(upPipelines[k - 1], impl.bloom[k].view, levelW(k), levelH(k), k - 1,
+         false, true, 1.0f);
+  impl.bloomActive = true;
+  return true;
+}
+
 u32 VulkanBackend::createShadowDecodePipeline(
     const FullscreenPipelineInfo& info) {
   return m_impl->pipelines.createShadowDecode(m_impl->device.device, info);
@@ -1865,7 +2020,8 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
   if (!fs.valid || fs.bindingCount == 0) return;
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
   if (slot.gbuffer[0].view == VK_NULL_HANDLE ||
-      slot.gbuffer[1].view == VK_NULL_HANDLE || slot.hdr.view == VK_NULL_HANDLE)
+      slot.gbuffer[1].view == VK_NULL_HANDLE ||
+      slot.gbuffer[2].view == VK_NULL_HANDLE || slot.hdr.view == VK_NULL_HANDLE)
     return;
 
   // Buffer infos for the StorageBuffer bindings (consumed in ascending
@@ -1917,7 +2073,7 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
     // this slot's GBuffer views in order (A, then B), and the third
     // the shadow map (NEAREST - depth comparisons must not filter).
     const VkImageView shadowView0 = impl.shadowMap[0].view;
-    VkDescriptorImageInfo imageInfos[6] = {
+    VkDescriptorImageInfo imageInfos[7] = {
         VkDescriptorImageInfo{
             .sampler = impl.linearSampler,
             .imageView = slot.gbuffer[0].view,
@@ -1961,6 +2117,13 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
                              : impl.dummyTexture.view,
             .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         },
+        // GBuffer C: emitted radiance (binding 9 - after the env probe in
+        // ascending binding order).
+        VkDescriptorImageInfo{
+            .sampler = impl.linearSampler,
+            .imageView = slot.gbuffer[2].view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
     };
     std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
     u32 nextImage = 0, nextBuffer = 0;
@@ -1974,10 +2137,10 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
           .descriptorType = fs.bindingTypes[b],
       };
       if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-        // Two GBuffer views, the three clipmap shadow maps, then the
-        // IBL environment probe (the shader declares exactly these six
-        // sampler bindings).
-        if (nextImage >= 6) {
+        // GBuffer A/B, the three clipmap shadow maps, the IBL
+        // environment probe, then GBuffer C (emissive) - the shader
+        // declares exactly these seven sampler bindings.
+        if (nextImage >= 7) {
           bindMismatch = true;
           break;
         }
@@ -2423,6 +2586,12 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
         .imageView = fromTaa ? impl.taa[impl.taaParity].view : slot.hdr.view,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
+    // Second sampler (binding 1): the bloom chain's top level when this
+    // frame recorded it; otherwise the scene view again (the push sets
+    // the bloom strength to 0 then - the set must stay validly written).
+    VkDescriptorImageInfo bloomInfo = imageInfo;
+    if (impl.bloomActive) bloomInfo.imageView = impl.bloom[0].view;
+    u32 nextImage = 0;
     std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
     for (u32 b = 0; b < fs.bindingCount; ++b) {
       writes[b] = VkWriteDescriptorSet{
@@ -2433,7 +2602,7 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
           .descriptorType = fs.bindingTypes[b],
       };
       if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-        writes[b].pImageInfo = &imageInfo;
+        writes[b].pImageInfo = nextImage++ == 0 ? &imageInfo : &bloomInfo;
       }
       // The tonemap shader declares no buffer bindings - anything else
       // in the reflection is a programming error; the dense mixed

@@ -85,7 +85,8 @@ class LightingPass {
             const glm::vec3& groundColor, const ShadowLevel* levels,
             u32 levelCount, float extent0, const glm::vec3& origin, u32 width,
             u32 height, u32 envTexture, float envMaxLod,
-            const IrradianceSH* envSH = nullptr, float envIntensity = 1.0f);
+            const IrradianceSH* envSH = nullptr, float envIntensity = 1.0f,
+            float emissiveStrength = 1.0f);
 
  private:
   u32 m_pipeline = ~0u;

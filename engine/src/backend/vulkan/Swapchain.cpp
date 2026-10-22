@@ -64,8 +64,29 @@ VkResult Swapchain::acquire(VkDevice device, VkSemaphore imageAvailable) {
   return result;
 }
 
+bool Swapchain::surfaceHasArea(VkPhysicalDevice physicalDevice) const {
+  VkSurfaceCapabilitiesKHR caps{};
+  if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface,
+                                                &caps) != VK_SUCCESS)
+    return false;
+  // 0xFFFFFFFF = "the swapchain decides" (always usable).
+  return caps.currentExtent.width == 0xFFFFFFFFu ||
+         (caps.currentExtent.width > 0 && caps.currentExtent.height > 0);
+}
+
 bool Swapchain::recreate(VkPhysicalDevice physicalDevice, VkDevice device,
                          u32 width, u32 height) {
+  if (!surfaceHasArea(physicalDevice)) {
+    // Minimized mid-frame (present/acquire went out of date as the
+    // window collapsed): the old 0x0 recreate was a validation error and
+    // left 0-size targets behind. Keep the old objects; the next frame
+    // with a real area rebuilds first.
+    if (!recreatePending)
+      KENSHIN_INFO("[vulkan] surface has no area - swapchain recreate deferred");
+    recreatePending = true;
+    return true;
+  }
+  recreatePending = false;
   KE_VK(vkDeviceWaitIdle(device));
   destroySwapchainObjects(device);
   if (!createSwapchain(physicalDevice, device, width, height)) return false;
@@ -107,7 +128,9 @@ bool Swapchain::createSwapchain(VkPhysicalDevice physicalDevice,
   }
 
   VkExtent2D newExtent = caps.currentExtent;
-  if (extent.width == 0xFFFFFFFFu)
+  // The window system lets the swapchain decide (0xFFFFFFFF): use the
+  // requested size. (This tested the OLD `extent` member, not caps.)
+  if (caps.currentExtent.width == 0xFFFFFFFFu)
     newExtent = {width,
                  height};  // some window systems report "match the window"
 

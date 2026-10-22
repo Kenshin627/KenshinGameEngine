@@ -162,6 +162,8 @@ struct ClusterDag {
     // The shading frame is derived per triangle from positions + UVs.
     std::string nrmPath;
     f32 nrmTexLayer = -1.0f;
+    // v11: emitted radiance (linear rgb, added unlit by the lighting).
+    f32 emissive[3] = {0.0f, 0.0f, 0.0f};
   };
   std::vector<DagMaterial> materials;
   /// Per-cluster material id into `materials` (u8 range; stamped into

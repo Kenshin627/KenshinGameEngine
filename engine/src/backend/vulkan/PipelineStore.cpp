@@ -311,7 +311,7 @@ u32 PipelineStore::createFullscreen(
 u32 PipelineStore::createFullscreenVariant(
     VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info,
     const VkFormat* colorFormats, u32 colorCount, VkFormat depthFormat,
-    bool mixedLayout, bool premultipliedBlend) {
+    bool mixedLayout, int blendMode) {
   if (info.vsSpirv == nullptr || info.vsBytes == 0 || info.fsSpirv == nullptr ||
       info.fsBytes == 0)
     return IRenderBackend::kInvalidPipelineHandle;
@@ -419,12 +419,21 @@ u32 PipelineStore::createFullscreenVariant(
   const VkPipelineDepthStencilStateCreateInfo depthStencil{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
   };
-  VkPipelineColorBlendAttachmentState blendAttachments[2] = {};
+  VkPipelineColorBlendAttachmentState blendAttachments[3] = {};
   for (u32 a = 0; a < colorCount; ++a) {
     blendAttachments[a].colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    if (premultipliedBlend) {
+    if (blendMode == 2) {
+      blendAttachments[a].blendEnable = VK_TRUE;
+      blendAttachments[a].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+      blendAttachments[a].dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+      blendAttachments[a].colorBlendOp = VK_BLEND_OP_ADD;
+      blendAttachments[a].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+      blendAttachments[a].dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+      blendAttachments[a].alphaBlendOp = VK_BLEND_OP_ADD;
+    }
+    if (blendMode == 1) {
       blendAttachments[a].blendEnable = VK_TRUE;
       blendAttachments[a].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
       blendAttachments[a].dstColorBlendFactor =
@@ -512,11 +521,12 @@ u32 PipelineStore::createGBuffer(
   // an 8-bit UNORM store of linear albedo bands the darks (linear 0.02
   // sits 5 codes above black - the dark camo). The alpha channel (the
   // packed roughness/metallic bits) is linear in an _SRGB format.
-  static const VkFormat kFormats[2] = {VK_FORMAT_R16G16B16A16_SFLOAT,
-                                       VK_FORMAT_R8G8B8A8_SRGB};
+  static const VkFormat kFormats[3] = {VK_FORMAT_R16G16B16A16_SFLOAT,
+                                       VK_FORMAT_R8G8B8A8_SRGB,
+                                       VK_FORMAT_R16G16B16A16_SFLOAT};
   // M8.2: MIXED layout - fsGBuffer samples the albedo Texture2DArray
   // (binding 17/18: SAMPLED_IMAGE + SAMPLER) alongside its SSBOs.
-  return createFullscreenVariant(device, info, kFormats, 2, VK_FORMAT_UNDEFINED,
+  return createFullscreenVariant(device, info, kFormats, 3, VK_FORMAT_UNDEFINED,
                                  true);
 }
 
@@ -551,7 +561,15 @@ u32 PipelineStore::createTranslucent(
     VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info) {
   static const VkFormat kHdr = VK_FORMAT_R16G16B16A16_SFLOAT;
   return createFullscreenVariant(device, info, &kHdr, 1, VK_FORMAT_UNDEFINED,
-                                 true, true);
+                                 true, 1);
+}
+
+u32 PipelineStore::createBloom(
+    VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info,
+    bool additive) {
+  static const VkFormat kHdr = VK_FORMAT_R16G16B16A16_SFLOAT;
+  return createFullscreenVariant(device, info, &kHdr, 1, VK_FORMAT_UNDEFINED,
+                                 true, additive ? 2 : 0);
 }
 
 u32 PipelineStore::createShadowDecode(

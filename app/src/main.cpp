@@ -55,6 +55,7 @@
 #include "kenshin/renderer/StreamingManager.h"
 #include "kenshin/renderer/TaaPass.h"
 #include "kenshin/renderer/TonemapPass.h"
+#include "kenshin/renderer/BloomPass.h"
 #include "kenshin/renderer/TranslucentPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
@@ -166,6 +167,9 @@ struct Args {
   int viewMode = -1;            // --view; -1 = leave the panel state at Final
   float exposure = -1.0f;       // --exposure: seeds the panel value
   float envIntensity = -1.0f;   // --env-intensity: seeds the panel value
+  bool noBloom = false;         // --no-bloom
+  float bloomStrength = -1.0f;  // --bloom-strength: seeds the panel value
+  float emissiveStrength = -1.0f;  // --emissive-strength: ditto
   float hwThresholdPx = -1.0f;  // --hw-threshold: the SW/HW routing edge
                                 // threshold (UE's r.Nanite.MinPixelsPerEdgeHW
                                 // twin; <0 = keep the engine default)
@@ -192,6 +196,12 @@ Args parseArgs(int argc, char** argv) {
       args.exposure = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--env-intensity") == 0 && i + 1 < argc)
       args.envIntensity = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--no-bloom") == 0)
+      args.noBloom = true;
+    else if (std::strcmp(argv[i], "--bloom-strength") == 0 && i + 1 < argc)
+      args.bloomStrength = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--emissive-strength") == 0 && i + 1 < argc)
+      args.emissiveStrength = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--hw-threshold") == 0 && i + 1 < argc)
       args.hwThresholdPx = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
@@ -457,6 +467,15 @@ struct VgDebugState {
   // prefiltered specular).
   kenshin::f32 envIntensity = 0.7f;
   kenshin::f32 exposure = 1.5f;
+  // HDR bloom (BloomPass): the composite weight s of
+  // scene * (1 - s) + bloom * s, and the emissive multiplier (glTF
+  // emissiveFactor is capped at 1 - the Sketchfab exports' glow
+  // needs > 1 to bloom). 16: the Vulture's eyes sit behind a 91%
+  // opaque visor - x16 transmits ~1.4 HDR, enough to read as a glow
+  // with a halo at s = 0.08 without washing the hue out (x30 does).
+  bool bloom = true;
+  kenshin::f32 bloomStrength = 0.08f;
+  kenshin::f32 emissiveStrength = 16.0f;
   // M8.3: the hemisphere ambient's two poles + tonemap operator.
   // Neutral-gray hemisphere by default: colored poles (the old blue
   // sky / warm ground) swing r-g by normal direction more than a dark
@@ -584,6 +603,7 @@ int main(int argc, char** argv) {
   bool lightingReady = false;
   kenshin::renderer::TonemapPass tonemapPass;  // M8.3 HDR chain tail
   kenshin::renderer::TaaPass taaPass;          // M9 temporal resolve
+  kenshin::renderer::BloomPass bloomPass;      // HDR bloom chain
   // glTF BLEND materials: the builder's <name>.tmesh side file, drawn
   // forward-lit after the deferred lighting (UE: translucency never
   // goes through Nanite).
@@ -598,6 +618,7 @@ int main(int argc, char** argv) {
   std::vector<std::vector<kenshin::u32>> stagedDepth, stagedTri;
   std::vector<glm::vec4> realBounds;  // M9.2: instance bounds pre-parking
   bool taaReady = false;
+  bool bloomTried = false;
   glm::mat4 taaPrevViewProj{1.0f};  // UNJITTERED previous frame VP
   bool taaPrevValid = false;
   int taaWarmup = 0;  // frames since (re)validation
@@ -632,6 +653,10 @@ int main(int argc, char** argv) {
       if (args.hwThresholdPx > 0.0f) vgDebug.hwThresholdPx = args.hwThresholdPx;
       if (args.exposure > 0.0f) vgDebug.exposure = args.exposure;
       if (args.envIntensity >= 0.0f) vgDebug.envIntensity = args.envIntensity;
+      if (args.noBloom) vgDebug.bloom = false;
+      if (args.bloomStrength >= 0.0f) vgDebug.bloomStrength = args.bloomStrength;
+      if (args.emissiveStrength >= 0.0f)
+        vgDebug.emissiveStrength = args.emissiveStrength;
 
       // S4.1: the dag also goes to the GPU-resident virtual geometry
       // pools (cluster/group tables + shared vertex/index pools), CRC
@@ -1017,6 +1042,13 @@ int main(int argc, char** argv) {
                                0.5f, "%.3f");
             ImGui::SliderFloat("exposure", &vgDebug.exposure, 0.1f, 4.0f,
                                "%.2f");
+            ImGui::Checkbox("bloom", &vgDebug.bloom);
+            if (vgDebug.bloom)
+              ImGui::SliderFloat("bloom strength", &vgDebug.bloomStrength,
+                                 0.0f, 0.3f, "%.3f");
+            ImGui::SliderFloat("emissive strength", &vgDebug.emissiveStrength,
+                               0.0f, 50.0f, "%.1f",
+                               ImGuiSliderFlags_Logarithmic);
           }
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
                            int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
@@ -1422,6 +1454,15 @@ int main(int argc, char** argv) {
 
   int frame = 0;
   while (window.pumpEvents()) {
+    // Minimized / zero client area: nothing can be presented. Idle
+    // instead of rendering into 0-size targets (Vulkan forbids a 0x0
+    // swapchain; the old path tripped VUID-...-imageExtent-01689 and
+    // shrank the viewport targets to 8x13).
+    if (window.hasNoDrawableArea() && args.frames < 0) {
+      Sleep(16);
+      frameTimer.reset();
+      continue;
+    }
     taaRanThisFrame = false;
     auto& input = kenshin::core::Input::get();
     if (input.keyPressed(VK_ESCAPE)) {
@@ -1571,6 +1612,10 @@ int main(int argc, char** argv) {
       // frame - the review's catch).
       if (!tonemapReady) tonemapReady = tonemapPass.init(*vgBackend, shaders);
       if (!taaReady) taaReady = taaPass.init(*vgBackend, shaders);
+      if (!bloomTried) {
+        bloomTried = true;
+        bloomPass.init(*vgBackend, shaders);
+      }
       if (chainReady && decodeReady) {
         // Same camera, same frame: the chain's inputs and the decode's
         // matrices cannot disagree anymore.
@@ -1996,7 +2041,8 @@ int main(int argc, char** argv) {
               shadowLevels,
               shadowsOn && vgDebug.viewMode == 0 ? shadowLevelCount : 0u, 12.0f,
               shadowOrigin, ci.width, ci.height, envTexture, envMaxLod,
-              envShValid ? &envSH : nullptr, vgDebug.envIntensity);
+              envShValid ? &envSH : nullptr, vgDebug.envIntensity,
+              vgDebug.emissiveStrength);
           // Translucency (BLEND materials) - after the opaque lighting,
           // BEFORE the TAA resolve, with the same jittered matrix the
           // opaque frame used (TAA's jitter compensation then covers it).
@@ -2021,6 +2067,7 @@ int main(int argc, char** argv) {
             tfr.lights = lights;
             tfr.envSH = envShValid ? &envSH : nullptr;
             tfr.envIntensity = vgDebug.envIntensity;
+            tfr.emissiveStrength = vgDebug.emissiveStrength;
             tfr.envTexture = envTexture;
             tfr.envMaxLod = envMaxLod;
             tfr.visBuffer = chain.visBufferCurrent(*vgBackend);
@@ -2051,6 +2098,12 @@ int main(int argc, char** argv) {
           taaPrevViewProj = camera.viewProjMatrix();
           taaPrevValid = true;
           ++taaWarmup;
+          // Bloom over the resolved HDR (Final view only - the debug
+          // views' false colors must stay readable).
+          const bool bloomed =
+              vgDebug.bloom && vgDebug.viewMode == 0 &&
+              vgDebug.bloomStrength > 0.0f &&
+              bloomPass.draw(*vgBackend, resolvedByTaa, ci.width, ci.height);
           if (tonemapReady)
             tonemapPass.draw(
                 *vgBackend,
@@ -2059,7 +2112,10 @@ int main(int argc, char** argv) {
                 vgDebug.exposure,
                 glm::vec4(kClearColor[0], kClearColor[1], kClearColor[2], 1.0f),
                 ci.width, ci.height, resolvedByTaa,
-                resolvedByTaa ? vgDebug.taaSharpen : 0.0f);
+                resolvedByTaa ? vgDebug.taaSharpen : 0.0f,
+                bloomed ? vgDebug.bloomStrength : 0.0f,
+                1.0f / static_cast<float>(
+                           kenshin::renderer::BloomPass::kLevels));
         }
       }
     }

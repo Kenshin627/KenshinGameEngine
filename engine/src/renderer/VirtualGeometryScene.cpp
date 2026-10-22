@@ -194,7 +194,8 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
 
   // Keep the per-mesh material base aligned for setInstances (unpaged
   // dags carry no material table - the paged-only shader path).
-  m_meshMaterialBase.push_back(static_cast<u32>(m_materialData.size() / 8u));
+  m_meshMaterialBase.push_back(
+      static_cast<u32>(m_materialData.size() / kMaterialFloats));
   m_meshRanges.push_back(range);
   m_poolsDirty = true;
   return static_cast<u32>(m_meshRanges.size() - 1);
@@ -272,11 +273,15 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   // offset into the concatenated table rides the GPU instance
   // (GpuInstance.materialBase) and the decode adds it - multi-mesh
   // scenes resolve their OWN materials.
-  m_meshMaterialBase.push_back(static_cast<u32>(m_materialData.size() / 8u));
+  m_meshMaterialBase.push_back(
+      static_cast<u32>(m_materialData.size() / kMaterialFloats));
   for (const auto& mat : dag.materials) {
-    f32 r[8] = {mat.kd[0],     mat.kd[1],    mat.kd[2],      mat.texLayer,
-                mat.roughness, mat.metallic, mat.mrTexLayer, mat.nrmTexLayer};
-    m_materialData.insert(m_materialData.end(), r, r + 8);
+    // decode_material's GpuMaterial: kdTex, params, emissive (3 float4).
+    f32 r[kMaterialFloats] = {mat.kd[0],       mat.kd[1],       mat.kd[2],
+                              mat.texLayer,    mat.roughness,   mat.metallic,
+                              mat.mrTexLayer,  mat.nrmTexLayer, mat.emissive[0],
+                              mat.emissive[1], mat.emissive[2], 0.0f};
+    m_materialData.insert(m_materialData.end(), r, r + kMaterialFloats);
     m_materialTexPaths.push_back(mat.texPath);
   }
   m_pageCount += dag.pageCount;

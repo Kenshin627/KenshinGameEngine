@@ -61,40 +61,76 @@ bool buildClusterLod(const assets::MeshData& mesh,
   std::vector<ClusterGroup> groups;
   Collector collector{&groups, &stats};
 
+  // Material boundaries are CLUSTER boundaries: one clodBuild run per
+  // material over that material's triangles (same vertex pool). A
+  // cluster can then never straddle two materials - the old single run
+  // let simplification/partitioning mix them and the per-cluster vote
+  // painted the minority material's triangles with the majority's (the
+  // Vulture's left eye lens rendered half helmet-gray). Each run's
+  // groups form an independent sub-DAG; the callback hands out GLOBAL
+  // group ids (indices into the shared collector), so cross-run edges
+  // never exist and every per-run ordering invariant the DAG assembly
+  // relies on (parents at lower indices, non-decreasing depth) holds
+  // run by run. The BVH8 is built over all groups afterwards.
+  std::vector<std::vector<u32>> runs;
+  if (!mesh.triMaterial.empty() &&
+      mesh.triMaterial.size() == mesh.indices.size() / 3) {
+    u32 maxMat = 0;
+    for (u32 m : mesh.triMaterial) maxMat = std::max(maxMat, m);
+    runs.resize(usize(maxMat) + 1);
+    for (usize t = 0; t < mesh.triMaterial.size(); ++t)
+      for (int k = 0; k < 3; ++k)
+        runs[mesh.triMaterial[t]].push_back(mesh.indices[t * 3 + k]);
+    runs.erase(
+        std::remove_if(runs.begin(), runs.end(),
+                       [](const std::vector<u32>& r) { return r.empty(); }),
+        runs.end());
+  }
+  if (runs.size() <= 1) runs.assign(1, mesh.indices);
+
   kenshin::Timer timer;
-  const size_t built = clodBuild(
-      config, input, &collector,
-      [](void* context, clodGroup group, const clodCluster* clusters,
-         size_t clusterCount) -> int {
-        Collector* self = static_cast<Collector*>(context);
-        ClusterGroup out;
-        out.groupId = static_cast<int>(self->groups->size());
-        out.depth = group.depth;
-        for (int k = 0; k < 3; ++k)
-          out.simplifiedCenter[k] = group.simplified.center[k];
-        out.simplifiedCenter[3] = group.simplified.radius;
-        out.simplifiedError = group.simplified.error;
-        for (size_t c = 0; c < clusterCount; ++c) {
-          Cluster cluster;
-          cluster.parentGroupId = clusters[c].refined;
+  size_t built = 0;
+  for (const auto& run : runs) {
+    input.indices = run.data();
+    input.index_count = run.size();
+    built += clodBuild(
+        config, input, &collector,
+        [](void* context, clodGroup group, const clodCluster* clusters,
+           size_t clusterCount) -> int {
+          Collector* self = static_cast<Collector*>(context);
+          ClusterGroup out;
+          out.groupId = static_cast<int>(self->groups->size());
+          out.depth = group.depth;
           for (int k = 0; k < 3; ++k)
-            cluster.boundsCenter[k] = clusters[c].bounds.center[k];
-          cluster.boundsCenter[3] = clusters[c].bounds.radius;
-          cluster.error = clusters[c].bounds.error;
-          cluster.indices.assign(clusters[c].indices,
-                                 clusters[c].indices + clusters[c].index_count);
-          cluster.vertexCount = static_cast<u32>(clusters[c].vertex_count);
-          out.clusters.push_back(std::move(cluster));
-        }
-        self->stats->groupCount += 1;
-        self->stats->clusterCount += static_cast<u32>(clusterCount);
-        self->stats->maxDepth =
-            std::max(self->stats->maxDepth, static_cast<u32>(group.depth + 1));
-        self->stats->maxError =
-            std::max(self->stats->maxError, group.simplified.error);
-        self->groups->push_back(std::move(out));
-        return static_cast<int>(self->groups->size()) - 1;
-      });
+            out.simplifiedCenter[k] = group.simplified.center[k];
+          out.simplifiedCenter[3] = group.simplified.radius;
+          out.simplifiedError = group.simplified.error;
+          for (size_t c = 0; c < clusterCount; ++c) {
+            Cluster cluster;
+            cluster.parentGroupId = clusters[c].refined;
+            for (int k = 0; k < 3; ++k)
+              cluster.boundsCenter[k] = clusters[c].bounds.center[k];
+            cluster.boundsCenter[3] = clusters[c].bounds.radius;
+            cluster.error = clusters[c].bounds.error;
+            cluster.indices.assign(
+                clusters[c].indices,
+                clusters[c].indices + clusters[c].index_count);
+            cluster.vertexCount = static_cast<u32>(clusters[c].vertex_count);
+            out.clusters.push_back(std::move(cluster));
+          }
+          self->stats->groupCount += 1;
+          self->stats->clusterCount += static_cast<u32>(clusterCount);
+          self->stats->maxDepth = std::max(self->stats->maxDepth,
+                                           static_cast<u32>(group.depth + 1));
+          self->stats->maxError =
+              std::max(self->stats->maxError, group.simplified.error);
+          self->groups->push_back(std::move(out));
+          return static_cast<int>(self->groups->size()) - 1;
+        });
+  }
+  if (runs.size() > 1)
+    KENSHIN_INFO("[clod] {} per-material runs (no cluster mixes materials)",
+                 runs.size());
   stats.seconds = timer.elapsedSeconds();
 
   if (built == 0) {

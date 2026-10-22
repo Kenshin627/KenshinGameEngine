@@ -38,7 +38,8 @@ bool LightingPass::init(backend::IRenderBackend& backend,
   m_lightBuffer = backend.createBuffer(desc);
   // M8.3: the environment table (binding 4): [0] sky rgb + pad,
   // [1] ground rgb + pad - the hemisphere ambient's two poles.
-  desc.size = 11 * sizeof(glm::vec4);
+  // [11].x the emissive strength multiplier (the panel slider).
+  desc.size = 12 * sizeof(glm::vec4);
   desc.debugName = "env-table";
   m_envBuffer = backend.createBuffer(desc);
   // M9.1: the shadow parameter block (binding 6).
@@ -79,7 +80,8 @@ void LightingPass::draw(backend::IRenderBackend& backend,
                         const glm::vec3& groundColor, const ShadowLevel* levels,
                         u32 levelCount, float extent0, const glm::vec3& origin,
                         u32 width, u32 height, u32 envTexture, float envMaxLod,
-                        const IrradianceSH* envSH, float envIntensity) {
+                        const IrradianceSH* envSH, float envIntensity,
+                        float emissiveStrength) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   const u32 count =
       static_cast<u32>(std::min<usize>(lights.size(), kMaxLights));
@@ -112,6 +114,7 @@ void LightingPass::draw(backend::IRenderBackend& backend,
   env[1] = glm::vec4(groundColor, envIntensity);
   for (u32 k = 0; k < 9; ++k)
     env[2 + k] = envSH ? (*envSH)[k] : glm::vec4(0.0f);
+  env[11] = glm::vec4(emissiveStrength, 0.0f, 0.0f, 0.0f);
   // shadowParams layout (lighting.slang's header comment): [0]
   // header, [1] origin, level L at 2 + 6*L: [base] pad, [base+1]
   // (mapSize, bias, texelWorld, enabled), [base+2..5] viewProj cols.

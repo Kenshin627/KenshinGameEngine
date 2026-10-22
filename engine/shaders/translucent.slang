@@ -35,9 +35,10 @@
 //   5: uint vis[]         - the VisBuffer as u32 pairs (lo payload, hi
 //                           depth bits)
 //   6: float4 sceneMaterials[] - the kgeo's RUNTIME material table
-//                           (decode_material's GpuMaterial: kdTex = kd +
-//                           albedo layer, params = rough, metal, MR
-//                           layer) - the same ids; the texture layers the
+//                           (decode_material's GpuMaterial, 3 float4:
+//                           kdTex = kd + albedo layer, params = rough,
+//                           metal, MR, normal layers, emissive) - the
+//                           same ids; the texture layers the
 //                           app resolved at load time live here
 //   7: Sampler2DArray envMap - the IBL probe (layer 0)
 //   8/9: Texture2DArray albedoTex + SamplerState albedoSampler - the
@@ -53,7 +54,7 @@ struct TranslucentPush {
   float4 vp[4];
   float4 camPosCount;
   float4 viewport;  // w, h, near, far
-  float4 envParams; // envMaxLod, envIntensity
+  float4 envParams; // envMaxLod, envIntensity, sceneTableValid, emissive k
 };
 [[vk::push_constant]] ConstantBuffer<TranslucentPush> push;
 
@@ -151,6 +152,7 @@ float4 fsMain(VSOut i) : SV_Target {
   const float4 m0 = materials[i.mat * 2u];
   const float4 m1 = materials[i.mat * 2u + 1u];
   float3 albedo = m0.rgb;
+  float3 emissive = float3(0.0);
   const float alpha = saturate(m0.a);
   float rough = m1.x;
   float metal = m1.y;
@@ -159,8 +161,10 @@ float4 fsMain(VSOut i) : SV_Target {
     // factor x sRGB-decoded albedo texel; MR texel G = roughness, B =
     // metallic (linear data), factors multiply. Real derivatives here -
     // this is a forward pass, implicit LOD is valid.
-    const float4 kdTex = sceneMaterials[i.mat * 2u];
-    const float4 params = sceneMaterials[i.mat * 2u + 1u];
+    const float4 kdTex = sceneMaterials[i.mat * 3u];
+    const float4 params = sceneMaterials[i.mat * 3u + 1u];
+    emissive = max(sceneMaterials[i.mat * 3u + 2u].rgb, float3(0.0)) *
+               push.envParams.w;
     albedo = kdTex.rgb;
     rough = params.x;
     metal = params.y;
@@ -242,7 +246,8 @@ float4 fsMain(VSOut i) : SV_Target {
   // Fresnel strength. UE's Translucent mode (everything x Opacity) made
   // this asset's roughness-0 gold-mirror visor a pale, flat film.
   const float3 diffuseLit = ambient + (lo - specDirect);
-  const float3 specular = envSpec + specDirect;
+  // Emission is light leaving the surface: unattenuated, like specular.
+  const float3 specular = envSpec + specDirect + emissive;
   const float3 premul = diffuseLit * alpha + specular;
   if (!(premul.x >= 0.0 && premul.y >= 0.0 && premul.z >= 0.0 &&
         premul.x < 65504.0 && premul.y < 65504.0 && premul.z < 65504.0))

@@ -116,6 +116,15 @@ bool Window::pumpEvents() {
   return m_hwnd != nullptr && !m_quitPosted;
 }
 
+bool Window::hasNoDrawableArea() const {
+  if (!m_hwnd) return true;
+  HWND hwnd = static_cast<HWND>(m_hwnd);
+  if (IsIconic(hwnd)) return true;
+  RECT rc{};
+  if (!GetClientRect(hwnd, &rc)) return true;
+  return rc.right - rc.left <= 0 || rc.bottom - rc.top <= 0;
+}
+
 void Window::requestClose() { handleClose(); }
 
 WindowHandle Window::nativeInstance() const {

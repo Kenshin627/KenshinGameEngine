@@ -102,6 +102,12 @@ class PipelineStore {
   /// accumulates), mixed layout, cull NONE, no depth.
   u32 createTranslucent(VkDevice device,
                         const IRenderBackend::FullscreenPipelineInfo& info);
+  /// Bloom chain pass: RGBA16F target, mixed layout (one Sampler2D),
+  /// `additive` = ONE/ONE blending (the upsample accumulates into the
+  /// larger level), otherwise opaque (the downsample).
+  u32 createBloom(VkDevice device,
+                  const IRenderBackend::FullscreenPipelineInfo& info,
+                  bool additive);
   u32 createTonemap(VkDevice device, VkFormat colorFormat,
                     const IRenderBackend::FullscreenPipelineInfo& info);
   /// M9.1 shadow depth decode: renders the fsShadowDepth entry into
@@ -139,7 +145,9 @@ class PipelineStore {
   u32 createFullscreenVariant(
       VkDevice device, const IRenderBackend::FullscreenPipelineInfo& info,
       const VkFormat* colorFormats, u32 colorCount, VkFormat depthFormat,
-      bool mixedLayout, bool premultipliedBlend = false);
+      bool mixedLayout, int blendMode = 0);  // 0 none, 1 premultiplied
+                                             // (ONE, 1-SA), 2 additive
+                                             // (ONE, ONE)
 
   std::vector<Pipeline> m_slots;
   std::vector<Fullscreen> m_fullscreen;
