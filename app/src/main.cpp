@@ -170,6 +170,7 @@ struct Args {
   float envIntensity = -1.0f;   // --env-intensity: seeds the panel value
   bool noBloom = false;         // --no-bloom
   bool noSky = false;           // --no-sky: clear color behind the model
+  bool noEmissivePass = false;  // --no-emissive-pass-through
   float skyBlur = -1.0f;        // --sky-blur <mip>: seeds the panel value
   bool noAutoExposure = false;  // --no-auto-exposure (--exposure implies it)
   float exposureBias = -1e9f;   // --exposure-bias <EV>: seeds the panel
@@ -211,6 +212,8 @@ Args parseArgs(int argc, char** argv) {
       args.noAutoExposure = true;
     else if (std::strcmp(argv[i], "--exposure-bias") == 0 && i + 1 < argc)
       args.exposureBias = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--no-emissive-pass-through") == 0)
+      args.noEmissivePass = true;
     else if (std::strcmp(argv[i], "--no-sky") == 0)
       args.noSky = true;
     else if (std::strcmp(argv[i], "--sky-blur") == 0 && i + 1 < argc)
@@ -486,12 +489,6 @@ struct VgDebugState {
   // prefiltered specular).
   kenshin::f32 envIntensity = 0.7f;
   kenshin::f32 exposure = 1.5f;
-  // HDR bloom (BloomPass): the composite weight s of
-  // scene * (1 - s) + bloom * s, and the emissive multiplier (glTF
-  // emissiveFactor is capped at 1 - the Sketchfab exports' glow
-  // needs > 1 to bloom). 16: the Vulture's eyes sit behind a 91%
-  // opaque visor - x16 transmits ~1.4 HDR, enough to read as a glow
-  // with a halo at s = 0.08 without washing the hue out (x30 does).
   // Histogram auto exposure (ExposurePass, UE AEM_Histogram); off =
   // the manual `exposure` above. autoScale: the GPU's last adapted
   // scale (panel readout; also the TAA's HDR weight).
@@ -503,9 +500,17 @@ struct VgDebugState {
   // background blur above that).
   bool sky = true;
   kenshin::f32 skyBlur = 0.0f;
+  // HDR bloom (BloomPass): the composite weight s of
+  // scene * (1 - s) + bloom * s, and the emissive multiplier (1 = the
+  // asset's authored emissiveFactor). emissivePassThrough: opaque
+  // emission behind translucent layers is not dimmed by them (the
+  // Sketchfab look - the Vulture's eyes behind a 91%-opaque visor; the
+  // physical alternative needed a global x16 that overdrove every other
+  // asset's emissive maps).
   bool bloom = true;
   kenshin::f32 bloomStrength = 0.08f;
-  kenshin::f32 emissiveStrength = 16.0f;
+  kenshin::f32 emissiveStrength = 1.0f;
+  bool emissivePassThrough = true;
   // M8.3: the hemisphere ambient's two poles + tonemap operator.
   // Neutral-gray hemisphere by default: colored poles (the old blue
   // sky / warm ground) swing r-g by normal direction more than a dark
@@ -695,6 +700,7 @@ int main(int argc, char** argv) {
       if (args.envIntensity >= 0.0f) vgDebug.envIntensity = args.envIntensity;
       if (args.noBloom) vgDebug.bloom = false;
       if (args.noSky) vgDebug.sky = false;
+      if (args.noEmissivePass) vgDebug.emissivePassThrough = false;
       if (args.skyBlur >= 0.0f) vgDebug.skyBlur = args.skyBlur;
       if (args.taaSharpen >= 0.0f) vgDebug.taaSharpen = args.taaSharpen;
       if (args.bloomStrength >= 0.0f) vgDebug.bloomStrength = args.bloomStrength;
@@ -1107,8 +1113,10 @@ int main(int argc, char** argv) {
               ImGui::SliderFloat("bloom strength", &vgDebug.bloomStrength,
                                  0.0f, 0.3f, "%.3f");
             ImGui::SliderFloat("emissive strength", &vgDebug.emissiveStrength,
-                               0.0f, 50.0f, "%.1f",
+                               0.0f, 50.0f, "%.2f",
                                ImGuiSliderFlags_Logarithmic);
+            ImGui::Checkbox("emissive through translucency",
+                            &vgDebug.emissivePassThrough);
           }
           ImGui::PlotLines("##clusters", vgDebug.clusterHist.data(),
                            int(vgDebug.clusterHist.size()), 0, nullptr, 0.0f,
@@ -2141,6 +2149,7 @@ int main(int argc, char** argv) {
             tfr.envSH = envShValid ? &envSH : nullptr;
             tfr.envIntensity = vgDebug.envIntensity;
             tfr.emissiveStrength = vgDebug.emissiveStrength;
+            tfr.emissivePassThrough = vgDebug.emissivePassThrough;
             tfr.envTexture = envTexture;
             tfr.envMaxLod = envMaxLod;
             tfr.visBuffer = chain.visBufferCurrent(*vgBackend);

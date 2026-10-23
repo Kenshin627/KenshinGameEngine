@@ -136,10 +136,14 @@ void TranslucentPass::draw(backend::IRenderBackend& backend,
     glm::vec4 camPosCount;
     glm::vec4 viewport;
     glm::vec4 envParams;
+    glm::vec4 extra;
   } push;
+  static_assert(sizeof(PushC) == 128, "TranslucentPush layout");
   for (int c = 0; c < 4; ++c) push.vp[c] = frame.viewProj[c];
   push.camPosCount = glm::vec4(frame.camPos, f32(lightCount));
   push.viewport = glm::vec4(f32(width), f32(height), frame.nearZ, frame.farZ);
+  push.extra = glm::vec4(frame.emissivePassThrough ? 1.0f : 0.0f, 0.0f, 0.0f,
+                         0.0f);
   const bool sceneTable = frame.sceneMaterials != ~0u;
   push.envParams = glm::vec4(frame.envMaxLod, frame.envIntensity,
                              sceneTable ? 1.0f : 0.0f,

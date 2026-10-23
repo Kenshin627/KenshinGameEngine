@@ -1796,6 +1796,14 @@ void VulkanBackend::drawTranslucent(u32 pipeline, const u32* bufferHandles,
       .imageView = VK_NULL_HANDLE,
       .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
   };
+  // Binding 10: GBuffer C (the opaque emission, SHADER_READ since
+  // drawLighting) for the emissive pass-through.
+  if (slot.gbuffer[2].view == VK_NULL_HANDLE) return;
+  const VkDescriptorImageInfo gbufferCInfo{
+      .sampler = impl.linearSampler,
+      .imageView = slot.gbuffer[2].view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
   // Validate the binding map BEFORE opening the pass.
   std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
   const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
@@ -1809,7 +1817,7 @@ void VulkanBackend::drawTranslucent(u32 pipeline, const u32* bufferHandles,
         .descriptorType = fs.bindingTypes[b],
     };
     if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-      writes[b].pImageInfo = &envInfo;
+      writes[b].pImageInfo = b == 10 ? &gbufferCInfo : &envInfo;
     } else if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
       writes[b].pImageInfo = &albedoInfo;
     } else if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_SAMPLER) {

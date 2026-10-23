@@ -55,6 +55,8 @@ struct TranslucentPush {
   float4 camPosCount;
   float4 viewport;  // w, h, near, far
   float4 envParams; // envMaxLod, envIntensity, sceneTableValid, emissive k
+  float4 extra;     // x emissive pass-through (1 = opaque emission behind
+                    //   this layer is not dimmed by it)
 };
 [[vk::push_constant]] ConstantBuffer<TranslucentPush> push;
 
@@ -73,6 +75,9 @@ struct GpuLight {
 [[vk::binding(7)]] Sampler2DArray envMap;
 [[vk::binding(8)]] Texture2DArray albedoTex;
 [[vk::binding(9)]] SamplerState albedoSampler;
+// The opaque frame's emission (GBuffer C rgb, before the emissive
+// strength) - the pass-through term below.
+[[vk::binding(10)]] Sampler2D gbufferC;
 
 struct VSOut {
   float4 pos : SV_Position;
@@ -248,7 +253,19 @@ float4 fsMain(VSOut i) : SV_Target {
   const float3 diffuseLit = ambient + (lo - specDirect);
   // Emission is light leaving the surface: unattenuated, like specular.
   const float3 specular = envSpec + specDirect + emissive;
-  const float3 premul = diffuseLit * alpha + specular;
+  float3 premul = diffuseLit * alpha + specular;
+  // Emissive pass-through (the Sketchfab / Filament-viewer look): the
+  // blend dims the destination by (1 - alpha), so adding alpha * E back
+  // leaves the opaque EMISSION behind this layer at full strength - the
+  // Vulture's eyes glow through a 91%-opaque visor. Non-physical but
+  // layer-count independent (each layer restores what it dims); lit
+  // surfaces behind stay properly dimmed.
+  if (push.extra.x > 0.5 && hi != 0u) {
+    const float2 uv = (float2(pixel) + 0.5) / push.viewport.xy;
+    const float3 behind =
+        max(gbufferC.SampleLevel(uv, 0.0).rgb, float3(0.0)) * push.envParams.w;
+    premul += behind * alpha;
+  }
   if (!(premul.x >= 0.0 && premul.y >= 0.0 && premul.z >= 0.0 &&
         premul.x < 65504.0 && premul.y < 65504.0 && premul.z < 65504.0))
     discard;
