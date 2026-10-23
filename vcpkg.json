@@ -5,6 +5,7 @@
   "dependencies": [
     "glm",
     "entt",
+    "nlohmann-json",
     {
       "name": "sdl3",
       "features": [

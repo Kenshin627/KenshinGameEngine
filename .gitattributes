@@ -1,0 +1,5 @@
+# Engine text formats are written with '\n' and golden-tested byte for
+# byte: never convert their line endings.
+*.kscene   text eol=lf
+*.kprefab  text eol=lf
+*.kproject text eol=lf

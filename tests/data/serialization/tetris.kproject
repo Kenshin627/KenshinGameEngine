@@ -1,0 +1,6 @@
+{
+  "format": "kenshin.project",
+  "version": 1,
+  "name": "Tetris",
+  "startup_scene": "scenes/main.kscene"
+}

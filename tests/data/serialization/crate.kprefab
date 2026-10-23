@@ -1,0 +1,45 @@
+{
+  "format": "kenshin.prefab",
+  "version": 1,
+  "entities": [
+    {
+      "guid": "00000000-0000-4000-8000-0000000000a4",
+      "name": "Crate \"A\" / 箱子",
+      "parent": null,
+      "components": {
+        "transform": {
+          "position": [0.0, 0.0, 0.0],
+          "rotation": [0.0, 0.0, 0.0, 1.0],
+          "scale": [2.0, 1.0, 0.5]
+        },
+        "mesh_renderer": {
+          "mesh": "11111111-2222-4333-8444-555555555555",
+          "material": null,
+          "visible": true,
+          "cast_shadows": false
+        }
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-0000000000a5",
+      "name": "Lamp",
+      "parent": "00000000-0000-4000-8000-0000000000a4",
+      "components": {
+        "transform": {
+          "position": [0.0, 0.0, 1.25],
+          "rotation": [0.0, 0.0, 0.0, 1.0],
+          "scale": [1.0, 1.0, 1.0]
+        },
+        "light": {
+          "type": "spot",
+          "color": [0.2, 0.4, 1.0],
+          "intensity": 1.0,
+          "range": 12.5,
+          "inner_cone_deg": 20.0,
+          "outer_cone_deg": 35.0,
+          "cast_shadows": false
+        }
+      }
+    }
+  ]
+}

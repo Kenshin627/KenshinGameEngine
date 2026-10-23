@@ -45,6 +45,11 @@ class World {
   World() = default;
   World(const World&) = delete;
   World& operator=(const World&) = delete;
+  /// Moving replaces the whole world (scene load): handles into the
+  /// moved-over world are invalid afterwards - they may even alias
+  /// entities of the new one, so drop them.
+  World(World&&) noexcept = default;
+  World& operator=(World&&) noexcept = default;
 
   // ── Lifetime ─────────────────────────────────────────────────
   /// New entity with a fresh Guid, appended as the last child of

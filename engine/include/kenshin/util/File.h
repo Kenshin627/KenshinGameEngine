@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 #include "kenshin/Common.h"
 
@@ -22,9 +23,23 @@ std::FILE* openFile(const std::filesystem::path& path, const char* mode);
 std::FILE* openFile(const char* utf8Path, const char* mode);
 std::FILE* openFile(const std::string& utf8Path, const char* mode);
 
+/// Whole file as bytes (no newline translation). False if it cannot be
+/// opened or read.
+bool readFile(const std::filesystem::path& path, std::string& out);
+
+/// Replace `path` with `data` atomically: written to a sibling temp
+/// file, flushed to disk, then renamed over the target - a crash or a
+/// full disk leaves either the old file or the new one, never half of
+/// each. On failure `error` (if given) says why and the target is
+/// untouched.
+bool writeFileAtomic(const std::filesystem::path& path, std::string_view data,
+                     std::string* error = nullptr);
+
 /// UTF-8 string -> filesystem path (std::filesystem::path(std::string)
 /// uses the native narrow encoding, which is not UTF-8 on Windows).
 std::filesystem::path pathFromUtf8(const std::string& utf8);
+/// The inverse: a path as UTF-8 text (messages, files).
+std::string pathToUtf8(const std::filesystem::path& path);
 
 }  // namespace util
 

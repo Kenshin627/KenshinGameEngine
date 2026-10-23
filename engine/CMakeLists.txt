@@ -86,6 +86,9 @@ add_library(kenshin_engine STATIC
     src/ecs/Components.cpp
     src/ecs/Reflection.cpp
     src/ecs/World.cpp
+    src/scene/ProjectFile.cpp
+    src/scene/SceneSerializer.cpp
+    src/serialization/Json.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpReader.cpp
@@ -146,8 +149,10 @@ find_package(imgui CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 # EnTT: the ECS registry (header-only; ecs/World.h exposes its views).
 find_package(EnTT CONFIG REQUIRED)
+# nlohmann/json: scene/prefab/project files, later the agent API.
+find_package(nlohmann_json CONFIG REQUIRED)
 target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm imgui::imgui
-    SDL3::SDL3 EnTT::EnTT)
+    SDL3::SDL3 EnTT::EnTT nlohmann_json::nlohmann_json)
 
 # Vulkan backend deps (kept PRIVATE: raw API types never leave the backend)
 find_package(volk CONFIG REQUIRED)

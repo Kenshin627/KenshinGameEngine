@@ -25,6 +25,7 @@ add_executable(kenshin_tests
     src/pagestream_tests.cpp
     src/p0_repro.cpp
     src/shader_reflection_tests.cpp
+    src/serialization_tests.cpp
     src/shapes_tests.cpp
     src/smoke.cpp
     src/input_tests.cpp

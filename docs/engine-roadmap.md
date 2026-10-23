@@ -326,6 +326,59 @@ Each step ends with a commit, its test gate passing, and an entry in §7.
   unchanged subtrees (the change tracking motion vectors and shadow
   invalidation need anyway).
 
+### 1.2 Serialization — done 2026-10-23 (Windows-verified)
+
+* **Format** (`scene/SceneSerializer.h`, nlohmann/json 3.12): text
+  JSON with a `{"format", "version"}` header. A scene is a flat entity
+  list in hierarchy pre-order (guid, name, parent guid, components),
+  and components are written field by field through the 1.1
+  reflection: vectors are arrays, quaternions `[x, y, z, w]`, enums
+  their labels, Guids strings or null.
+* **Canonical output** (`serialization::writeJson`): insertion-ordered
+  keys, 2-space indent, short scalar arrays on one line, `
+` endings,
+  and floats in their shortest exact form (`0.95`, not
+  `0.949999988079071`). A double-rounding guard falls back to the exact
+  double. `.gitattributes` pins `*.kscene/.kprefab/.kproject` to LF.
+  `setField` leaves already-unit quaternions bit-exact, so re-saves
+  don't drift.
+* **Strict, all-or-nothing loading**. Every one of these is an error
+  that names the entity and field, with nothing changed: unknown keys,
+  components or fields (the error lists the valid ones); wrong types;
+  out-of-range values; bad enum labels or guids; duplicate guids;
+  dangling, self or cyclic parents; duplicate JSON keys; nesting over
+  128; overflowing numbers. Scenes load into a staging World that is
+  moved in only on success; prefab instantiation rolls back. Hand-
+  written files may list entities in any order and omit guids, fields
+  or components.
+* **Migration**: `SchemaMigrator` chains per-version steps. It rejects
+  wrong formats, newer versions, gaps and step failures (including
+  exceptions) with a reason. Version 1 is the first format, so the
+  built-in chains are empty.
+* **Prefabs**: the same document with one root; each instance gets
+  fresh Guids under any parent. **Project**: `project.kproject` (name,
+  startup scene; paths must stay inside the project).
+  `util::writeFileAtomic` (temp + flush/fsync + rename), `readFile`,
+  `pathToUtf8`.
+* Gate evidence: 16 test cases. Byte-identical round-trip of the
+  golden scene, of 40 random worlds (every field type, control
+  characters and CJK in strings) and of the project file. Golden files
+  for scene, prefab, project and a migrated legacy v0 scene (hand-
+  written v0 input + a test migration chain). 300k random float bit
+  patterns round-trip exactly. 32 invalid-document cases each assert
+  the message and an untouched world. UTF-8 (CJK) paths, overwrite, no
+  temp file left behind. **Mutation test**: 16 deliberate bugs, all
+  killed. One early survivor was a wrongly written mutation (`&&`
+  binding tighter than `?:`); another exposed an untested
+  large-object duplicate-key path, now covered. Debug build passes.
+  GCC check 109 files clean; ctest 7/7.
+* **Found on the way**: nlohmann throws `out_of_range` (not
+  `parse_error`) for numbers like `1e999` - the loader would have let
+  it escape; all its exceptions are now caught. A `version` beyond i32
+  would have narrowed silently. Its callback parser was 8x slower than
+  the plain one: now a SAX validation pass plus the plain parse. 10k
+  entities (4.4 MB): load 400 -> ~120 ms, save ~95 ms.
+
 
 ## 8. Decisions (2026-10-23)
 

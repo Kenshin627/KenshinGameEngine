@@ -205,7 +205,10 @@ bool setField(World& world, Entity e, const ComponentInfo& component,
     glm::quat& q = std::get<glm::quat>(v);
     const f32 len = glm::length(q);
     if (!(len > 1e-6f)) return fail(error, std::format("{}: zero quaternion", where));
-    q /= len;  // stored as a unit rotation
+    // Stored as a unit rotation. Already-unit input is kept bit-exact
+    // (renormalizing can flip last bits; a loaded file must re-save
+    // byte-identically).
+    if (std::abs(len - 1.0f) > 1e-5f) q /= len;
   } else {
     for (const f32 lane : lanes(v)) {
       if (field.min && lane < *field.min)

@@ -1,0 +1,23 @@
+{
+  "format": "kenshin.scene",
+  "version": 0,
+  "objects": [
+    {
+      "guid": "6a1f0c52-3b7e-4d2a-9c11-0f5e2b8d7a01",
+      "name": "Old Root",
+      "parent": null,
+      "components": {
+        "transform": {"translation": [1, 2, 3]}
+      }
+    },
+    {
+      "guid": "6a1f0c52-3b7e-4d2a-9c11-0f5e2b8d7a02",
+      "name": "Old Lamp",
+      "parent": "6a1f0c52-3b7e-4d2a-9c11-0f5e2b8d7a01",
+      "components": {
+        "transform": {"translation": [0, 0, 1.5], "scale": [2, 2, 2]},
+        "light": {"type": "point", "intensity": 2}
+      }
+    }
+  ]
+}
