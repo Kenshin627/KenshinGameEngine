@@ -190,10 +190,10 @@ TEST_CASE("in-frame VisBufferChain vs one-shot chain differential",
     // Two frames per mode (both slots): proves per-slot isolation (the
     // first frame's intermediates must not leak into or be clobbered
     // by this one).
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
 
@@ -363,10 +363,10 @@ TEST_CASE("paged chain differential + eviction skip + touched feedback",
   frameInfo.height = H;
 
   const auto runFrames = [&](renderer::VisBufferChain& chain) {
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
   };
@@ -764,10 +764,10 @@ TEST_CASE("paged big differential (knot:1024:1024)", "[gpu][vgchain][paged]") {
   frameInfo.width = W;
   frameInfo.height = H;
   const auto runFrames = [&](renderer::VisBufferChain& chain) {
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
   };
@@ -969,10 +969,10 @@ TEST_CASE("pair-list saturation at tiny capacity", "[gpu][vgchain]") {
     backend::FrameBeginInfo frameInfo;
     frameInfo.width = W;
     frameInfo.height = H;
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
     u32 stats[16] = {};

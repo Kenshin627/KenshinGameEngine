@@ -19,7 +19,6 @@
 #pragma warning(push, 0)
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
-#include <imgui_impl_win32.h>
 #pragma warning(pop)
 
 #include <algorithm>
@@ -28,9 +27,8 @@
 #include <filesystem>
 #include <fstream>
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
+#include "kenshin/core/Window.h"
+#include "kenshin/platform/Paths.h"
 
 KENSHIN_NS_BEGIN
 
@@ -40,7 +38,9 @@ struct VulkanBackend::Impl {
   VulkanContext context;
   VulkanDevice device;
   bool presentSupported = false;
-  void* hwnd = nullptr;
+  const core::Window* window = nullptr;  // null = headless
+  VkSurfaceKHR surface = VK_NULL_HANDLE;  // owned; outlives the swapchain
+  std::function<void()> imguiPlatformNewFrame;
 
   // M4.3 async compute: when set, dispatch/barrier/fill calls record
   // into this command buffer instead of the frame's graphics one (the
@@ -205,25 +205,35 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
   // If a validation layer ships next to the exe (vcpkg dev build),
   // point the loader at it before instance creation.
   if (params.enableValidation) {
-    wchar_t exePath[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    const auto exeDir = std::filesystem::path(exePath).parent_path();
-    if (std::filesystem::exists(exeDir / "VkLayer_khronos_validation.json")) {
-      SetEnvironmentVariableW(L"VK_LAYER_PATH", exeDir.c_str());
+    const auto exeDir = platform::executableDir();
+    if (!exeDir.empty() &&
+        std::filesystem::exists(exeDir / "VkLayer_khronos_validation.json")) {
+      platform::setEnvironmentVariable("VK_LAYER_PATH", exeDir.string());
       KENSHIN_INFO("validation layer path -> {}", exeDir.string());
     }
   }
 
-  const bool needSurface = params.nativeWindowHandle != nullptr;
-  if (!m_impl->context.init(params.enableValidation, needSurface)) return false;
+  const std::vector<std::string> surfaceExtensions =
+      params.window ? params.window->vulkanInstanceExtensions()
+                    : std::vector<std::string>{};
+  if (params.window && surfaceExtensions.empty()) {
+    KENSHIN_ERROR("[vulkan] the window reports no Vulkan surface extensions");
+    return false;
+  }
+  if (!m_impl->context.init(params.enableValidation, surfaceExtensions))
+    return false;
 
-  if (params.nativeWindowHandle)
+  if (params.window) {
+    u64 surfaceBits = params.window->createVulkanSurface(m_impl->context.instance);
+    std::memcpy(&m_impl->surface, &surfaceBits, sizeof(m_impl->surface));
+    if (m_impl->surface == VK_NULL_HANDLE) return false;
     m_impl->presentSupported =
-        m_impl->context.checkPresentSupport(params.nativeWindowHandle);
+        m_impl->context.checkPresentSupport(m_impl->surface);
+  }
 
   if (!m_impl->device.init(m_impl->context)) return false;
 
-  m_impl->hwnd = params.nativeWindowHandle;
+  m_impl->window = params.window;
 
   // ---- capability report -------------------------------------------
   BackendCaps& caps = m_caps;
@@ -291,7 +301,7 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
       caps.graphicsAndComputeSameFamily ? " (same family)" : "",
       caps.transferFamily,
       caps.dedicatedTransferFamily ? "dedicated DMA" : "shared",
-      params.nativeWindowHandle
+      params.window != nullptr
           ? (caps.presentSupported ? "present=ok" : "present=NOT supported")
           : "present=unchecked (no window)");
 
@@ -448,7 +458,7 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
     return false;
   }
 
-  if (params.nativeWindowHandle && !m_impl->presentSupported) {
+  if (params.window != nullptr && !m_impl->presentSupported) {
     KENSHIN_ERROR("[vulkan] graphics family does not support present");
     return false;
   }
@@ -468,8 +478,7 @@ void VulkanBackend::shutdown() {
     ImGui_ImplVulkan_RemoveTexture(static_cast<VkDescriptorSet>(set));
   m_impl->retiredImguiSets.clear();
   if (m_impl->imguiInited) {
-    ImGui_ImplVulkan_Shutdown();
-    ImGui_ImplWin32_Shutdown();
+    ImGui_ImplVulkan_Shutdown();  // the platform half is the window layer's
     m_impl->imguiInited = false;
   }
   // Deferred destroys are safe now (device idle); run them before the
@@ -544,7 +553,11 @@ void VulkanBackend::shutdown() {
     vmaDestroyImage(m_impl->device.allocator, m_impl->depthImage,
                     m_impl->depthAlloc);
   }
-  m_impl->swapchain.shutdown(m_impl->context.instance, m_impl->device.device);
+  m_impl->swapchain.shutdown(m_impl->device.device);
+  if (m_impl->surface != VK_NULL_HANDLE) {
+    vkDestroySurfaceKHR(m_impl->context.instance, m_impl->surface, nullptr);
+    m_impl->surface = VK_NULL_HANDLE;
+  }
   m_impl->device.shutdown();
   m_impl->context.shutdown();
 }
@@ -557,19 +570,18 @@ std::unique_ptr<IRenderBackend> createVulkanBackend() {
 
 // Barrier/clear recording helpers live in CommandContext.
 
-bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
+FrameStatus VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   Impl& impl = *m_impl;
   impl.taaActive = false;  // drawTaa re-arms it; drawTonemap reads it
   impl.bloomActive = false;  // drawBloom re-arms it
   // Headless (no window): no swapchain - record offscreen-only frames
   // (in-frame compute tests, CI). Everything else (pacing, offscreen
   // targets, per-slot recording) runs unchanged.
-  const bool headless = impl.hwnd == nullptr;
+  const bool headless = impl.window == nullptr;
   if (!headless && impl.swapchain.swapchain == VK_NULL_HANDLE) {
-    if (!impl.swapchain.init(impl.context.instance, impl.context.physicalDevice,
-                             impl.device.device, impl.hwnd, info.width,
-                             info.height))
-      return false;
+    if (!impl.swapchain.init(impl.context.physicalDevice, impl.device.device,
+                             impl.surface, info.width, info.height))
+      return FrameStatus::Error;
   }
 
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
@@ -644,15 +656,15 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
           impl.device, info.width, info.height, targetFormat,
           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
               VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT))
-    return false;
+    return FrameStatus::Error;
   // M8.1: the per-slot GBuffer pair rides the same retire discipline
   // (format support was gated once at initialize).
   if (!impl.frameSync.ensureGBuffer(impl.device, info.width, info.height))
-    return false;
+    return FrameStatus::Error;
   // M8.3: the per-slot HDR intermediate (same retire discipline; the
   // format matches the gate-checked GBuffer A's RGBA16F).
   if (!impl.frameSync.ensureHdr(impl.device, info.width, info.height))
-    return false;
+    return FrameStatus::Error;
   ensureViewportTextures();
   impl.frameSync.drainRetired(impl.device);
   {
@@ -675,24 +687,29 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   // headless path has nothing to acquire.
   VkResult acquireResult = VK_SUCCESS;
   if (!headless) {
-    // A recreate deferred while the window was minimized runs first.
+    // A recreate deferred while the window was minimized runs first;
+    // still no area = nothing to present this frame (Skipped, not an
+    // error: the window system can minimize between the app's own
+    // minimized check and this acquire).
     if (impl.swapchain.recreatePending &&
         !impl.swapchain.recreate(impl.context.physicalDevice,
                                  impl.device.device, info.width, info.height))
-      return false;
+      return FrameStatus::Error;
+    if (impl.swapchain.recreatePending) return FrameStatus::Skipped;
     acquireResult =
         impl.swapchain.acquire(impl.device.device, slot.imageAvailable);
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
       if (!impl.swapchain.recreate(impl.context.physicalDevice,
                                    impl.device.device, info.width, info.height))
-        return false;
+        return FrameStatus::Error;
+      if (impl.swapchain.recreatePending) return FrameStatus::Skipped;
       acquireResult =
           impl.swapchain.acquire(impl.device.device, slot.imageAvailable);
     }
     if (acquireResult < 0) {
       KENSHIN_ERROR("[vulkan] acquire failed ({})",
                     static_cast<int>(acquireResult));
-      return false;
+      return FrameStatus::Error;
     }
   }
 
@@ -751,14 +768,14 @@ bool VulkanBackend::beginFrame(const FrameBeginInfo& info) {
 
   if (impl.imguiInited) {
     ImGui_ImplVulkan_NewFrame();
-    ImGui_ImplWin32_NewFrame();
+    if (impl.imguiPlatformNewFrame) impl.imguiPlatformNewFrame();
     ImGui::NewFrame();
   }
 
   impl.frameActive = true;
   impl.activeWidth = info.width;
   impl.activeHeight = info.height;
-  return true;
+  return FrameStatus::Ready;
 }
 
 void VulkanBackend::endFrame() {
@@ -768,7 +785,7 @@ void VulkanBackend::endFrame() {
 
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
   const VkImage dstImage =
-      impl.hwnd == nullptr ? VK_NULL_HANDLE
+      impl.window == nullptr ? VK_NULL_HANDLE
                            : impl.swapchain.images[impl.swapchain.imageIndex];
 
   // Close the frame's viewport scope before transitioning its target (and
@@ -782,7 +799,7 @@ void VulkanBackend::endFrame() {
   // Headless: no swapchain to composite into - end the recording, submit
   // with only the timeline signal and advance. (The offscreen stays in
   // COLOR_ATTACHMENT layout; readbackFrame handles its own transitions.)
-  if (impl.hwnd == nullptr) {
+  if (impl.window == nullptr) {
     if (!impl.cmd.end()) {
       KENSHIN_ERROR("[vulkan] vkEndCommandBuffer failed (headless)");
       return;
@@ -1082,14 +1099,15 @@ void VulkanBackend::ensureViewportTextures() {
   }
 }
 
-bool VulkanBackend::initImGuiBackend(void* hwnd, u32 width, u32 height) {
+bool VulkanBackend::initImGuiBackend(u32 width, u32 height,
+                                     std::function<void()> platformNewFrame) {
   Impl& impl = *m_impl;
-  if (impl.imguiInited || !hwnd) return impl.imguiInited;
+  if (impl.imguiInited || impl.window == nullptr) return impl.imguiInited;
 
   // The swapchain must exist so its format drives the ImGui pipeline.
   if (impl.swapchain.swapchain == VK_NULL_HANDLE &&
-      !impl.swapchain.init(impl.context.instance, impl.context.physicalDevice,
-                           impl.device.device, impl.hwnd, width, height))
+      !impl.swapchain.init(impl.context.physicalDevice, impl.device.device,
+                           impl.surface, width, height))
     return false;
 
   // NOTE: the pool config (incl. the SAMPLED_IMAGE poolSizeCount fix) lives
@@ -1125,13 +1143,7 @@ bool VulkanBackend::initImGuiBackend(void* hwnd, u32 width, u32 height) {
     impl.descriptors.shutdown(impl.device.device);
     return false;
   }
-  if (!ImGui_ImplWin32_Init(hwnd)) {
-    KENSHIN_ERROR("[imgui] ImGui_ImplWin32_Init failed");
-    ImGui_ImplVulkan_Shutdown();
-    impl.descriptors.shutdown(impl.device.device);
-    return false;
-  }
-
+  impl.imguiPlatformNewFrame = std::move(platformNewFrame);
   impl.imguiInited = true;
   ensureViewportTextures();
   KENSHIN_INFO("[imgui] backend ready (dynamic rendering, docking UI)");

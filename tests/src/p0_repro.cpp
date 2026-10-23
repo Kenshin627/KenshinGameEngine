@@ -170,7 +170,7 @@ TEST_CASE("P0 user-camera chain vs one-shot (grid64)", "[gpu][p0]") {
     fi.width = W;
     fi.height = H;
     for (int f = 0; f < 4; ++f) {
-      REQUIRE(backend->beginFrame(fi));
+      REQUIRE(backend->beginFrame(fi) == kenshin::backend::FrameStatus::Ready);
       chain.execute(*backend, ci);
       backend->endFrame();
     }
@@ -220,7 +220,7 @@ TEST_CASE("P0 user-camera chain vs one-shot (grid64)", "[gpu][p0]") {
     fi.width = W;
     fi.height = H;
     for (int f = 0; f < 4; ++f) {
-      REQUIRE(backend->beginFrame(fi));
+      REQUIRE(backend->beginFrame(fi) == kenshin::backend::FrameStatus::Ready);
       chain.execute(*backend, ci);
       backend->endFrame();
     }

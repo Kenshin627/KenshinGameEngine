@@ -310,7 +310,7 @@ TEST_CASE("hierarchy chain identity cut == selectLodCut",
   kenshin::usize lastCount = ~kenshin::usize(0);
   for (const f32 threshold : {0.25f, 1.0f, 4.0f}) {
     inputs.pixelThreshold = threshold;
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
 
@@ -337,7 +337,7 @@ TEST_CASE("hierarchy chain identity cut == selectLodCut",
   lastCount = ~kenshin::usize(0);
   for (const f32 threshold : {0.25f, 1.0f, 4.0f}) {
     inputs.pixelThreshold = threshold;
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
 

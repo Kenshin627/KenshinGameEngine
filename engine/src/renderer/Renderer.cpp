@@ -22,7 +22,7 @@ bool Renderer::onInit(Engine& engine) {
   m_backend = &engine.registerInstance<backend::IRenderBackend>(
       backend::createVulkanBackend());
   backend::BackendInitParams params;
-  params.nativeWindowHandle = window.nativeHandle();
+  params.window = &window;
   params.enableValidation = m_config.validation;
   if (!m_backend->initialize(params)) {
     KENSHIN_ERROR("[renderer] backend init failed");
@@ -48,7 +48,8 @@ void Renderer::onShutdown() {
   m_backend = nullptr;
 }
 
-bool Renderer::beginFrame(u32 width, u32 height, const f32 clearColor[4]) {
+FrameStatus Renderer::beginFrame(u32 width, u32 height,
+                                 const f32 clearColor[4]) {
   m_width = width;
   m_height = height;
   backend::FrameBeginInfo info;

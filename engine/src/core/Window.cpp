@@ -1,218 +1,197 @@
 #include "kenshin/core/Window.h"
 
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+
+#include <cstring>
+
 #include "kenshin/core/Input.h"
 #include "kenshin/core/Log.h"
-
-#ifndef UNICODE
-#define UNICODE
-#endif
-#ifndef _UNICODE
-#define _UNICODE
-#endif
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-#include <Windowsx.h>
-
-#include <cstdlib>
 
 KENSHIN_NS_BEGIN
 
 namespace core {
 
 namespace {
-constexpr const wchar_t* kClassName = L"KENSHINWindow";
-bool s_classRegistered = false;
 
-std::wstring toWide(const std::string& utf8) {
-  if (utf8.empty()) return std::wstring();
-  const int len = MultiByteToWideChar(
-      CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()), nullptr, 0);
-  std::wstring wide(static_cast<size_t>(len), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), static_cast<int>(utf8.size()),
-                      wide.data(), len);
-  return wide;
+SDL_Window* sdl(void* w) { return static_cast<SDL_Window*>(w); }
+
+MouseButton mapButton(Uint8 sdlButton) {
+  switch (sdlButton) {
+    case SDL_BUTTON_LEFT:
+      return MouseButton::Left;
+    case SDL_BUTTON_MIDDLE:
+      return MouseButton::Middle;
+    case SDL_BUTTON_RIGHT:
+      return MouseButton::Right;
+    case SDL_BUTTON_X1:
+      return MouseButton::X1;
+    default:
+      return MouseButton::X2;
+  }
 }
-}  // namespace
 
-// ── Lifetime ────────────────────────────────────────────────
+}  // namespace
 
 Window::~Window() { destroy(); }
 
 bool Window::create(const WindowDesc& desc) {
-  const HINSTANCE hInstance = GetModuleHandleW(nullptr);
-
-  if (!s_classRegistered) {
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wparam,
-                        LPARAM lparam) -> LRESULT {
-      if (msg == WM_NCCREATE) {
-        const auto* cs = reinterpret_cast<CREATESTRUCTW*>(lparam);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-                          reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
-        return DefWindowProcW(hwnd, msg, wparam, lparam);
-      }
-      auto* self =
-          reinterpret_cast<Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-      if (self) return self->handleMessage(hwnd, msg, wparam, lparam);
-      return DefWindowProcW(hwnd, msg, wparam, lparam);
-    };
-    wc.hInstance = hInstance;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.lpszClassName = kClassName;
-    if (!RegisterClassExW(&wc)) {
-      KENSHIN_ERROR("RegisterClassExW failed: {}", GetLastError());
-      return false;
-    }
-    s_classRegistered = true;
-  }
-
-  // Desired client size -> outer window size
-  RECT rect{0, 0, static_cast<LONG>(desc.width),
-            static_cast<LONG>(desc.height)};
-  const DWORD style = WS_OVERLAPPEDWINDOW &
-                      ~(desc.resizable ? 0 : (WS_THICKFRAME | WS_MAXIMIZEBOX));
-  AdjustWindowRect(&rect, style, FALSE);
-
-  m_hwnd = CreateWindowExW(0, kClassName, toWide(desc.title).c_str(), style,
-                           CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left,
-                           rect.bottom - rect.top, nullptr, nullptr, hInstance,
-                           this);
-  if (!m_hwnd) {
-    KENSHIN_ERROR("CreateWindowExW failed: {}", GetLastError());
+  if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+    KENSHIN_ERROR("SDL video init failed: {}", SDL_GetError());
     return false;
   }
-
-  m_width = desc.width;
-  m_height = desc.height;
-  ShowWindow(static_cast<HWND>(m_hwnd), SW_SHOW);
-  UpdateWindow(static_cast<HWND>(m_hwnd));
-
+  m_videoInited = true;
+  SDL_WindowFlags flags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+  if (desc.resizable) flags |= SDL_WINDOW_RESIZABLE;
+  if (desc.hidden) flags |= SDL_WINDOW_HIDDEN;
+  m_window = SDL_CreateWindow(desc.title.c_str(), static_cast<int>(desc.width),
+                              static_cast<int>(desc.height), flags);
+  if (m_window == nullptr) {
+    KENSHIN_ERROR("SDL_CreateWindow failed: {}", SDL_GetError());
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    m_videoInited = false;
+    return false;
+  }
+  m_quitPosted = false;
+  refreshPixelSize();
   KENSHIN_INFO("Window created {}x{}", m_width, m_height);
   return true;
 }
 
 void Window::destroy() {
-  if (m_hwnd) {
-    DestroyWindow(static_cast<HWND>(m_hwnd));
-    m_hwnd = nullptr;
+  if (m_window != nullptr) {
+    SDL_DestroyWindow(sdl(m_window));
+    m_window = nullptr;
     m_width = m_height = 0;
   }
+  if (m_videoInited) {
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    m_videoInited = false;
+  }
+}
+
+void Window::refreshPixelSize() {
+  int w = 0, h = 0;
+  if (m_window != nullptr) SDL_GetWindowSizeInPixels(sdl(m_window), &w, &h);
+  m_width = static_cast<u32>(w > 0 ? w : 0);
+  m_height = static_cast<u32>(h > 0 ? h : 0);
 }
 
 bool Window::pumpEvents() {
-  MSG msg{};
-  while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-    if (msg.message == WM_QUIT) {
-      m_quitPosted = true;
-      break;
+  if (m_window == nullptr) return false;
+  const SDL_WindowID id = SDL_GetWindowID(sdl(m_window));
+  SDL_Event e;
+  while (SDL_PollEvent(&e)) {
+    if (onRawEvent) onRawEvent(&e);
+    Input& input = Input::get();
+    switch (e.type) {
+      case SDL_EVENT_QUIT:
+        handleClose();
+        break;
+      case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        if (e.window.windowID == id) handleClose();
+        break;
+      case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        if (e.window.windowID == id) {
+          const u32 w = static_cast<u32>(e.window.data1);
+          const u32 h = static_cast<u32>(e.window.data2);
+          if (w != m_width || h != m_height) {
+            m_width = w;
+            m_height = h;
+            if (onResize && w != 0 && h != 0) onResize(w, h);
+          }
+        }
+        break;
+      case SDL_EVENT_WINDOW_FOCUS_LOST:
+        // Keys released while another window has focus never report
+        // their key-up here.
+        if (e.window.windowID == id) input.releaseAll();
+        break;
+      case SDL_EVENT_KEY_DOWN:
+      case SDL_EVENT_KEY_UP: {
+        if (e.key.repeat) break;
+        // SDL scancodes ARE USB HID usage IDs - core::Key's values.
+        const Key key = static_cast<Key>(e.key.scancode);
+        const bool down = e.type == SDL_EVENT_KEY_DOWN;
+        input.onKey(key, down);
+        if (onKey) onKey(key, down);
+        break;
+      }
+      case SDL_EVENT_MOUSE_MOTION: {
+        const int x = static_cast<int>(e.motion.x);
+        const int y = static_cast<int>(e.motion.y);
+        input.onMouseMove(x, y);
+        if (onMouseMove) onMouseMove(x, y);
+        break;
+      }
+      case SDL_EVENT_MOUSE_BUTTON_DOWN:
+      case SDL_EVENT_MOUSE_BUTTON_UP: {
+        const MouseButton b = mapButton(e.button.button);
+        const bool down = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        input.onMouseButton(b, down);
+        if (onMouseButton)
+          onMouseButton(b, down, static_cast<int>(e.button.x),
+                        static_cast<int>(e.button.y));
+        break;
+      }
+      case SDL_EVENT_MOUSE_WHEEL: {
+        float delta = e.wheel.y;
+        if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) delta = -delta;
+        input.onWheel(delta);
+        if (onWheel) onWheel(delta);
+        break;
+      }
+      default:
+        break;
     }
-    TranslateMessage(&msg);
-    DispatchMessageW(&msg);
   }
-  return m_hwnd != nullptr && !m_quitPosted;
+  return m_window != nullptr && !m_quitPosted;
 }
 
 bool Window::hasNoDrawableArea() const {
-  if (!m_hwnd) return true;
-  HWND hwnd = static_cast<HWND>(m_hwnd);
-  if (IsIconic(hwnd)) return true;
-  RECT rc{};
-  if (!GetClientRect(hwnd, &rc)) return true;
-  return rc.right - rc.left <= 0 || rc.bottom - rc.top <= 0;
+  if (m_window == nullptr) return true;
+  if (SDL_GetWindowFlags(sdl(m_window)) & SDL_WINDOW_MINIMIZED) return true;
+  int w = 0, h = 0;
+  SDL_GetWindowSizeInPixels(sdl(m_window), &w, &h);
+  return w <= 0 || h <= 0;
 }
 
 void Window::requestClose() { handleClose(); }
 
-WindowHandle Window::nativeInstance() const {
-  return GetModuleHandleW(nullptr);
-}
-
-// ── Message handling ────────────────────────────────────────
-
-i64 Window::handleMessage(void* hwndRaw, unsigned msg, usize wparamRaw,
-                          isize lparamRaw) {
-  const HWND hwnd = static_cast<HWND>(hwndRaw);
-  const WPARAM wparam = static_cast<WPARAM>(wparamRaw);
-  const LPARAM lparam = static_cast<LPARAM>(lparamRaw);
-
-  if (onRawMessage && onRawMessage(hwndRaw, msg, wparamRaw, lparamRaw))
-    return 0;
-
-  switch (msg) {
-    case WM_SIZE: {
-      const u32 w = LOWORD(lparam), h = HIWORD(lparam);
-      if (w != m_width || h != m_height) {
-        m_width = w;
-        m_height = h;
-        if (onResize && w != 0 && h != 0) onResize(w, h);
-      }
-      return 0;
-    }
-    case WM_KEYDOWN:
-    case WM_SYSKEYDOWN: {
-      const bool repeat = (lparam & (1 << 30)) != 0;
-      if (!repeat) {
-        Input::get().onKey(static_cast<int>(wparam), true);
-        if (onKey) onKey(static_cast<int>(wparam), true);
-      }
-      return 0;
-    }
-    case WM_KEYUP:
-    case WM_SYSKEYUP: {
-      Input::get().onKey(static_cast<int>(wparam), false);
-      if (onKey) onKey(static_cast<int>(wparam), false);
-      return 0;
-    }
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONUP:
-    case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
-    case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP: {
-      const int button = (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)   ? 0
-                         : (msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP) ? 1
-                                                                          : 2;
-      const bool down = (msg == WM_LBUTTONDOWN || msg == WM_MBUTTONDOWN ||
-                         msg == WM_RBUTTONDOWN);
-      const int x = GET_X_LPARAM(lparam), y = GET_Y_LPARAM(lparam);
-      Input::get().onMouseButton(button, down);
-      if (onMouseButton) onMouseButton(button, down, x, y);
-      return 0;
-    }
-    case WM_MOUSEMOVE: {
-      const int x = GET_X_LPARAM(lparam), y = GET_Y_LPARAM(lparam);
-      Input::get().onMouseMove(x, y);
-      if (onMouseMove) onMouseMove(x, y);
-      return 0;
-    }
-    case WM_MOUSEWHEEL: {
-      const float delta = GET_WHEEL_DELTA_WPARAM(wparam) / 120.0f;
-      Input::get().onWheel(delta);
-      if (onWheel) onWheel(delta);
-      return 0;
-    }
-    case WM_CLOSE:
-      handleClose();
-      return 0;
-    case WM_DESTROY:
-      PostQuitMessage(0);
-      return 0;
-    default:
-      return DefWindowProcW(hwnd, static_cast<UINT>(msg),
-                            static_cast<WPARAM>(wparam),
-                            static_cast<LPARAM>(lparam));
-  }
-}
-
 void Window::handleClose() {
+  if (m_quitPosted) return;
+  m_quitPosted = true;
   if (onClose) onClose();
-  if (m_hwnd) DestroyWindow(static_cast<HWND>(m_hwnd));
-  m_hwnd = nullptr;
-  KENSHIN_INFO("Window closed");
+}
+
+std::vector<std::string> Window::vulkanInstanceExtensions() const {
+  std::vector<std::string> out;
+  Uint32 count = 0;
+  const char* const* names = SDL_Vulkan_GetInstanceExtensions(&count);
+  if (names == nullptr) {
+    KENSHIN_ERROR("SDL_Vulkan_GetInstanceExtensions failed: {}",
+                  SDL_GetError());
+    return out;
+  }
+  for (Uint32 i = 0; i < count; ++i) out.emplace_back(names[i]);
+  return out;
+}
+
+u64 Window::createVulkanSurface(void* vkInstance) const {
+  if (m_window == nullptr || vkInstance == nullptr) return 0;
+  VkSurfaceKHR surface = 0;  // SDL_vulkan.h declares no VK_NULL_HANDLE
+
+  if (!SDL_Vulkan_CreateSurface(sdl(m_window),
+                                static_cast<VkInstance>(vkInstance), nullptr,
+                                &surface)) {
+    KENSHIN_ERROR("SDL_Vulkan_CreateSurface failed: {}", SDL_GetError());
+    return 0;
+  }
+  // Non-dispatchable handle: a pointer on 64-bit builds, a uint64_t on
+  // 32-bit ones - copy the bits either way.
+  u64 handle = 0;
+  std::memcpy(&handle, &surface, sizeof(surface));
+  return handle;
 }
 
 }  // namespace core

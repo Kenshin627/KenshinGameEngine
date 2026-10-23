@@ -37,8 +37,8 @@ add_library(kenshin_engine STATIC
     src/geometry/ClusterLodBuilder.cpp
     # vendored ImGui backends, compiled here so vk calls resolve through volk
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
-    ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_win32.cpp
     src/Version.cpp
+    src/platform/Paths.cpp
     src/backend/VulkanBackend.cpp
     src/backend/vulkan/FrameSync.cpp
     src/backend/vulkan/GpuImage.cpp
@@ -54,6 +54,7 @@ add_library(kenshin_engine STATIC
     src/backend/vulkan/DescriptorCache.cpp
     src/backend/vulkan/UploadEngine.cpp
     src/core/Input.cpp
+    src/core/Keys.cpp
     src/core/Log.cpp
     src/core/Timer.cpp
     src/core/Window.cpp
@@ -126,7 +127,10 @@ endif()
 find_package(spdlog CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
-target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm imgui::imgui)
+# SDL3: the platform layer (window, input, Vulkan surface, paths).
+find_package(SDL3 CONFIG REQUIRED)
+target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm imgui::imgui
+    SDL3::SDL3)
 
 # Vulkan backend deps (kept PRIVATE: raw API types never leave the backend)
 find_package(volk CONFIG REQUIRED)
@@ -141,7 +145,6 @@ target_link_libraries(kenshin_engine PRIVATE
 target_compile_definitions(kenshin_engine PRIVATE SPIRV_REFLECT_USE_SYSTEM_SPIRV_H)
 target_compile_definitions(kenshin_engine PRIVATE
     VK_NO_PROTOTYPES           # volk supplies all vk entry points
-    VK_USE_PLATFORM_WIN32_KHR  # Win32 surface for present support check
     # Static VMA function table (filled explicitly from volk in
     # VulkanDevice). Newer vcpkg VMA defaults this to 1 and then demands
     # vkGetInstanceProcAddr/vkGetDeviceProcAddr in the table.
@@ -161,7 +164,6 @@ target_sources(kenshin_engine PRIVATE ${KENSHIN_MEMOPT_SOURCES})
 set_source_files_properties(${KENSHIN_MEMOPT_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
-    ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_win32.cpp
     ${CMAKE_SOURCE_DIR}/ThirdParty/stb/stb_image_impl.cpp
     PROPERTIES COMPILE_OPTIONS "/W0")
 # Vendored stb_image (glTF albedo decode; the BmpReader stays for the

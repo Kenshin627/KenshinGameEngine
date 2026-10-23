@@ -414,7 +414,7 @@ TEST_CASE("M3.2b in-frame chain occlusion - conservative, exact",
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
   auto runFrame = [&](std::vector<u64>& visOut, u32 statsOut[16]) {
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chain.execute(*backend, inputs);
     backend->endFrame();
     std::vector<u8> vb;
@@ -579,7 +579,7 @@ TEST_CASE("M3.3 post pass - disocclusion revive, exact",
     renderer::ChainInputs ciOn = ci;
     ciOn.occlusionEnabled = true;
 
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chainOff.execute(*backend, ci);
     chainOn.execute(*backend, ciOn);
     backend->endFrame();
@@ -712,7 +712,7 @@ TEST_CASE("M3.4 dense occluder stack - count drop, image exact",
   std::vector<u8> vbOff, vbOn;
   u32 stOff[16] = {}, stOn[16] = {};
   for (int f = 0; f < 5; ++f) {  // steady state well past warmup
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chainOff.execute(*backend, ci);
     chainOn.execute(*backend, ciOn);
     backend->endFrame();
@@ -854,7 +854,7 @@ TEST_CASE("M4.2 HW raster path - force-HW vs all-SW coverage",
 
   auto frameInfo = backend::FrameBeginInfo{.width = W, .height = H};
   for (int f = 0; f < 4; ++f) {
-    REQUIRE(backend->beginFrame(frameInfo));
+    REQUIRE(backend->beginFrame(frameInfo) == kenshin::backend::FrameStatus::Ready);
     chainSw.execute(*backend, ci);
     chainHw.execute(*backend, ciHw);
     backend->endFrame();

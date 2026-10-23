@@ -324,7 +324,7 @@ TEST_CASE("gpu v5 decode probe", "[gpu][quantprobe]") {
       u32 pv[8] = {c, 0, dag.clusters[c].vertexCount, 0, t, 0, 0, 0};
       std::memcpy(backend->mappedPtr(paramBuf), pv, sizeof pv);
       std::memset(backend->mappedPtr(outBuf), 0, 32);
-      REQUIRE(backend->beginFrame(fi));
+      REQUIRE(backend->beginFrame(fi) == kenshin::backend::FrameStatus::Ready);
       const u32 handles[8] = {paramBuf, slotPool, cmBuf,  cpBuf,
                               ptBuf,    phBuf,    outBuf, slotPool};
       backend->dispatchCompute(pipe, handles, 8, 1, 1, 1);
@@ -354,7 +354,7 @@ TEST_CASE("gpu v5 decode probe", "[gpu][quantprobe]") {
     u32 pv[8] = {c, v, dag.clusters[c].vertexCount, 0, 0, 0, 0, 0};
     std::memcpy(backend->mappedPtr(paramBuf), pv, sizeof pv);
     std::memset(backend->mappedPtr(outBuf), 0, 32);
-    REQUIRE(backend->beginFrame(fi));
+    REQUIRE(backend->beginFrame(fi) == kenshin::backend::FrameStatus::Ready);
     const u32 handles[8] = {paramBuf, slotPool, cmBuf,  cpBuf,
                             ptBuf,    phBuf,    outBuf, slotPool};
     backend->dispatchCompute(pipe, handles, 8, 1, 1, 1);

@@ -6,6 +6,9 @@
 
 #include <volk.h>
 
+#include <string>
+#include <vector>
+
 #include "kenshin/Common.h"
 
 KENSHIN_NS_BEGIN
@@ -46,16 +49,18 @@ struct VulkanContext {
   bool sameFamilyAsyncCompute = false;
 
   /// @param enableValidation  add VK_LAYER_KHRONOS_validation + debug messenger
-  /// @param needSurface       add instance-level surface extensions (Win32)
-  bool init(bool enableValidation, bool needSurface);
+  /// @param surfaceExtensions the window system's instance extensions
+  ///                          (empty = headless)
+  bool init(bool enableValidation,
+            const std::vector<std::string>& surfaceExtensions);
   void shutdown();
 
-  /// Create a temporary surface from hwnd and test present support on the
-  /// graphics family. The surface is destroyed again.
-  bool checkPresentSupport(void* hwnd);
+  /// Present support of the graphics family for `surface`.
+  bool checkPresentSupport(VkSurfaceKHR surface) const;
 
  private:
-  bool createInstance(bool enableValidation, bool needSurface);
+  bool createInstance(bool enableValidation,
+                      const std::vector<std::string>& surfaceExtensions);
   bool pickPhysicalDevice();
   void selectQueueFamilies();
 };

@@ -4,12 +4,18 @@
 // Backend is the ONLY module allowed to make raw GPU API calls
 // (renderEngine discipline). Consumers never see Vulkan types here.
 
+#include <functional>
 #include <memory>
 #include <vector>
 
 #include "kenshin/Common.h"
+#include "kenshin/backend/FrameStatus.h"
 
 KENSHIN_NS_BEGIN
+
+namespace core {
+class Window;
+}
 
 namespace backend {
 
@@ -57,8 +63,9 @@ struct BackendCaps {
 };
 
 struct BackendInitParams {
-  /// Native window handle (HWND); enables the present-support check.
-  void* nativeWindowHandle = nullptr;
+  /// The presenting window (surface + its instance extensions); null =
+  /// headless (offscreen frames only - tests, CI, agent screenshots).
+  const core::Window* window = nullptr;
   bool enableValidation = false;
 };
 
@@ -73,8 +80,9 @@ class IRenderBackend {
   // ---- frame loop (S1.3) ------------------------------------------
   /// Begin a frame: waits for the in-flight slot, (re)creates render
   /// targets on size change, acquires the swapchain image and records
-  /// the clear into the frame command buffer.
-  virtual bool beginFrame(const FrameBeginInfo& info) = 0;
+  /// the clear into the frame command buffer. Only on Ready may the
+  /// caller record and call endFrame().
+  virtual FrameStatus beginFrame(const FrameBeginInfo& info) = 0;
 
   /// End the frame: blits the offscreen target to the swapchain image,
   /// submits and presents.
@@ -111,10 +119,13 @@ class IRenderBackend {
                                  std::vector<u8> outputs[Job::kMaxBuffers]) = 0;
 
   // ---- ImGui integration (S1.5) ------------------------------------
-  /// Initialize the ImGui Vulkan + Win32 backends. The caller must have
-  /// created the ImGui context. The application then draws widgets
-  /// between beginFrame() and endFrame().
-  virtual bool initImGuiBackend(void* hwnd, u32 width, u32 height) = 0;
+  /// Initialize the ImGui Vulkan renderer backend. The caller created the
+  /// ImGui context and initialized the PLATFORM backend (the window
+  /// layer owns that half); `platformNewFrame` is that backend's
+  /// per-frame hook, run by beginFrame right before ImGui::NewFrame. The
+  /// application then draws widgets between beginFrame() and endFrame().
+  virtual bool initImGuiBackend(u32 width, u32 height,
+                                std::function<void()> platformNewFrame) = 0;
 
   /// Texture id (opaque descriptor-set handle) of the CURRENT frame
   /// slot's viewport target for ImGui::Image. Valid between

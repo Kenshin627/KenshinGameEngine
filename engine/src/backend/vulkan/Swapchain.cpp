@@ -3,40 +3,19 @@
 #include "kenshin/core/Log.h"
 #include "Vk.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-
 #include <cstring>
 
 KENSHIN_NS_BEGIN
 
 namespace backend {
 
-namespace {
-// vkCreateWin32SurfaceKHR is platform-gated in volk.c; fetch at runtime.
-PFN_vkCreateWin32SurfaceKHR win32SurfaceFn(VkInstance instance) {
-  return reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
-      vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR"));
-}
-}  // namespace
-
-bool Swapchain::init(VkInstance instance, VkPhysicalDevice physicalDevice,
-                     VkDevice device, void* hwnd, u32 width, u32 height) {
-  const auto createSurface = win32SurfaceFn(instance);
-  if (!createSurface) {
-    KENSHIN_ERROR("[vulkan] vkCreateWin32SurfaceKHR unavailable");
+bool Swapchain::init(VkPhysicalDevice physicalDevice, VkDevice device,
+                     VkSurfaceKHR windowSurface, u32 width, u32 height) {
+  if (windowSurface == VK_NULL_HANDLE) {
+    KENSHIN_ERROR("[vulkan] swapchain init without a surface");
     return false;
   }
-  const VkWin32SurfaceCreateInfoKHR surfaceInfo{
-      .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
-      .hinstance = GetModuleHandleW(nullptr),
-      .hwnd = static_cast<HWND>(hwnd),
-  };
-  if (createSurface(instance, &surfaceInfo, nullptr, &surface) != VK_SUCCESS) {
-    KENSHIN_ERROR("[vulkan] surface creation failed");
-    return false;
-  }
+  surface = windowSurface;
 
   if (!createSwapchain(physicalDevice, device, width, height)) return false;
 
@@ -46,12 +25,9 @@ bool Swapchain::init(VkInstance instance, VkPhysicalDevice physicalDevice,
   return true;
 }
 
-void Swapchain::shutdown(VkInstance instance, VkDevice device) {
+void Swapchain::shutdown(VkDevice device) {
   destroySwapchainObjects(device);
-  if (surface != VK_NULL_HANDLE) {
-    vkDestroySurfaceKHR(instance, surface, nullptr);
-    surface = VK_NULL_HANDLE;
-  }
+  surface = VK_NULL_HANDLE;  // backend-owned: not destroyed here
 }
 
 VkResult Swapchain::acquire(VkDevice device, VkSemaphore imageAvailable) {

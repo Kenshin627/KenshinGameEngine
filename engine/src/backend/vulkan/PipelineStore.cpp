@@ -8,9 +8,7 @@
 #include "Vk.h"
 #include "kenshin/core/Log.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
+#include "kenshin/platform/Paths.h"
 
 KENSHIN_NS_BEGIN
 
@@ -58,10 +56,7 @@ VkFrontFace toVk(IRenderBackend::FrontFace face) {
 
 bool PipelineStore::init(VkDevice device) {
   std::vector<char> cacheData;
-  wchar_t exePath[MAX_PATH]{};
-  GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-  const auto cachePath =
-      std::filesystem::path(exePath).parent_path() / "kenshin_pipeline.cache";
+  const auto cachePath = platform::executableDir() / "kenshin_pipeline.cache";
   if (std::filesystem::exists(cachePath)) {
     std::ifstream in(cachePath, std::ios::binary);
     in.seekg(0, std::ios::end);
@@ -120,10 +115,8 @@ void PipelineStore::shutdown(VkDevice device) {
         bytes > 0) {
       std::vector<char> data(bytes);
       if (KE_VK(vkGetPipelineCacheData(device, m_cache, &bytes, data.data()))) {
-        wchar_t exePath[MAX_PATH]{};
-        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-        const auto cachePath = std::filesystem::path(exePath).parent_path() /
-                               "kenshin_pipeline.cache";
+        const auto cachePath =
+            platform::executableDir() / "kenshin_pipeline.cache";
         std::ofstream out(cachePath, std::ios::binary);
         out.write(data.data(), static_cast<std::streamsize>(bytes));
       }

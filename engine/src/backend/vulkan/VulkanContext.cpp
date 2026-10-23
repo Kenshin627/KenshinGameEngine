@@ -3,10 +3,6 @@
 #include "Vk.h"
 #include "kenshin/core/Log.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -58,7 +54,8 @@ const char* gpuTypeName(VkPhysicalDeviceType type) {
 }
 }  // namespace
 
-bool VulkanContext::init(bool enableValidation, bool needSurface) {
+bool VulkanContext::init(bool enableValidation,
+                         const std::vector<std::string>& surfaceExtensions) {
   if (const VkResult result = volkInitialize(); result != VK_SUCCESS) {
     KENSHIN_ERROR(
         "[vulkan] volkInitialize failed ({}) — is a Vulkan loader present?",
@@ -75,7 +72,7 @@ bool VulkanContext::init(bool enableValidation, bool needSurface) {
     return false;
   }
 
-  if (!createInstance(enableValidation, needSurface)) return false;
+  if (!createInstance(enableValidation, surfaceExtensions)) return false;
 
   if (!pickPhysicalDevice()) return false;
 
@@ -94,7 +91,8 @@ void VulkanContext::shutdown() {
   }
 }
 
-bool VulkanContext::createInstance(bool enableValidation, bool needSurface) {
+bool VulkanContext::createInstance(
+    bool enableValidation, const std::vector<std::string>& surfaceExtensions) {
   u32 layerCount = 0;
   vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
   std::vector<VkLayerProperties> layers(layerCount);
@@ -120,10 +118,22 @@ bool VulkanContext::createInstance(bool enableValidation, bool needSurface) {
   std::vector<const char*> instanceExtensions;
   if (hasExtension(extensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
     instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-  if (needSurface) {
-    instanceExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-    instanceExtensions.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
-    surfaceEnabled = true;
+  // The window system's extensions (VK_KHR_surface + the platform one),
+  // supplied by the platform layer - no OS knowledge here.
+  for (const std::string& ext : surfaceExtensions) {
+    if (!hasExtension(extensions, ext.c_str())) {
+      KENSHIN_ERROR("[vulkan] instance extension {} unavailable", ext);
+      return false;
+    }
+    instanceExtensions.push_back(ext.c_str());
+  }
+  surfaceEnabled = !surfaceExtensions.empty();
+  // Portability (MoltenVK on macOS): non-conformant implementations are
+  // only enumerated with this extension + flag. Absent elsewhere.
+  VkInstanceCreateFlags createFlags = 0;
+  if (hasExtension(extensions, "VK_KHR_portability_enumeration")) {
+    instanceExtensions.push_back("VK_KHR_portability_enumeration");
+    createFlags |= 0x00000001;  // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
   }
 
   const VkApplicationInfo app{
@@ -136,6 +146,7 @@ bool VulkanContext::createInstance(bool enableValidation, bool needSurface) {
   };
   const VkInstanceCreateInfo createInfo{
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+      .flags = createFlags,
       .pApplicationInfo = &app,
       .enabledLayerCount = static_cast<u32>(instanceLayers.size()),
       .ppEnabledLayerNames =
@@ -361,33 +372,11 @@ void VulkanContext::selectQueueFamilies() {
                                     : "unavailable"));
 }
 
-bool VulkanContext::checkPresentSupport(void* hwnd) {
-  if (graphicsFamily == 0xFFFFFFFFu || hwnd == nullptr) return false;
-
-  // vkCreateWin32SurfaceKHR is platform-gated in volk.c; fetch it at
-  // runtime instead of linking against a symbol that may not exist.
-  const auto pfnCreateWin32Surface =
-      reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
-          vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR"));
-  if (pfnCreateWin32Surface == nullptr) {
-    KENSHIN_WARN("[vulkan] vkCreateWin32SurfaceKHR not available");
-    return false;
-  }
-
-  const VkWin32SurfaceCreateInfoKHR surfaceInfo{
-      .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
-      .hinstance = GetModuleHandleW(nullptr),
-      .hwnd = static_cast<HWND>(hwnd),
-  };
-  VkSurfaceKHR surface = VK_NULL_HANDLE;
-  if (pfnCreateWin32Surface(instance, &surfaceInfo, nullptr, &surface) !=
-      VK_SUCCESS)
-    return false;
-
+bool VulkanContext::checkPresentSupport(VkSurfaceKHR surface) const {
+  if (graphicsFamily == 0xFFFFFFFFu || surface == VK_NULL_HANDLE) return false;
   VkBool32 supported = VK_FALSE;
   vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, graphicsFamily, surface,
                                        &supported);
-  vkDestroySurfaceKHR(instance, surface, nullptr);
   return supported == VK_TRUE;
 }
 

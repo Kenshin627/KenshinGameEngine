@@ -5,23 +5,15 @@
 #include "kenshin/core/Window.h"
 #include "kenshin/scene/Camera.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
+#include "kenshin/platform/Paths.h"
 
 #pragma warning(push, 0)
 #include <imgui.h>
-#include <imgui_impl_win32.h>  // after Windows.h: backend expects HWND declared
+#include <imgui_impl_sdl3.h>
 #include <imgui_internal.h>  // DockBuilder (first-run layout)
 #pragma warning(pop)
 
-// imgui_impl_win32.h intentionally wraps the WndProcHandler declaration in
-// '#if 0' (to avoid dragging <windows.h> into the header). Per its comment,
-// forward declare it here — Windows.h is already included above.
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd,
-                                                             UINT msg,
-                                                             WPARAM wParam,
-                                                             LPARAM lParam);
+#include <SDL3/SDL_events.h>
 
 #include <filesystem>
 
@@ -41,10 +33,8 @@ bool DebugOverlay::init(backend::IRenderBackend* backend,
   // Persist the layout next to the exe (default is the CWD, which is
   // whatever directory the app was launched from).
   {
-    wchar_t exePath[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     static std::string iniPath =
-        (std::filesystem::path(exePath).parent_path() / "imgui.ini").string();
+        (platform::executableDir() / "imgui.ini").string();
     io.IniFilename = iniPath.c_str();
   }
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -54,21 +44,34 @@ bool DebugOverlay::init(backend::IRenderBackend* backend,
   // layout lands (the app sizes the render target from it).
   m_viewportSize = glm::vec2(static_cast<f32>(window.width()),
                              static_cast<f32>(window.height()));
-  window.onRawMessage = [](void* hwnd, unsigned msg, kenshin::usize wparam,
-                           kenshin::isize lparam) {
-    return ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), msg,
-                                          static_cast<WPARAM>(wparam),
-                                          static_cast<LPARAM>(lparam)) != 0;
+  // Platform half (SDL3): input/display events in, cursor/IME out. The
+  // window still sees every event (onRawEvent only observes).
+  if (!ImGui_ImplSDL3_InitForVulkan(
+          static_cast<SDL_Window*>(window.nativeHandle()))) {
+    ImGui::DestroyContext();
+    return false;
+  }
+  m_platformInited = true;
+  window.onRawEvent = [](const void* e) {
+    ImGui_ImplSDL3_ProcessEvent(static_cast<const SDL_Event*>(e));
   };
-  if (!backend->initImGuiBackend(window.nativeHandle(), window.width(),
-                                 window.height())) {
+  if (!backend->initImGuiBackend(window.width(), window.height(),
+                                 [] { ImGui_ImplSDL3_NewFrame(); })) {
+    ImGui_ImplSDL3_Shutdown();
+    m_platformInited = false;
     ImGui::DestroyContext();
     return false;
   }
   return true;
 }
 
-void DebugOverlay::shutdown() { ImGui::DestroyContext(); }
+void DebugOverlay::shutdown() {
+  if (m_platformInited) {
+    ImGui_ImplSDL3_Shutdown();
+    m_platformInited = false;
+  }
+  ImGui::DestroyContext();
+}
 
 void DebugOverlay::draw(void* viewportTexture, core::FrameStats<240>& stats,
                         scene::Camera& camera,

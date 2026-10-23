@@ -1,46 +1,45 @@
 #pragma once
 
-// ── Win32 window (S1.1) ─────────────────────────────────────────
-// Hand-written window layer: events surface through callbacks
-// (resize/keys/mouse/wheel/close); the native handle is exposed for
-// Vulkan surface creation (S1.3).
+// ── Window — the platform window (SDL3) ─────────────────────────────
+// One OS window + its event pump. Feeds core::Input with physical keys
+// and the mouse, reports pixel-size changes (DPI-correct: width/height
+// are framebuffer PIXELS), and hands the Vulkan backend exactly two
+// things through Vulkan-free signatures: the instance extensions the
+// window system needs and a surface for a created instance. Nothing
+// above this class sees SDL or OS types.
 
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "kenshin/Common.h"
+#include "kenshin/core/Keys.h"
 
 KENSHIN_NS_BEGIN
 
 namespace core {
 
-/// Native window handle (HWND on Windows).
-using WindowHandle = void*;
-
 struct WindowDesc {
   std::string title = "KENSHIN";
-  u32 width = 1600;
+  u32 width = 1600;   // logical size; the pixel size follows display scale
   u32 height = 900;
   bool resizable = true;
+  bool hidden = false;  // never shown (tests, headless editor/agent runs)
 };
 
 class Window {
  public:
-  // Event callbacks (attached by app/engine). Resize fires with w/h == 0
-  // when minimized; ignore that case.
-  std::function<void(u32 w, u32 h)> onResize;
+  std::function<void(u32 w, u32 h)> onResize;  // pixel size, never 0x0
   std::function<void()> onClose;
-  std::function<void(int vk, bool down)> onKey;  // vk = Win32 virtual key code
-  std::function<void(int button, bool down, int x, int y)>
-      onMouseButton;  // button: 0=L 1=M 2=R
+  std::function<void(Key key, bool down)> onKey;  // repeats filtered
+  std::function<void(MouseButton button, bool down, int x, int y)>
+      onMouseButton;
   std::function<void(int x, int y)> onMouseMove;
   std::function<void(float delta)> onWheel;  // positive = scroll up
-
-  /// Raw Win32 message hook (used by the ImGui Win32 backend).
-  /// Receives de-typed (hwnd, msg, wparam, lparam); return true when
-  /// the message is consumed and default handling should be skipped.
-  std::function<bool(void* hwnd, unsigned msg, usize wparam, isize lparam)>
-      onRawMessage;
+  /// Every native event (an SDL_Event*) before the window handles it -
+  /// the UI layer's tap (ImGui). Observing only: the window and Input
+  /// still see the event.
+  std::function<void(const void* nativeEvent)> onRawEvent;
 
   Window() = default;
   ~Window();
@@ -50,35 +49,37 @@ class Window {
 
   bool create(const WindowDesc& desc);
   void destroy();
-  bool isOpen() const { return m_hwnd != nullptr; }
-  /// Minimized, or dragged down to an empty client area: nothing can
-  /// be presented (Vulkan forbids a 0x0 swapchain) - skip the frame.
+  bool isOpen() const { return m_window != nullptr; }
+  /// Minimized or zero-area: nothing to present (skip the frame).
   bool hasNoDrawableArea() const;
 
-  /// Pump messages (non-blocking). Returns false when the app should exit.
+  /// Drain pending events. Returns false once the window is closing.
   bool pumpEvents();
 
-  /// Request close from outside (e.g. ESC).
   void requestClose();
 
-  /// Client-area size in pixels.
-  u32 width() const { return m_width; }
-  u32 height() const { return m_height; }
+  u32 width() const { return m_width; }    // pixels
+  u32 height() const { return m_height; }  // pixels
 
-  WindowHandle nativeHandle() const { return m_hwnd; }
-  WindowHandle nativeInstance() const;
+  /// The SDL_Window* (platform/UI glue only - e.g. the ImGui backend).
+  void* nativeHandle() const { return m_window; }
+
+  /// Vulkan instance extensions this window system needs to present
+  /// (VK_KHR_surface + the platform's surface extension).
+  std::vector<std::string> vulkanInstanceExtensions() const;
+  /// Create a VkSurfaceKHR for `vkInstance` (a VkInstance). The caller
+  /// owns the surface (vkDestroySurfaceKHR). Returns 0 on failure.
+  u64 createVulkanSurface(void* vkInstance) const;
 
  private:
-  void handleResize(u32 w, u32 h);
   void handleClose();
-  /// Win32 message handler (signature de-Win32'd to keep this header clean;
-  /// cast back to native types in the .cpp).
-  i64 handleMessage(void* hwnd, unsigned msg, usize wparam, isize lparam);
+  void refreshPixelSize();
 
-  void* m_hwnd = nullptr;
+  void* m_window = nullptr;  // SDL_Window*
   u32 m_width = 0;
   u32 m_height = 0;
   bool m_quitPosted = false;
+  bool m_videoInited = false;
 };
 
 }  // namespace core

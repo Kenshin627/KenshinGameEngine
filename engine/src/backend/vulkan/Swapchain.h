@@ -1,7 +1,8 @@
 #pragma once
 
 // ── Swapchain (internal to the backend) ─────────────────────────
-// Owns the persistent Win32 surface and the swapchain with its image views.
+// The swapchain with its image views over a surface the BACKEND owns
+// (created by the platform window, destroyed after the swapchain).
 // FIFO present mode; format picks an 8-bit UNORM variant for deterministic
 // readback comparisons (no SRGB conversion in the blit path).
 
@@ -36,9 +37,10 @@ struct Swapchain {
   /// Index of the last acquired image (valid after acquire() == SUCCESS/SUBOPTIMAL).
   u32 imageIndex = 0;
 
-  bool init(VkInstance instance, VkPhysicalDevice physicalDevice,
-            VkDevice device, void* hwnd, u32 width, u32 height);
-  void shutdown(VkInstance instance, VkDevice device);
+  bool init(VkPhysicalDevice physicalDevice, VkDevice device,
+            VkSurfaceKHR windowSurface, u32 width, u32 height);
+  /// Destroys the swapchain objects; the surface stays (backend-owned).
+  void shutdown(VkDevice device);
 
   /// Acquire the next image. @return VK_SUCCESS, VK_SUBOPTIMAL_KHR (image
   /// still valid), VK_ERROR_OUT_OF_DATE_KHR (call recreate), or an error.

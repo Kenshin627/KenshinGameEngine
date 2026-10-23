@@ -20,13 +20,14 @@ class VulkanBackend final : public IRenderBackend {
   void shutdown() override;
   const BackendCaps& caps() const override { return m_caps; }
 
-  bool beginFrame(const FrameBeginInfo& info) override;
+  FrameStatus beginFrame(const FrameBeginInfo& info) override;
   void endFrame() override;
   bool readbackFrame(std::vector<u8>& rgbaOut, u32& width,
                      u32& height) override;
   bool runComputeOneshot(const Job& job,
                          std::vector<u8> outputs[Job::kMaxBuffers]) override;
-  bool initImGuiBackend(void* hwnd, u32 width, u32 height) override;
+  bool initImGuiBackend(u32 width, u32 height,
+                        std::function<void()> platformNewFrame) override;
   void* viewportImGuiTexture() override;
   void requestFullFrameCapture() override;
   bool readbackFullFrame(std::vector<u8>& rgbaOut, u32& width,

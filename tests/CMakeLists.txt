@@ -26,6 +26,7 @@ add_executable(kenshin_tests
     src/shader_reflection_tests.cpp
     src/shapes_tests.cpp
     src/smoke.cpp
+    src/input_tests.cpp
     src/vgchain_tests.cpp
     src/hzb_tests.cpp
     src/imposter_tests.cpp

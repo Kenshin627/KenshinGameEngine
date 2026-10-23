@@ -4,6 +4,12 @@
   "builtin-baseline": "d015e31e90838a4c9dfa3eed45979bc70d9357fc",
   "dependencies": [
     "glm",
+    {
+      "name": "sdl3",
+      "features": [
+        "vulkan"
+      ]
+    },
     "spdlog",
     "catch2",
     "volk",
@@ -12,7 +18,7 @@
       "name": "imgui",
       "features": [
         "docking-experimental",
-        "win32-binding"
+        "sdl3-binding"
       ]
     },
     "vulkan-validationlayers",

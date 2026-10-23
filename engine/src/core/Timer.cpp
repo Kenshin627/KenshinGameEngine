@@ -1,31 +1,24 @@
 #include "kenshin/core/Timer.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
+#include <chrono>
 
 KENSHIN_NS_BEGIN
 
-namespace {
-const double kFrequencyInv = [] {
-  LARGE_INTEGER freq{};
-  QueryPerformanceFrequency(&freq);
-  return 1.0 / static_cast<double>(freq.QuadPart);
-}();
-}  // namespace
+// steady_clock: monotonic on every platform (QueryPerformanceCounter on
+// Windows, clock_gettime(CLOCK_MONOTONIC) on Linux/macOS).
+using Clock = std::chrono::steady_clock;
 
-const double Timer::kInvFrequency = kFrequencyInv;
+const double Timer::kInvFrequency =
+    static_cast<double>(Clock::period::num) /
+    static_cast<double>(Clock::period::den);
 
 double getAbsoluteSeconds() {
-  LARGE_INTEGER counter{};
-  QueryPerformanceCounter(&counter);
-  return static_cast<double>(counter.QuadPart) * kFrequencyInv;
+  return std::chrono::duration<double>(Clock::now().time_since_epoch())
+      .count();
 }
 
 i64 Timer::ticksNow() {
-  LARGE_INTEGER counter{};
-  QueryPerformanceCounter(&counter);
-  return counter.QuadPart;
+  return static_cast<i64>(Clock::now().time_since_epoch().count());
 }
 
 KENSHIN_NS_END

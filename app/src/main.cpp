@@ -65,16 +65,26 @@
 #include "kenshin/util/BmpWriter.h"
 #include "stb/stb_image.h"  // env.hdr decode (impl: engine's stb_image_impl)
 
+#include <chrono>
+#include <thread>
+
+#include "kenshin/platform/Paths.h"
+
+#ifdef _WIN32
+// Crash triage (Windows): symbolized stack on unhandled SEH exceptions.
+// The portable crash handler replaces this in roadmap step 0.2.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
+#endif
 
 #pragma warning(push, 0)
 #include <imgui.h>
 #pragma warning(pop)
 
+#ifdef _WIN32
 namespace {
 // Crash triage aid: log a symbolized stack on any unhandled SEH
 // exception (this is what caught the Slang module-cache use-after-free).
@@ -102,6 +112,7 @@ LONG WINAPI crashLogFilter(EXCEPTION_POINTERS* ep) {
   return EXCEPTION_CONTINUE_SEARCH;
 }
 }  // namespace
+#endif  // _WIN32
 
 #include <algorithm>
 #include <cmath>
@@ -437,9 +448,7 @@ constexpr kenshin::f32 kPointRange = 8.0f;
 /// Locate engine/shaders: relative to the exe (build/<preset>/app/<cfg>),
 /// falling back to the working directory.
 std::string findShaderRoot() {
-  wchar_t exePath[MAX_PATH]{};
-  GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-  auto dir = std::filesystem::path(exePath).parent_path();
+  auto dir = kenshin::platform::executableDir();
   const std::filesystem::path candidates[] = {
       dir / ".." / ".." / ".." / ".." / "engine" / "shaders",
       std::filesystem::path("engine/shaders"),
@@ -567,7 +576,9 @@ struct VgDebugState {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
   SetUnhandledExceptionFilter(crashLogFilter);
+#endif
   const Args args = parseArgs(argc, argv);
 
   kenshin::log::init();
@@ -615,10 +626,8 @@ int main(int argc, char** argv) {
   // skips the build), the overlay builds a default layout; a saved
   // arrangement always wins.
   {
-    char exePath[MAX_PATH] = {};
-    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
     const std::filesystem::path ini =
-        std::filesystem::path(exePath).parent_path() / "imgui.ini";
+        kenshin::platform::executableDir() / "imgui.ini";
     if (!std::filesystem::exists(ini)) overlay.markFirstRun();
   }
 
@@ -1536,13 +1545,13 @@ int main(int argc, char** argv) {
     // swapchain; the old path tripped VUID-...-imageExtent-01689 and
     // shrank the viewport targets to 8x13).
     if (window.hasNoDrawableArea() && args.frames < 0) {
-      Sleep(16);
+      std::this_thread::sleep_for(std::chrono::milliseconds(16));
       frameTimer.reset();
       continue;
     }
     taaRanThisFrame = false;
     auto& input = kenshin::core::Input::get();
-    if (input.keyPressed(VK_ESCAPE)) {
+    if (input.keyPressed(kenshin::core::Key::Escape)) {
       KENSHIN_INFO("ESC pressed -> close");
       window.requestClose();
     }
@@ -1563,10 +1572,19 @@ int main(int argc, char** argv) {
     }
 
     const glm::vec2 vp = overlay.viewportSize();
-    if (!renderer.beginFrame(static_cast<kenshin::u32>(vp.x),
-                             static_cast<kenshin::u32>(vp.y), kClearColor)) {
+    const kenshin::renderer::FrameStatus frameStatus = renderer.beginFrame(
+        static_cast<kenshin::u32>(vp.x), static_cast<kenshin::u32>(vp.y),
+        kClearColor);
+    if (frameStatus == kenshin::renderer::FrameStatus::Error) {
       KENSHIN_ERROR("beginFrame failed");
       break;
+    }
+    if (frameStatus == kenshin::renderer::FrameStatus::Skipped) {
+      // Nothing to present (minimized between our check and the
+      // acquire): no recording, no endFrame - try again next frame.
+      std::this_thread::sleep_for(std::chrono::milliseconds(16));
+      frameTimer.reset();
+      continue;
     }
 
     overlay.draw(renderer.viewportTexture(), stats, camera, controller);

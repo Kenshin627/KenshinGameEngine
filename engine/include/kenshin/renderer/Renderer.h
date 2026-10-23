@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "kenshin/Common.h"
+#include "kenshin/backend/FrameStatus.h"
 #include "kenshin/assets/MeshData.h"
 
 KENSHIN_NS_BEGIN
@@ -32,6 +33,9 @@ class ShaderManager;
 }
 
 namespace renderer {
+
+using FrameStatus = backend::FrameStatus;
+
 
 /// Per-frame view data (pure numbers — cameras stay on the scene side).
 struct FrameView {
@@ -93,7 +97,9 @@ class Renderer {
   void onShutdown();
 
   /// Returns false when the backend could not begin (caller stops).
-  bool beginFrame(u32 width, u32 height, const f32 clearColor[4]);
+  /// Ready: record, then endFrame(). Skipped: nothing to present (e.g.
+  /// minimized) - do not call endFrame. Error: fatal.
+  FrameStatus beginFrame(u32 width, u32 height, const f32 clearColor[4]);
   void submit(const FrameView& view, std::span<const DrawItem> items);
   void endFrame();
 
