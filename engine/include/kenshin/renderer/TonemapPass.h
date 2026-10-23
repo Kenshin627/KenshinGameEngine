@@ -30,6 +30,15 @@ class TonemapPass {
   bool init(backend::IRenderBackend& backend, manager::ShaderManager& shaders);
   void onShutdown(backend::IRenderBackend& backend);
 
+  /// The environment drawn behind the model (null / envTexture ~0u =
+  /// the clear color).
+  struct Sky {
+    glm::mat4 invViewProj{1.0f};  // unjittered
+    u32 envTexture = ~0u;
+    float mip = 0.0f;  // background blur: the prefiltered mip level
+    float intensity = 1.0f;
+  };
+
   /// Operator selection (the panel combo).
   enum class Operator : int {
     Reinhard = 0,
@@ -46,7 +55,7 @@ class TonemapPass {
             const glm::vec4& clearColor, u32 width, u32 height,
             bool fromTaa = false, float sharpen = 0.0f,
             float bloomStrength = 0.0f, float bloomInvLevels = 0.0f,
-            u32 exposureState = ~0u);
+            u32 exposureState = ~0u, const Sky* sky = nullptr);
 
  private:
   u32 m_pipeline = ~0u;

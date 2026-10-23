@@ -48,6 +48,9 @@ struct TonemapPush
     float4 modeViewport;
     float4 bloomParams;  // x bloom strength (0 = off), y 1 / level count,
                          // z auto exposure flag
+    float4 skyParams;    // x env mip for the background (< 0 = clear
+                         // color), y env intensity
+    float4x4 invViewProj;  // unjittered; uv -> NDC directly (no y flip)
 };
 
 [[vk::push_constant]] ConstantBuffer<TonemapPush> push;
@@ -59,6 +62,28 @@ struct TonemapPush
 // exposure.slang's state ([0].x = this frame's adapted image scale);
 // TonemapPass binds a 1-entry dummy when auto exposure is off.
 [[vk::binding(2)]] StructuredBuffer<float4> exposureState;
+// The IBL equirect (Z-up, lighting.slang's convention): drawn behind the
+// model when skyParams.x >= 0; the backend's dummy array otherwise.
+[[vk::binding(3)]] Sampler2DArray envMap;
+
+float4 xform(float4x4 m, float4 v)
+{
+    return m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3] * v.w;
+}
+
+// Environment radiance behind pixel `uv` (lighting.slang's ray
+// reconstruction + equirect lookup), linear HDR.
+float3 skyRadiance(float2 uv)
+{
+    const float2 ndc = uv * 2.0 - 1.0;
+    const float4 n4 = xform(push.invViewProj, float4(ndc, 0.0, 1.0));
+    const float4 f4 = xform(push.invViewProj, float4(ndc, 1.0, 1.0));
+    const float3 d = normalize(f4.xyz / f4.w - n4.xyz / n4.w);
+    const float2 equi = float2(atan2(d.y, d.x) / 6.28318530718 + 0.5,
+                               acos(clamp(d.z, -1.0, 1.0)) / 3.14159265359);
+    const float3 rgb = envMap.SampleLevel(float3(equi, 0.0), push.skyParams.x).rgb;
+    return max(rgb, float3(0.0)) * push.skyParams.y;
+}
 
 struct VSOut
 {
@@ -303,12 +328,22 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     if (s > 0.0)
         bloom = max(bloomTex.SampleLevel(uv, 0.0).rgb, float3(0.0)) *
                 push.bloomParams.y;
-    // Background display color: the clear color, plus the bloom halo
-    // spilling past silhouettes (added in display-linear space). Exact
-    // clear color wherever the halo is below half a code value - the
-    // regression net's byte-exact background survives away from glows.
+    // Background display color. Sky on: the environment behind the
+    // model, exposed and tonemapped like the scene (bloom spilling past
+    // silhouettes blends in the same energy-conserving way). Sky off:
+    // the clear color plus the bloom halo (added in display-linear
+    // space) - exact clear color wherever the halo is below half a code
+    // value.
     float3 background = push.clearColorExp.rgb;
-    if (s > 0.0)
+    if (push.skyParams.x >= 0.0)
+    {
+        float3 sky = skyRadiance(uv);
+        if (s > 0.0) sky = sky * (1.0 - s) + bloom * s;
+        const float3 skyMapped = toneMapOp(sky * exposure);
+        if (skyMapped.x >= 0.0 && skyMapped.y >= 0.0 && skyMapped.z >= 0.0)
+            background = linearToSrgb(saturate(skyMapped));
+    }
+    else if (s > 0.0)
     {
         const float3 halo = toneMapOp(bloom * s * exposure);
         if (max(halo.x, max(halo.y, halo.z)) > 0.5 / 255.0)

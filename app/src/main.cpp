@@ -169,6 +169,8 @@ struct Args {
   float exposure = -1.0f;       // --exposure: seeds the panel value
   float envIntensity = -1.0f;   // --env-intensity: seeds the panel value
   bool noBloom = false;         // --no-bloom
+  bool noSky = false;           // --no-sky: clear color behind the model
+  float skyBlur = -1.0f;        // --sky-blur <mip>: seeds the panel value
   bool noAutoExposure = false;  // --no-auto-exposure (--exposure implies it)
   float exposureBias = -1e9f;   // --exposure-bias <EV>: seeds the panel
   std::string envPath;          // --env: an explicit Radiance HDRI
@@ -209,6 +211,10 @@ Args parseArgs(int argc, char** argv) {
       args.noAutoExposure = true;
     else if (std::strcmp(argv[i], "--exposure-bias") == 0 && i + 1 < argc)
       args.exposureBias = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--no-sky") == 0)
+      args.noSky = true;
+    else if (std::strcmp(argv[i], "--sky-blur") == 0 && i + 1 < argc)
+      args.skyBlur = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--no-bloom") == 0)
       args.noBloom = true;
     else if (std::strcmp(argv[i], "--bloom-strength") == 0 && i + 1 < argc)
@@ -492,6 +498,11 @@ struct VgDebugState {
   bool autoExposure = true;
   kenshin::renderer::ExposureSettings exposureSettings;
   float autoScale = 0.0f, autoAvgLum = 0.0f;
+  // The IBL environment behind the model (tonemap.slang); skyBlur =
+  // the prefiltered mip it samples (0 = sharp, the Sketchfab-style
+  // background blur above that).
+  bool sky = true;
+  kenshin::f32 skyBlur = 0.0f;
   bool bloom = true;
   kenshin::f32 bloomStrength = 0.08f;
   kenshin::f32 emissiveStrength = 16.0f;
@@ -683,6 +694,8 @@ int main(int argc, char** argv) {
         vgDebug.exposureSettings.biasEv = args.exposureBias;
       if (args.envIntensity >= 0.0f) vgDebug.envIntensity = args.envIntensity;
       if (args.noBloom) vgDebug.bloom = false;
+      if (args.noSky) vgDebug.sky = false;
+      if (args.skyBlur >= 0.0f) vgDebug.skyBlur = args.skyBlur;
       if (args.taaSharpen >= 0.0f) vgDebug.taaSharpen = args.taaSharpen;
       if (args.bloomStrength >= 0.0f) vgDebug.bloomStrength = args.bloomStrength;
       if (args.emissiveStrength >= 0.0f)
@@ -1085,6 +1098,10 @@ int main(int argc, char** argv) {
               ImGui::SliderFloat("exposure", &vgDebug.exposure, 0.1f, 4.0f,
                                  "%.2f");
             }
+            ImGui::Checkbox("environment background", &vgDebug.sky);
+            if (vgDebug.sky)
+              ImGui::SliderFloat("background blur", &vgDebug.skyBlur, 0.0f,
+                                 8.0f, "%.1f");
             ImGui::Checkbox("bloom", &vgDebug.bloom);
             if (vgDebug.bloom)
               ImGui::SliderFloat("bloom strength", &vgDebug.bloomStrength,
@@ -2187,6 +2204,11 @@ int main(int argc, char** argv) {
               vgDebug.bloom && vgDebug.viewMode == 0 &&
               vgDebug.bloomStrength > 0.0f &&
               bloomPass.draw(*vgBackend, resolvedByTaa, ci.width, ci.height);
+          kenshin::renderer::TonemapPass::Sky skyView;
+          skyView.invViewProj = glm::inverse(camera.viewProjMatrix());
+          skyView.envTexture = envTexture;
+          skyView.mip = std::min(vgDebug.skyBlur, envMaxLod);
+          skyView.intensity = vgDebug.envIntensity;
           if (tonemapReady)
             tonemapPass.draw(
                 *vgBackend,
@@ -2199,7 +2221,8 @@ int main(int argc, char** argv) {
                 bloomed ? vgDebug.bloomStrength : 0.0f,
                 1.0f / static_cast<float>(
                            kenshin::renderer::BloomPass::kLevels),
-                autoExposed ? exposurePass.stateBuffer() : ~0u);
+                autoExposed ? exposurePass.stateBuffer() : ~0u,
+                vgDebug.sky ? &skyView : nullptr);
         }
       }
     }

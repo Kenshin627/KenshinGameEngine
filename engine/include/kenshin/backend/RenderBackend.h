@@ -311,10 +311,13 @@ class IRenderBackend {
   /// depth-less color scope. Follows drawLighting every deferred frame.
   virtual u32 createTonemapPipeline(const FullscreenPipelineInfo& info) = 0;
   /// `exposureState` binds to the shader's SSBO slot (exposure.slang's
-  /// state, or the TonemapPass dummy when auto exposure is off).
+  /// state, or the TonemapPass dummy when auto exposure is off);
+  /// `envTexture` to the third sampler (the sky background; the dummy
+  /// texture array when invalid).
   virtual void drawTonemap(u32 pipeline, const void* push, usize pushBytes,
                            u32 width, u32 height, bool fromTaa = false,
-                           u32 exposureState = kInvalidBufferHandle) = 0;
+                           u32 exposureState = kInvalidBufferHandle,
+                           u32 envTexture = kInvalidTextureHandle) = 0;
   /// M9 TAA resolve: samples this slot's HDR + GBuffer A + the history
   /// ping-pong pair (all backend-internal) and writes the resolved
   /// RGBA16F; the SSBO `bufferHandles` carry the matrices/blend block

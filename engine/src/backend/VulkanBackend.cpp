@@ -2713,7 +2713,7 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
 
 void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
                                 u32 width, u32 height, bool fromTaa,
-                                u32 exposureState) {
+                                u32 exposureState, u32 envTexture) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
       pipeline > impl.pipelines.fullscreenCount())
@@ -2751,6 +2751,13 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
     // the bloom strength to 0 then - the set must stay validly written).
     VkDescriptorImageInfo bloomInfo = imageInfo;
     if (impl.bloomActive) bloomInfo.imageView = impl.bloom[0].view;
+    // Third sampler (binding 3, Sampler2DArray): the sky's env texture -
+    // an ARRAYED view either way (the dummy array when absent).
+    VkDescriptorImageInfo envInfo = imageInfo;
+    envInfo.imageView = envTexture < impl.textures.size() &&
+                                impl.textureAlive[envTexture]
+                            ? impl.textures[envTexture].view
+                            : impl.dummyTexture.view;
     u32 nextImage = 0;
     VkDescriptorBufferInfo stateInfo{};
     if (impl.buffers.valid(exposureState))
@@ -2769,7 +2776,9 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
           .descriptorType = fs.bindingTypes[b],
       };
       if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-        writes[b].pImageInfo = nextImage++ == 0 ? &imageInfo : &bloomInfo;
+        const u32 img = nextImage++;
+        writes[b].pImageInfo =
+            img == 0 ? &imageInfo : (img == 1 ? &bloomInfo : &envInfo);
       } else {
         writes[b].pBufferInfo = &stateInfo;  // binding 2: exposure state
       }

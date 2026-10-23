@@ -1,5 +1,6 @@
 #include "kenshin/renderer/TonemapPass.h"
 
+#include <algorithm>
 #include <vector>
 
 #include "kenshin/backend/RenderBackend.h"
@@ -48,14 +49,17 @@ void TonemapPass::draw(backend::IRenderBackend& backend, Operator op,
                        float exposure, const glm::vec4& clearColor, u32 width,
                        u32 height, bool fromTaa, float sharpen,
                        float bloomStrength, float bloomInvLevels,
-                       u32 exposureState) {
+                       u32 exposureState, const Sky* sky) {
   if (m_pipeline == ~0u || width == 0 || height == 0) return;
   // TonemapPush: tonemap.slang's TonemapPush, packed identically.
   struct TonemapPushC {
     glm::vec4 clearColorExp;
     glm::vec4 modeViewport;
     glm::vec4 bloomParams;
+    glm::vec4 skyParams;
+    glm::mat4 invViewProj;
   } push;
+  static_assert(sizeof(TonemapPushC) == 128, "TonemapPush layout");
   push.clearColorExp =
       glm::vec4(clearColor.r, clearColor.g, clearColor.b, exposure);
   push.modeViewport = glm::vec4(static_cast<f32>(static_cast<int>(op)),
@@ -64,8 +68,13 @@ void TonemapPass::draw(backend::IRenderBackend& backend, Operator op,
   const bool autoExposure = exposureState != ~0u;
   push.bloomParams = glm::vec4(bloomStrength, bloomInvLevels,
                                autoExposure ? 1.0f : 0.0f, 0.0f);
+  const bool skyOn = sky != nullptr && sky->envTexture != ~0u;
+  push.skyParams = glm::vec4(skyOn ? std::max(sky->mip, 0.0f) : -1.0f,
+                             skyOn ? sky->intensity : 0.0f, 0.0f, 0.0f);
+  push.invViewProj = skyOn ? sky->invViewProj : glm::mat4(1.0f);
   backend.drawTonemap(m_pipeline, &push, sizeof(push), width, height,
-                      fromTaa, autoExposure ? exposureState : m_dummyState);
+                      fromTaa, autoExposure ? exposureState : m_dummyState,
+                      skyOn ? sky->envTexture : ~0u);
 }
 
 void TonemapPass::onShutdown(backend::IRenderBackend& backend) {
