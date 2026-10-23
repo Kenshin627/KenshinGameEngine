@@ -1,4 +1,5 @@
 #include "kenshin/util/BmpWriter.h"
+#include "kenshin/util/File.h"
 
 #include <cstdio>
 #include <cstring>
@@ -51,7 +52,7 @@ bool writeBmp24(const std::string& path, const std::vector<u8>& rgba, u32 width,
   infoHeader.sizeImage = static_cast<u32>(imageDataSize);
 
   std::FILE* file = nullptr;
-  if (fopen_s(&file, path.c_str(), "wb") != 0 || !file) return false;
+  if ((file = kenshin::util::openFile(path.c_str(), "wb")) == nullptr) return false;
 
   bool ok = std::fwrite(&fileHeader, sizeof(fileHeader), 1, file) == 1 &&
             std::fwrite(&infoHeader, sizeof(infoHeader), 1, file) == 1;

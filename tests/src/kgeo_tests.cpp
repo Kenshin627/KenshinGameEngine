@@ -16,6 +16,7 @@
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
+#include "kenshin/util/File.h"
 
 namespace {
 bool buildDag(const kenshin::assets::MeshData& mesh,
@@ -91,7 +92,7 @@ TEST_CASE("kgeo rejects corrupt magic", "[geometry][kgeo]") {
 
   // Stomp the first 4 bytes.
   std::FILE* file = nullptr;
-  REQUIRE(fopen_s(&file, "out/corrupt.kgeo", "r+b") == 0);
+  REQUIRE((file = kenshin::util::openFile("out/corrupt.kgeo", "r+b")) != nullptr);
   REQUIRE(file != nullptr);
   const unsigned char junk[4] = {0xDE, 0xAD, 0xBE, 0xEF};
   std::fwrite(junk, 1, 4, file);
@@ -255,7 +256,7 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
     const auto* words = reinterpret_cast<const kenshin::u32*>(blob.data());
     kenshin::geometry::ClusterQuantMeta meta;
     std::memcpy(
-        &meta,
+        static_cast<void*>(&meta),
         words + m.metaBase + kenshin::usize(loaded.clusterMetaIndex[c]) * 10,
         10 * sizeof(kenshin::u32));
     const kenshin::u32 b[3] = {meta.widths & 0xFu, (meta.widths >> 4) & 0xFu,

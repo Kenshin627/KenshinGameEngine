@@ -38,6 +38,7 @@ add_library(kenshin_engine STATIC
     # vendored ImGui backends, compiled here so vk calls resolve through volk
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
     src/Version.cpp
+    src/platform/CrashHandler.cpp
     src/platform/Paths.cpp
     src/backend/VulkanBackend.cpp
     src/backend/vulkan/FrameSync.cpp
@@ -83,6 +84,7 @@ add_library(kenshin_engine STATIC
     src/scene/CameraController.cpp
     src/util/BmpReader.cpp
     src/util/BmpWriter.cpp
+    src/util/File.cpp
     src/math/ray.cpp
 )
 add_library(kenshin::engine ALIAS kenshin_engine)
@@ -96,6 +98,12 @@ file(GLOB_RECURSE KENSHIN_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/src PREFIX "Source Files" FILES ${KENSHIN_SOURCES})
 
 target_compile_features(kenshin_engine PUBLIC cxx_std_20)
+# StreamingManager's worker thread (pthread on Linux).
+find_package(Threads REQUIRED)
+target_link_libraries(kenshin_engine PUBLIC Threads::Threads)
+if(WIN32)
+    target_link_libraries(kenshin_engine PRIVATE dbghelp)  # CrashHandler
+endif()
 
 target_include_directories(kenshin_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -109,9 +117,9 @@ target_compile_definitions(kenshin_engine PUBLIC
     $<$<CONFIG:Debug>:KENSHIN_BUILD_DEBUG=1>
 )
 
+kenshin_target_defaults(kenshin_engine)
 if(MSVC)
     target_compile_options(kenshin_engine PRIVATE
-        /W4 /permissive- /utf-8 /MP
         /w14242   # conversion from 'int' to 'size_t', possible loss of data
         /w14254   # operator conversion, possible loss of data
         /w14263   # member function hides virtual member in base class
@@ -151,9 +159,11 @@ target_compile_definitions(kenshin_engine PRIVATE
     VMA_DYNAMIC_VULKAN_FUNCTIONS=0
 )
 
-# Slang (vendored binary release; SPIR-V runtime compilation)
+# Slang (vcpkg shader-slang: release binaries for Windows/Linux/macOS;
+# SPIR-V runtime compilation)
+find_package(slang CONFIG REQUIRED)
+target_link_libraries(kenshin_engine PRIVATE slang::slang)
 target_include_directories(kenshin_engine SYSTEM PRIVATE
-    ${CMAKE_SOURCE_DIR}/ThirdParty/slang/include
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends
     ${CMAKE_SOURCE_DIR}/ThirdParty
 )
@@ -161,17 +171,14 @@ target_include_directories(kenshin_engine SYSTEM PRIVATE
 # and other new flags clusterlod.h depends on.
 file(GLOB KENSHIN_MEMOPT_SOURCES ${CMAKE_SOURCE_DIR}/ThirdParty/meshoptimizer/*.cpp)
 target_sources(kenshin_engine PRIVATE ${KENSHIN_MEMOPT_SOURCES})
-set_source_files_properties(${KENSHIN_MEMOPT_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
+set_source_files_properties(${KENSHIN_MEMOPT_SOURCES} PROPERTIES COMPILE_OPTIONS "${KENSHIN_NO_WARNINGS}")
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/ThirdParty/imgui-backends/imgui_impl_vulkan.cpp
     ${CMAKE_SOURCE_DIR}/ThirdParty/stb/stb_image_impl.cpp
-    PROPERTIES COMPILE_OPTIONS "/W0")
+    PROPERTIES COMPILE_OPTIONS "${KENSHIN_NO_WARNINGS}")
 # Vendored stb_image (glTF albedo decode; the BmpReader stays for the
 # engine's own write-format roundtrips).
 target_sources(kenshin_engine PRIVATE ${CMAKE_SOURCE_DIR}/ThirdParty/stb/stb_image_impl.cpp)
 target_compile_definitions(kenshin_engine PRIVATE
     IMGUI_IMPL_VULKAN_USE_VOLK   # vk entry points via volk's loaded pointers
-)
-target_link_libraries(kenshin_engine PRIVATE
-    ${CMAKE_SOURCE_DIR}/ThirdParty/slang/lib/slang.lib
 )

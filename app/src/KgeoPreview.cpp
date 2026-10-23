@@ -1,9 +1,14 @@
 #include "KgeoPreview.h"
 
-#pragma warning(push, 0)
-#include <imgui.h>
-#pragma warning(pop)
+#ifdef _MSC_VER
 
+#pragma warning(push, 0)
+
+#endif
+#include <imgui.h>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 namespace demo {
 
 bool loadKgeo(const std::string& path, KgeoPreview& preview, std::string& log) {

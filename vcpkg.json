@@ -11,6 +11,7 @@
       ]
     },
     "spdlog",
+    "shader-slang",
     "catch2",
     "volk",
     "vulkan-memory-allocator",

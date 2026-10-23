@@ -1,4 +1,5 @@
 #include "kenshin/assets/ObjLoader.h"
+#include "kenshin/util/File.h"
 
 #include <cctype>
 #include <cstdio>
@@ -44,17 +45,16 @@ bool parseFaceRef(const std::string& token, const i64 rawCounts[3],
 
 void parseMtl(const std::string& path, MeshData::Material& material) {
   std::FILE* file = nullptr;
-  if (fopen_s(&file, path.c_str(), "r") != 0 || !file) return;
+  if ((file = kenshin::util::openFile(path.c_str(), "r")) == nullptr) return;
   char line[512];
   while (std::fgets(line, sizeof(line), file)) {
     float x = 0, y = 0, z = 0;
     char buf[256] = "";
-    if (sscanf_s(line, "Ka %f %f %f", &x, &y, &z) == 3)
+    if (std::sscanf(line, "Ka %f %f %f", &x, &y, &z) == 3)
       material.ka = {x, y, z};
-    else if (sscanf_s(line, "Kd %f %f %f", &x, &y, &z) == 3)
+    else if (std::sscanf(line, "Kd %f %f %f", &x, &y, &z) == 3)
       material.kd = {x, y, z};
-    else if (sscanf_s(line, "map_Kd %255s", buf,
-                      static_cast<unsigned>(sizeof(buf))) == 1) {
+    else if (std::sscanf(line, "map_Kd %255s", buf) == 1) {
       material.diffuseTexture = buf;
     }
   }
@@ -64,7 +64,7 @@ void parseMtl(const std::string& path, MeshData::Material& material) {
 
 bool loadObj(const std::string& path, MeshData& out, std::string& log) {
   std::FILE* file = nullptr;
-  if (fopen_s(&file, path.c_str(), "r") != 0 || !file) {
+  if ((file = kenshin::util::openFile(path.c_str(), "r")) == nullptr) {
     log = "cannot open file: " + path;
     return false;
   }
@@ -83,11 +83,11 @@ bool loadObj(const std::string& path, MeshData& out, std::string& log) {
     if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
 
     float x = 0, y = 0, z = 0;
-    if (sscanf_s(line, "v %f %f %f", &x, &y, &z) == 3) {
+    if (std::sscanf(line, "v %f %f %f", &x, &y, &z) == 3) {
       rawPositions.insert(rawPositions.end(), {x, y, z});
-    } else if (sscanf_s(line, "vn %f %f %f", &x, &y, &z) == 3) {
+    } else if (std::sscanf(line, "vn %f %f %f", &x, &y, &z) == 3) {
       rawNormals.insert(rawNormals.end(), {x, y, z});
-    } else if (sscanf_s(line, "vt %f %f", &x, &y) == 2) {
+    } else if (std::sscanf(line, "vt %f %f", &x, &y) == 2) {
       rawUvs.insert(rawUvs.end(), {x, y});
     } else if (line[0] == 'f' && (line[1] == ' ' || line[1] == '\t')) {
       std::istringstream stream(line + 2);
@@ -175,8 +175,7 @@ bool loadObj(const std::string& path, MeshData& out, std::string& log) {
       (void)haveFirst;
     } else if (line[0] == 'm' && std::strncmp(line, "mtllib", 6) == 0) {
       char buf[256] = "";
-      if (sscanf_s(line, "mtllib %255s", buf,
-                   static_cast<unsigned>(sizeof(buf))) == 1) {
+      if (std::sscanf(line, "mtllib %255s", buf) == 1) {
         const auto dir = std::filesystem::path(path).parent_path();
         parseMtl((dir / buf).string(), mesh.material);
       }

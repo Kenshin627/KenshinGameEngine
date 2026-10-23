@@ -120,8 +120,9 @@ TEST_CASE("dag monotonic fixes reported", "[geometry][dag]") {
                     built));
   INFO("log: " << built.log);
   // Either raw errors were already monotonic (0 fixes) or we raised some;
-  // the invariant check is the real gate; just exercise the counter.
-  REQUIRE(built.stats.monotonicFixes >= 0);
+  // the invariant check is the real gate. A fix is per cluster, so the
+  // counter is bounded by the cluster count.
+  REQUIRE(built.stats.monotonicFixes <= built.stats.clusterCount);
 }
 
 TEST_CASE("dag hierarchy (BVH8) invariants", "[geometry][dag]") {

@@ -16,11 +16,16 @@
 #include "vulkan/VulkanContext.h"
 #include "vulkan/VulkanDevice.h"
 
+#ifdef _MSC_VER
+
 #pragma warning(push, 0)
+
+#endif
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
+#ifdef _MSC_VER
 #pragma warning(pop)
-
+#endif
 #include <algorithm>
 #include <cstdio>
 #include <cstring>

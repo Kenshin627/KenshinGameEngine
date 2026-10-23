@@ -213,6 +213,39 @@ Each step ends with a commit, its test gate passing, and an entry in §7.
 * Remaining Win32-only code: the SEH crash handlers (`app`, `tests`),
   guarded by `_WIN32` until 0.2.
 
+### 0.2 Portable build — done 2026-10-23 (Windows-verified; Linux/macOS unbuilt)
+
+* **Slang from vcpkg** (`shader-slang` 2026.7.1, release binaries for all
+  three OSes) replaces the vendored Windows-only 2026.3.1; only
+  `slang.dll` + `slang-compiler.dll` are deployed (slang-llvm alone is
+  105 MB and never loaded for SPIR-V). `ThirdParty/slang` deleted.
+* **Compiler-neutral CMake**: `kenshin_target_defaults` (MSVC `/W4
+  /permissive- /utf-8`, GCC/Clang `-Wall -Wextra`, `-rdynamic` for
+  readable POSIX backtraces, Release PDBs via `/Z7 /DEBUG /OPT:REF,ICF`);
+  `KENSHIN_NO_WARNINGS` genex for vendored sources; Threads linked;
+  vcpkg located before `project()` (no hard-coded `C:/vcpkg`); presets
+  for linux-gcc/clang and macos-arm64 (host-gated).
+* **Portable code**: `util::openFile` (UTF-8 paths; `_wfopen` on Windows -
+  plain `fopen` loses non-ASCII paths there) replaces 17 `fopen_s`;
+  `sscanf_s` -> `std::sscanf`; `KENSHIN_DEBUG_BREAK`; MSVC pragmas
+  guarded; `platform::installCrashHandler` (SEH + `StackWalk64` from the
+  faulting context / POSIX signals + `backtrace` on an alternate stack);
+  `VK_KHR_portability_subset` enabled when exposed (spec requirement).
+* **Bugs found by the gates**: GCC rejected `Renderer(Config = {})`
+  (nested-class default argument - Linux/macOS would not have compiled)
+  and a `long long(x)` cast; the crash handler printed no frames
+  (`CaptureStackBackTrace` inside the filter) and no symbols (Release had
+  no PDBs).
+* Gate evidence: clean full MSVC build **0 warnings** (was ~20); GCC 13
+  `-fsyntax-only -Wall -Wextra` over all 94 sources: 0 errors, 0 warnings
+  (`tools/gcc_syntax_check.py`); include-case check 487 includes, 0
+  mismatches (`tools/check_include_case.py`, negative-tested); crash test
+  (`crash_handler` ctest: report names `kenshinCrashProbeFault`);
+  render regressions byte-identical on the new Slang; ctest 7/7;
+  interactive smoke with validation 0 errors.
+* **Not verified** (no Linux/macOS machine): actual GCC/Clang/AppleClang
+  builds and links, the POSIX crash branch, MoltenVK behavior.
+
 
 ## 8. Decisions (2026-10-23)
 

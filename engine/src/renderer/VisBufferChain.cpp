@@ -643,10 +643,10 @@ void VisBufferChain::execute(backend::IRenderBackend& backend,
     // (16-bit halves, inclusive). The post copy below inherits all of
     // them (its loop copies all 12 words).
     p[11] = glm::vec4(f32(in.rasterMode), f32(in.rasterProbe), scLo, scHi);
-    glm::vec4* pp =
+    glm::vec4* postRaster =
         static_cast<glm::vec4*>(backend.mappedPtr(m_postRasterParams[slot]));
-    for (int c = 0; c < 12; ++c) pp[c] = p[c];
-    pp[9].z = 2.0f;
+    for (int c = 0; c < 12; ++c) postRaster[c] = p[c];
+    postRaster[9].z = 2.0f;
   }
 
   // ---- Record: cull (direct size; N is CPU-known) -> convert ->

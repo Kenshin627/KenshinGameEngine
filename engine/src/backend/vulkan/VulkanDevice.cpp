@@ -3,11 +3,16 @@
 #include "VulkanContext.h"
 #include "kenshin/core/Log.h"
 
+#ifdef _MSC_VER
+
 #pragma warning(push, 0)
+
+#endif
 #define VMA_IMPLEMENTATION
 #include <vma/vk_mem_alloc.h>
+#ifdef _MSC_VER
 #pragma warning(pop)
-
+#endif
 #include <vector>
 
 KENSHIN_NS_BEGIN
@@ -186,6 +191,8 @@ bool VulkanDevice::init(const VulkanContext& context) {
   if (context.supportsConservativeRaster)
     deviceExtensions.push_back(
         VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
+  if (context.hasPortabilitySubset)
+    deviceExtensions.push_back("VK_KHR_portability_subset");
 
   const VkDeviceCreateInfo createInfo{
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,

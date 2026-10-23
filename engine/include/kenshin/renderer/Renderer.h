@@ -89,7 +89,11 @@ class Renderer {
     bool validation = true;  // enable the Vulkan validation layer
   };
 
-  explicit Renderer(Config config = {}) : m_config(config) {}
+  // Two constructors, not `Config config = {}`: a default argument naming
+  // a nested class with member initializers is ill-formed until the
+  // enclosing class is complete (GCC/Clang reject it; MSVC accepts).
+  Renderer() = default;
+  explicit Renderer(Config config) : m_config(config) {}
 
   /// Subsystem hook: creates + registers the render backend, enforces
   /// the int64-atomics capability gate, then initializes the pipeline.

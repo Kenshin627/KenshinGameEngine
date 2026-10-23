@@ -6,6 +6,16 @@
 
 #include "kenshin/core/Log.h"
 
+// Portable debugger break (MSVC intrinsic / Clang builtin / POSIX signal).
+#if defined(_MSC_VER)
+#define KENSHIN_DEBUG_BREAK() __debugbreak()
+#elif defined(__clang__)
+#define KENSHIN_DEBUG_BREAK() __builtin_debugtrap()
+#else
+#include <csignal>
+#define KENSHIN_DEBUG_BREAK() std::raise(SIGTRAP)
+#endif
+
 #if defined(NDEBUG)
 #define KENSHIN_ASSERT(expr) ((void)0)
 #define KENSHIN_ASSERT_MSG(expr, fmt, ...) ((void)0)
@@ -15,7 +25,7 @@
     if (!(expr)) {                                                   \
       KENSHIN_ERROR("Assertion failed: {} ({}:{})", #expr, __FILE__, \
                     __LINE__);                                       \
-      __debugbreak();                                                \
+      KENSHIN_DEBUG_BREAK();                                                \
     }                                                                \
   } while (0)
 #define KENSHIN_ASSERT_MSG(expr, fmt, ...)                           \
@@ -23,7 +33,7 @@
     if (!(expr)) {                                                   \
       KENSHIN_ERROR("Assertion failed: {} — " fmt " ({}:{})", #expr, \
                     ##__VA_ARGS__, __FILE__, __LINE__);              \
-      __debugbreak();                                                \
+      KENSHIN_DEBUG_BREAK();                                                \
     }                                                                \
   } while (0)
 #endif

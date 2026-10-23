@@ -126,8 +126,6 @@ void ImposterPass::draw(backend::IRenderBackend& backend, u32 visBuffer,
   // still-running dispatch.
   const u32 handles[4] = {visBuffer, backend.snapshotHostBuffer(m_params),
                           backend.snapshotHostBuffer(m_quads), m_atlas};
-  const u32 groups =
-      (quadCount * 64 + 63) / 64;  // one 64-thread group per quad row span
   backend.dispatchCompute(m_pipeline, handles, 4, quadCount, 1, 1);
   // Compute write -> the decode's fragment read.
   backend.bufferBarrier(visBuffer, false);

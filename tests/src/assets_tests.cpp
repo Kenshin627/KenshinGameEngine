@@ -19,6 +19,7 @@
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
 #include "kenshin/util/BmpReader.h"
 #include "kenshin/util/BmpWriter.h"
+#include "kenshin/util/File.h"
 
 namespace {
 std::string assetPath(const char* name) {
@@ -298,7 +299,7 @@ TEST_CASE("gltf loader: glb with transform, computed normals, image",
            std::filesystem::create_directories("out")));
   {
     FILE* f = nullptr;
-    REQUIRE(fopen_s(&f, "out/tri.glb", "wb") == 0);
+    REQUIRE((f = kenshin::util::openFile("out/tri.glb", "wb")) != nullptr);
     std::fwrite(glb.data(), 1, glb.size(), f);
     std::fclose(f);
   }
@@ -412,7 +413,7 @@ TEST_CASE("gltf loader: multi-material set with per-triangle tags",
            std::filesystem::create_directories("out")));
   {
     FILE* f = nullptr;
-    REQUIRE(fopen_s(&f, "out/multimat.glb", "wb") == 0);
+    REQUIRE((f = kenshin::util::openFile("out/multimat.glb", "wb")) != nullptr);
     std::fwrite(glb.data(), 1, glb.size(), f);
     std::fclose(f);
   }
@@ -465,7 +466,7 @@ TEST_CASE("gltf loader: rejects hostile bounds violations", "[assets][gltf]") {
     u32(0x004E4942);
     glb.insert(glb.end(), bin.begin(), bin.end());
     FILE* f = nullptr;
-    REQUIRE(fopen_s(&f, path, "wb") == 0);
+    REQUIRE((f = kenshin::util::openFile(path, "wb")) != nullptr);
     std::fwrite(glb.data(), 1, glb.size(), f);
     std::fclose(f);
   };
@@ -564,7 +565,7 @@ TEST_CASE("gltf loader: rejects garbage and missing buffers",
            std::filesystem::create_directories("out")));
   {
     FILE* f = nullptr;
-    REQUIRE(fopen_s(&f, "out/bad.glb", "wb") == 0);
+    REQUIRE((f = kenshin::util::openFile("out/bad.glb", "wb")) != nullptr);
     const char junk[] = "not a gltf at all";
     std::fwrite(junk, 1, sizeof(junk), f);
     std::fclose(f);
@@ -577,7 +578,7 @@ TEST_CASE("gltf loader: rejects garbage and missing buffers",
   // A .gltf whose buffer 0 is a data URI: loud v1 rejection.
   {
     FILE* f = nullptr;
-    REQUIRE(fopen_s(&f, "out/datauri.gltf", "wb") == 0);
+    REQUIRE((f = kenshin::util::openFile("out/datauri.gltf", "wb")) != nullptr);
     const char json[] =
         "{\"asset\":{\"version\":\"2.0\"},\"scenes\":[{\"nodes\":[0]}],"
         "\"nodes\":[{\"mesh\":0}],\"meshes\":[{\"primitives\":[{\"attributes\":"

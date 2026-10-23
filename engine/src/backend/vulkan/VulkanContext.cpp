@@ -283,12 +283,15 @@ bool VulkanContext::pickPhysicalDevice() {
     std::vector<VkExtensionProperties> devExts(devExtCount);
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &devExtCount,
                                          devExts.data());
-    for (const auto& e : devExts)
+    for (const auto& e : devExts) {
       if (std::strcmp(e.extensionName,
-                      VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME) == 0) {
+                      VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME) == 0)
         supportsConservativeRaster = true;
-        break;
-      }
+      // MoltenVK & other portability implementations: the spec REQUIRES
+      // enabling this extension whenever the device exposes it.
+      if (std::strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
+        hasPortabilitySubset = true;
+    }
   }
 
   KENSHIN_INFO("[vulkan] GPU selected: {} (api {}.{})", props.deviceName,

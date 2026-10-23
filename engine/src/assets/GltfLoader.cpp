@@ -1,4 +1,5 @@
 #include "kenshin/assets/GltfLoader.h"
+#include "kenshin/util/File.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,10 +12,15 @@
 #include <glm/gtc/quaternion.hpp>
 #include <map>
 
-#pragma warning(push, 0)
-#include "stb/stb_image.h"
-#pragma warning(pop)
+#ifdef _MSC_VER
 
+#pragma warning(push, 0)
+
+#endif
+#include "stb/stb_image.h"
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 KENSHIN_NS_BEGIN
 
 namespace assets {
@@ -225,7 +231,7 @@ bool parseJson(const std::string& text, JVal& root, std::string& err) {
 
 bool readFile(const std::string& path, std::vector<u8>& out) {
   FILE* f = nullptr;
-  if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return false;
+  if ((f = kenshin::util::openFile(path.c_str(), "rb")) == nullptr) return false;
   char buf[4096];
   size_t n = 0;
   while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
@@ -273,7 +279,8 @@ bool decodeBase64(const std::string& in, std::vector<u8>& out) {
 /// Untrusted-model URI guard: percent-decode, then refuse absolute
 /// paths and parent-directory escapes (an image or buffer URI must
 /// stay inside the model's own directory tree).
-bool safeUri(const std::string& dir, const std::string& raw, std::string& log) {
+bool safeUri(const std::string& /*dir*/, const std::string& raw,
+             std::string& log) {
   std::string uri;
   for (usize i = 0; i < raw.size(); ++i) {
     if (raw[i] == '%' && i + 2 < raw.size()) {
@@ -1019,8 +1026,9 @@ bool loadGltfImpl(const std::string& path, MeshData& mesh, GltfImage* albedo,
             gm.emissive =
                 glm::vec3(f32(ef->at(0).number), f32(ef->at(1).number),
                           f32(ef->at(2).number));
-          if (const JVal* ext = jm.find("extensions"))
-            if (const JVal* es = ext->find("KHR_materials_emissive_strength"))
+          if (const JVal* matExt = jm.find("extensions"))
+            if (const JVal* es =
+                    matExt->find("KHR_materials_emissive_strength"))
               gm.emissive *= f32(es->numOr("emissiveStrength", 1.0));
           if (!(gm.emissive.x >= 0.0f && gm.emissive.y >= 0.0f &&
                 gm.emissive.z >= 0.0f && gm.emissive.x < 1e4f &&

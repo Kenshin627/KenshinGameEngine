@@ -44,19 +44,9 @@ target_include_directories(kenshin_tests PRIVATE ${CMAKE_SOURCE_DIR}/ThirdParty)
 # dir and the Slang runtime DLLs must sit next to the test executable.
 target_compile_definitions(kenshin_tests PRIVATE
     KENSHIN_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-set(KE_SLANG_BIN ${CMAKE_SOURCE_DIR}/ThirdParty/slang/bin)
-if(EXISTS ${KE_SLANG_BIN}/slang.dll)
-    add_custom_command(TARGET kenshin_tests POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${KE_SLANG_BIN}/slang.dll
-            ${KE_SLANG_BIN}/slang-compiler.dll
-            $<TARGET_FILE_DIR:kenshin_tests>
-        COMMENT "Copying Slang runtime DLLs next to kenshin_tests")
-endif()
+kenshin_deploy_runtime(kenshin_tests)
 
-if(MSVC)
-    target_compile_options(kenshin_tests PRIVATE /W4 /permissive- /utf-8 /MP)
-endif()
+kenshin_target_defaults(kenshin_tests)
 
 # ── GPU render regression net ──────────────────────────────────────
 # Byte-identical screenshot vs a reference under tests/data/ (regeneration
@@ -119,6 +109,22 @@ set_tests_properties(render_baseline render_kgeo render_kgeo_nohw
     render_kgeo_albedo PROPERTIES LABELS "gpu")
 
 add_test(NAME kenshin_tests COMMAND kenshin_tests)
+
+# ── Crash handler (roadmap 0.2): a deliberate fault must produce a
+# symbolized report and still fail the process.
+add_executable(crash_probe crash/crash_probe.cpp)
+target_link_libraries(crash_probe PRIVATE kenshin::engine)
+kenshin_target_defaults(crash_probe)
+add_test(NAME crash_handler
+    COMMAND ${CMAKE_COMMAND} -DPROBE=$<TARGET_FILE:crash_probe>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/crash/check_crash.cmake)
+
+# ── Include-path case check: Linux filesystems are case-sensitive.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME include_case
+        COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tools/check_include_case.py)
+endif()
 set_tests_properties(kenshin_tests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}   # resolve tests/assets relative paths
 )

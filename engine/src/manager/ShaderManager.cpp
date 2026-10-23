@@ -2,11 +2,16 @@
 
 #include "kenshin/core/Log.h"
 
+#ifdef _MSC_VER
+
 #pragma warning(push, 0)
+
+#endif
 #include <slang.h>
 #include <spirv_reflect.h>
+#ifdef _MSC_VER
 #pragma warning(pop)
-
+#endif
 #include <cstdio>
 #include <filesystem>
 #include <iterator>
@@ -114,8 +119,8 @@ bool ShaderManager::init(const std::string& shaderRoot) {
   m_globalSession = globalSession;
   m_session = session;
 
-  KENSHIN_INFO(
-      "[slang] session ready (SPIR-V 1.5 target, Slang 2026.3.1 vendored)");
+  KENSHIN_INFO("[slang] session ready (SPIR-V 1.5 target, Slang {})",
+               spGetBuildTagString());
   return true;
 }
 
@@ -176,8 +181,9 @@ bool ShaderManager::compileFile(const std::string& path,
   slang::IBlob* diagnostics = nullptr;
   slang::IModule* module =
       session->loadModule(moduleName.c_str(), &diagnostics);
-  // OWNERSHIP: the session caches modules by name but (observed with the
-  // vendored Slang 2026.3.1) does not keep its own strong reference - a
+  // OWNERSHIP: the session caches modules by name but (observed with
+  // Slang 2026.3.1; kept for every version) does not keep its own strong
+  // reference - a
   // release() here frees the CACHED module and the next loadModule of
   // the same name walks freed memory (use-after-free crash on every
   // repeated compile; caught by ASAN at the S4.5 interactive repro).

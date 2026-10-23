@@ -20,6 +20,7 @@
 #include "kenshin/geometry/ClusterDag.h"
 #include "kenshin/geometry/KGeoFile.h"
 #include "kenshin/geometry/LodCut.h"
+#include "kenshin/util/File.h"
 
 using namespace kenshin;
 
@@ -297,7 +298,7 @@ TEST_CASE("quantized-vs-true raster occupancy (bigknot, user cam)",
             const long long dySub = (long long)(y) * SUBPIXEL + 128 -
                                     ((long long)(y0) * SUBPIXEL + 128);
             for (int x = x0; x <= x1; ++x) {
-              const long long dxSub = long long(x) * SUBPIXEL + 128 -
+              const long long dxSub = static_cast<long long>(x) * SUBPIXEL + 128 -
                                       ((long long)(x0) * SUBPIXEL + 128);
               const long long px = (long long)(x0) * SUBPIXEL + 128 + dxSub;
               const long long py = (long long)(y0) * SUBPIXEL + 128 + dySub;
@@ -346,7 +347,7 @@ TEST_CASE("quantized-vs-true raster occupancy (bigknot, user cam)",
   // Save occupancy bitmaps as PGMs for visual inspection.
   const auto savePGM = [](const char* path, const std::vector<u8>& img, u32 w,
                           u32 h) {
-    FILE* f = fopen(path, "wb");
+    FILE* f = kenshin::util::openFile(path, "wb");
     if (!f) return;
     fprintf(f, "P5\n%u %u\n255\n", w, h);
     fwrite(img.data(), 1, img.size(), f);

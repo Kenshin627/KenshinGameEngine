@@ -1,4 +1,5 @@
 #include "kenshin/util/BmpReader.h"
+#include "kenshin/util/File.h"
 
 #include <cstdio>
 #include <cstring>
@@ -10,7 +11,7 @@ namespace util {
 bool readBmp24(const std::string& path, ImageRgba& out, std::string& log) {
   out = ImageRgba{};
   FILE* f = nullptr;
-  if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) {
+  if ((f = kenshin::util::openFile(path.c_str(), "rb")) == nullptr) {
     log = "cannot open: " + path;
     return false;
   }

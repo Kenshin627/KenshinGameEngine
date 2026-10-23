@@ -43,7 +43,7 @@ QuantMeshGrid chooseQuantGrid(const ClusterDag& dag) {
 
   QuantMeshGrid grid;
   grid.P = P;
-  grid.step = std::exp2(-double(P));  // exact f32 power of two
+  grid.step = static_cast<f32>(std::exp2(-double(P)));  // exact power of two
   return grid;
 }
 

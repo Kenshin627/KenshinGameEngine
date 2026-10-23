@@ -7,12 +7,17 @@
 
 #include "kenshin/platform/Paths.h"
 
+#ifdef _MSC_VER
+
 #pragma warning(push, 0)
+
+#endif
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_internal.h>  // DockBuilder (first-run layout)
+#ifdef _MSC_VER
 #pragma warning(pop)
-
+#endif
 #include <SDL3/SDL_events.h>
 
 #include <filesystem>

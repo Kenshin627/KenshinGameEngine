@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <type_traits>
 #include <unordered_map>
 
 #include "kenshin/core/Log.h"
@@ -23,8 +24,10 @@ void storeMeta(std::vector<u32>& words, const ClusterQuantMeta& m) {
 }
 
 ClusterQuantMeta loadMeta(const u32* words) {
+  static_assert(std::is_trivially_copyable_v<ClusterQuantMeta>,
+                "the page format memcpys metadata words");
   ClusterQuantMeta m;
-  std::memcpy(&m, words, kMetaU32 * sizeof(u32));
+  std::memcpy(static_cast<void*>(&m), words, kMetaU32 * sizeof(u32));
   return m;
 }
 
@@ -339,11 +342,11 @@ bool verifyPacking(const ClusterDag& dag, const PackedGeometry& pg,
       if (hasUvs) {
         const u8* qp = blob.data() + usize(m.uvBase) * 4 +
                        usize(pg.localVertexOffset[c] + v) * 2;
-        const f32* src = dag.uvs.data() + usize(cl.vertexOffset + v) * 2;
+        const f32* srcUv = dag.uvs.data() + usize(cl.vertexOffset + v) * 2;
         for (int a = 0; a < 2; ++a) {
           const f32 got =
               meta.uvMin[a] + f32(qp[a]) * (meta.uvRange[a] / 255.0f);
-          const f32 err = std::fabs(src[a] - got);
+          const f32 err = std::fabs(srcUv[a] - got);
           maxUvErr = std::max(maxUvErr, err);
           if (err > meta.uvRange[a] / 508.0f + 1e-7f) {
             log = "packing: cluster " + std::to_string(c) + " uv error";

@@ -47,7 +47,6 @@ void CameraController::handleInput(Camera& camera,
     const f32 rl = glm::length(right);
     right = rl > 1e-5f ? right / rl
                        : glm::vec3(1.0f, 0.0f, 0.0f);  // degenerate at poles
-    const glm::vec3 up = glm::cross(right, fwd);
 
     const f32 speed =
         moveSpeed * (input.fast ? fastMultiplier : 1.0f) * input.deltaTime;

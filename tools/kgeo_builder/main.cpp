@@ -27,6 +27,7 @@ namespace fsg = std::filesystem;
 #include "kenshin/geometry/KGeoFile.h"
 #include "kenshin/geometry/shapes/SphereGeometry.h"
 #include "kenshin/geometry/shapes/TorusKnotGeometry.h"
+#include "kenshin/util/File.h"
 
 // Sketchfab/FBX-sourced glTF assets routinely sit FAR off the origin
 // (a scan pivot 172 units up, say) - the raw scene is technically
@@ -132,11 +133,11 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--albedo") == 0 && i + 1 < argc)
       albedo = argv[++i];
     else if (std::strcmp(argv[i], "--kd") == 0 && i + 3 < argc) {
-      kd[0] = std::atof(argv[++i]);
-      kd[1] = std::atof(argv[++i]);
-      kd[2] = std::atof(argv[++i]);
+      kd[0] = static_cast<float>(std::atof(argv[++i]));
+      kd[1] = static_cast<float>(std::atof(argv[++i]));
+      kd[2] = static_cast<float>(std::atof(argv[++i]));
     } else if (std::strcmp(argv[i], "--rough") == 0 && i + 1 < argc)
-      rough = std::atof(argv[++i]);
+      rough = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--metal") == 0 && i + 1 < argc)
       metal = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--opaque-blend") == 0)
@@ -195,33 +196,33 @@ int main(int argc, char** argv) {
     std::string inExt = fsg::path(input).extension().string();
     for (char& c : inExt) c = char(tolower(unsigned(c)));
     if (inExt == ".glb" || inExt == ".gltf") {
-      kenshin::assets::GltfImage albedo;
-      if (!kenshin::assets::loadGltf(input, mesh, &albedo, log, &gltfMaterials,
+      kenshin::assets::GltfImage gltfAlbedo;
+      if (!kenshin::assets::loadGltf(input, mesh, &gltfAlbedo, log, &gltfMaterials,
                                      &gltfImages)) {
         KENSHIN_ERROR("glTF load failed: {}", log);
         kenshin::log::shutdown();
         return 1;
       }
       if (!log.empty()) KENSHIN_WARN("[builder] gltf notes: {}", log);
-      if (albedo.width > 0 && gltfMaterials.size() <= 1) {
+      if (gltfAlbedo.width > 0 && gltfMaterials.size() <= 1) {
         // Re-encode the embedded/decoded albedo as a BMP next to the
         // OUTPUT (the .kgeo's texture reference is a bare file name -
         // the pair travels together like an --albedo copy).
         const fsg::path outDir = fsg::path(output).parent_path();
-        const std::string stem = albedo.name.empty()
+        const std::string stem = gltfAlbedo.name.empty()
                                      ? fsg::path(input).stem().string()
-                                     : albedo.name;
+                                     : gltfAlbedo.name;
         const fsg::path bmp = outDir / (stem + "_albedo.bmp");
-        if (!kenshin::util::writeBmp24(bmp.string(), albedo.rgba,
-                                       kenshin::u32(albedo.width),
-                                       kenshin::u32(albedo.height))) {
+        if (!kenshin::util::writeBmp24(bmp.string(), gltfAlbedo.rgba,
+                                       kenshin::u32(gltfAlbedo.width),
+                                       kenshin::u32(gltfAlbedo.height))) {
           KENSHIN_ERROR("[builder] albedo re-encode failed: {}", bmp.string());
           kenshin::log::shutdown();
           return 1;
         }
         mesh.material.diffuseTexture = bmp.string();
-        KENSHIN_INFO("[builder] gltf albedo {}x{} -> {}", albedo.width,
-                     albedo.height, bmp.string());
+        KENSHIN_INFO("[builder] gltf albedo {}x{} -> {}", gltfAlbedo.width,
+                     gltfAlbedo.height, bmp.string());
       }
       recenterGltf(mesh, fit);
       // Translucency (UE's split: Nanite never rasterizes translucent
@@ -270,7 +271,7 @@ int main(int argc, char** argv) {
         if (!tverts.empty()) {
           const std::filesystem::path tpath =
               std::filesystem::path(output).replace_extension(".tmesh");
-          FILE* tf = std::fopen(tpath.string().c_str(), "wb");
+          FILE* tf = kenshin::util::openFile(tpath, "wb");
           bool ok = tf != nullptr;
           if (ok) {
             const u32 head[3] = {0x314D544Bu /* "KTM1" */, 2u,
@@ -847,7 +848,7 @@ int main(int argc, char** argv) {
         tris += dag.clusters[c].indexCount / 3;
         ++perLevel[dag.groups[dag.clusters[c].group].lodLevel];
         for (usize i = 0; i < dag.clusters[c].indexCount; ++i) {
-          const u32 li = dag.clusters[c].indexOffset + i;
+          const u32 li = dag.clusters[c].indexOffset + static_cast<u32>(i);
           if (li >= dag.indices.size()) continue;
           const u32 vi = dag.clusters[c].vertexOffset + dag.indices[li];
           if (vi * 3 + 2 >= dag.positions.size()) continue;

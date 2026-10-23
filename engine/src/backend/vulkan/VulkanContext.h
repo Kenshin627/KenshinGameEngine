@@ -32,6 +32,8 @@ struct VulkanContext {
   // P0 seam fix: VK_EXT_conservative_rasterization (the HW raster
   // pipeline's overestimate mode - see createNullRaster).
   bool supportsConservativeRaster = false;
+  // VK_KHR_portability_subset exposed (MoltenVK): must be enabled.
+  bool hasPortabilitySubset = false;
 
   // True when surface extensions were enabled at instance creation.
   bool surfaceEnabled = false;

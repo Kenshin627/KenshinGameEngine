@@ -3,14 +3,19 @@
 #include "kenshin/core/Log.h"
 #include "kenshin/core/Timer.h"
 
+#ifdef _MSC_VER
+
 #pragma warning(push, 0)
+
+#endif
 // Vendored meshoptimizer (master) - NOT the vcpkg copy (too old for
 // SimplifyPreserveFolds that clusterlod.h uses).
 #include "meshoptimizer/meshoptimizer.h"
 #define CLUSTERLOD_IMPLEMENTATION
 #include "../../ThirdParty/clusterlod.h"
+#ifdef _MSC_VER
 #pragma warning(pop)
-
+#endif
 #include <algorithm>
 
 KENSHIN_NS_BEGIN

@@ -18,9 +18,7 @@ target_link_libraries(KENSHINDemo PRIVATE kenshin::engine)
 target_include_directories(KENSHINDemo SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/ThirdParty)
 
-if(MSVC)
-    target_compile_options(KENSHINDemo PRIVATE /W4 /permissive- /utf-8 /MP)
-endif()
+kenshin_target_defaults(KENSHINDemo)
 
 # Dev: ship the Vulkan validation layer next to the executable. The layer comes
 # from the vcpkg manifest (vulkan-validationlayers); the app points
@@ -38,13 +36,4 @@ if(EXISTS ${KE_VKG_LAYER_DIR}/VkLayer_khronos_validation.json)
         COMMENT "Copying Vulkan validation layer next to KENSHINDemo")
 endif()
 
-# Slang runtime DLLs (vendored binary release)
-set(KE_SLANG_BIN ${CMAKE_SOURCE_DIR}/ThirdParty/slang/bin)
-if(EXISTS ${KE_SLANG_BIN}/slang.dll)
-    add_custom_command(TARGET KENSHINDemo POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${KE_SLANG_BIN}/slang.dll
-            ${KE_SLANG_BIN}/slang-compiler.dll
-            $<TARGET_FILE_DIR:KENSHINDemo>
-        COMMENT "Copying Slang runtime DLLs next to KENSHINDemo")
-endif()
+kenshin_deploy_runtime(KENSHINDemo)

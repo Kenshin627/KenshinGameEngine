@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "kenshin/core/Log.h"
+#include "kenshin/util/File.h"
 #include "meshoptimizer/meshoptimizer.h"  // M7.2b page codec
 
 KENSHIN_NS_BEGIN
@@ -172,7 +173,7 @@ bool rehydrateTables(std::FILE* file, u32 groupCount, u32 clusterCount,
 bool writeKGeo(const std::string& path, const ClusterDag& dag,
                std::string& log) {
   std::FILE* file = nullptr;
-  if (fopen_s(&file, path.c_str(), "wb") != 0 || !file) {
+  if ((file = kenshin::util::openFile(path.c_str(), "wb")) == nullptr) {
     log = "cannot open for write: " + path;
     return false;
   }
@@ -263,7 +264,7 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
     return false;
   }
   std::FILE* file = nullptr;
-  if (fopen_s(&file, path.c_str(), "wb") != 0 || !file) {
+  if ((file = kenshin::util::openFile(path.c_str(), "wb")) == nullptr) {
     log = "cannot open for write: " + path;
     return false;
   }
@@ -502,8 +503,6 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   // stride 4; padded to 4 so the codec sees whole words). A page that
   // would INFLATE is stored raw instead (storedLen == rawLen flags
   // it) - decode stays lossless either way.
-  const usize dirBytes =
-      version >= kVersion8 ? sizeof(PageDirEntryV8) : sizeof(PageDirEntry);
   std::vector<PageDirEntryV8> dir(pg.pageCount);
   std::vector<u8> codec;
   for (u32 p = 0; p < pg.pageCount && ok; ++p) {
@@ -547,7 +546,7 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
 
 bool readKGeo(const std::string& path, ClusterDag& dag, std::string& log) {
   std::FILE* file = nullptr;
-  if (fopen_s(&file, path.c_str(), "rb") != 0 || !file) {
+  if ((file = kenshin::util::openFile(path.c_str(), "rb")) == nullptr) {
     log = "cannot open for read: " + path;
     return false;
   }
@@ -735,7 +734,7 @@ bool rehydrateTables(std::FILE* file, u32 groupCount, u32 clusterCount,
 bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
                          u32 materialCount, ClusterDag& dag, std::string& log) {
   std::FILE* file = nullptr;
-  if (fopen_s(&file, path.c_str(), "rb") != 0 || !file) {
+  if ((file = kenshin::util::openFile(path.c_str(), "rb")) == nullptr) {
     log = "cannot open for read: " + path;
     return false;
   }
@@ -946,15 +945,15 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
 bool KGeoPageReader::open(const std::string& path, std::string& log) {
   close();
   std::FILE* file = nullptr;
-  if (fopen_s(&file, path.c_str(), "rb") != 0 || !file) {
+  if ((file = kenshin::util::openFile(path.c_str(), "rb")) == nullptr) {
     log = "cannot open for read: " + path;
     return false;
   }
   FileHeaderV3 h3{};
   if (std::fread(&h3, sizeof(h3), 1, file) != 1 || h3.magic != kMagicV3 ||
-      h3.version != kVersion3 && h3.version != kVersion4 &&
-          h3.version != kVersion5 && h3.version != kVersion6 &&
-          !isV7Plus(h3.version)) {
+      (h3.version != kVersion3 && h3.version != kVersion4 &&
+       h3.version != kVersion5 && h3.version != kVersion6 &&
+       !isV7Plus(h3.version))) {
     log = "not a v3 paged file: " + path;
     std::fclose(file);
     return false;
@@ -1011,7 +1010,7 @@ bool KGeoPageReader::readPage(u32 page, std::vector<u8>& out,
     return false;
   }
   std::FILE* file = nullptr;
-  if (fopen_s(&file, m_path.c_str(), "rb") != 0 || !file) {
+  if ((file = kenshin::util::openFile(m_path.c_str(), "rb")) == nullptr) {
     log = "cannot open for read: " + m_path;
     return false;
   }

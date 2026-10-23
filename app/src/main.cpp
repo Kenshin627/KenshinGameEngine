@@ -68,51 +68,20 @@
 #include <chrono>
 #include <thread>
 
+#include "kenshin/platform/CrashHandler.h"
 #include "kenshin/platform/Paths.h"
+#include "kenshin/util/File.h"
 
-#ifdef _WIN32
-// Crash triage (Windows): symbolized stack on unhandled SEH exceptions.
-// The portable crash handler replaces this in roadmap step 0.2.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <Windows.h>
-#include <dbghelp.h>
-#pragma comment(lib, "dbghelp.lib")
-#endif
+
+#ifdef _MSC_VER
 
 #pragma warning(push, 0)
-#include <imgui.h>
-#pragma warning(pop)
 
-#ifdef _WIN32
-namespace {
-// Crash triage aid: log a symbolized stack on any unhandled SEH
-// exception (this is what caught the Slang module-cache use-after-free).
-LONG WINAPI crashLogFilter(EXCEPTION_POINTERS* ep) {
-  HANDLE proc = GetCurrentProcess();
-  SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
-  SymInitialize(proc, nullptr, TRUE);
-  void* frames[64]{};
-  const USHORT n = CaptureStackBackTrace(0, 64, frames, nullptr);
-  fprintf(stderr, "=== UNHANDLED EXCEPTION code=%08lx addr=%p\n",
-          ep->ExceptionRecord->ExceptionCode,
-          ep->ExceptionRecord->ExceptionAddress);
-  for (USHORT i = 0; i < n; ++i) {
-    char buf[sizeof(SYMBOL_INFO) + 256]{};
-    auto* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
-    sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-    sym->MaxNameLen = 255;
-    DWORD64 disp = 0;
-    if (SymFromAddr(proc, reinterpret_cast<DWORD64>(frames[i]), &disp, sym))
-      fprintf(stderr, "  #%02u %s+%llu\n", i, sym->Name,
-              static_cast<unsigned long long>(disp));
-    else
-      fprintf(stderr, "  #%02u %p\n", i, frames[i]);
-  }
-  return EXCEPTION_CONTINUE_SEARCH;
-}
-}  // namespace
-#endif  // _WIN32
+#endif
+#include <imgui.h>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -240,7 +209,7 @@ Args parseArgs(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc)
       args.frames = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--size") == 0 && i + 1 < argc)
-      sscanf_s(argv[++i], "%dx%d", &args.width, &args.height);
+      std::sscanf(argv[++i], "%dx%d", &args.width, &args.height);
     else if (std::strcmp(argv[i], "--kgeo") == 0 && i + 1 < argc)
       args.kgeo = argv[++i];
     else if (std::strcmp(argv[i], "--lod-threshold") == 0 && i + 1 < argc)
@@ -296,7 +265,7 @@ Args parseArgs(int argc, char** argv) {
     else if (std::strcmp(argv[i], "--wall") == 0)
       args.wall = true;
     else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc) {
-      const int n = sscanf_s(argv[++i], "%f,%f,%f,%f,%f,%f", &args.camYaw,
+      const int n = std::sscanf(argv[++i], "%f,%f,%f,%f,%f,%f", &args.camYaw,
                              &args.camPitch, &args.camDist, &args.camTarget[0],
                              &args.camTarget[1], &args.camTarget[2]);
       args.hasCam = n >= 3;  // target triple optional
@@ -576,9 +545,7 @@ struct VgDebugState {
 }  // namespace
 
 int main(int argc, char** argv) {
-#ifdef _WIN32
-  SetUnhandledExceptionFilter(crashLogFilter);
-#endif
+  kenshin::platform::installCrashHandler();
   const Args args = parseArgs(argc, argv);
 
   kenshin::log::init();
@@ -1242,7 +1209,7 @@ int main(int argc, char** argv) {
         // layout"), which left the env.hdr IBL silently on the
         // procedural fallback.
         std::vector<unsigned char> hdrBytes;
-        if (FILE* hf = std::fopen(envPath.string().c_str(), "rb")) {
+        if (FILE* hf = kenshin::util::openFile(envPath, "rb")) {
           std::fseek(hf, 0, SEEK_END);
           const long len = std::ftell(hf);
           std::fseek(hf, 0, SEEK_SET);
