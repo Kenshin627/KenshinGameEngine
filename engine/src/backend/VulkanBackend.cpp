@@ -1359,6 +1359,24 @@ void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
 
   FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
 
+  // Binding i <- handle i, clamped to the pipeline's reflected binding
+  // count (extra handles are inert). FEWER handles than bindings leaves
+  // statically used bindings unwritten - undefined data, a validation
+  // error every frame - so it is reported, once per pipeline.
+  if (fs.bindingCount > bufferCount) {
+    static std::vector<u32> reported;
+    if (std::find(reported.begin(), reported.end(), pipeline) ==
+        reported.end()) {
+      reported.push_back(pipeline);
+      KENSHIN_ERROR(
+          "[vulkan] drawFullscreen: pipeline {} reflects {} bindings, only {} "
+          "handles given",
+          pipeline, fs.bindingCount, bufferCount);
+    }
+  }
+  bufferCount = fs.bindingCount > 0 ? (std::min)(bufferCount, fs.bindingCount)
+                                    : bufferCount;
+
   // Validate + collect the buffer infos FIRST - bailing out mid-way
   // would leave the pass opened with nothing drawn.
   std::vector<VkDescriptorBufferInfo> infos(bufferCount);

@@ -10,6 +10,9 @@ add_executable(KENSHINDemo
     src/main.cpp
     src/DemoScene.cpp
     src/KgeoPreview.cpp
+    src/AppArgs.cpp
+    src/KgeoScene.cpp
+    src/VgPanel.cpp
 )
 
 target_link_libraries(KENSHINDemo PRIVATE kenshin::engine)

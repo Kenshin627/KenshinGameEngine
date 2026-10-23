@@ -246,6 +246,38 @@ Each step ends with a commit, its test gate passing, and an entry in §7.
 * **Not verified** (no Linux/macOS machine): actual GCC/Clang/AppleClang
   builds and links, the POSIX crash branch, MoltenVK behavior.
 
+### 0.4 SceneRenderer — done 2026-10-23 (Windows-verified)
+
+* **Engine**: `renderer::SceneRenderer` owns the frame (main + 3 shadow
+  VisBuffer chains, decode, shadow clipmap cache/dirty tiles, imposters,
+  lighting, translucency, TAA history, exposure, bloom, tonemap + sky);
+  `SceneRenderSettings` (every knob, already resolved) in,
+  `SceneRenderStats` out. `renderer::Environment` (HDRI load + sun
+  extraction + SH, procedural studio probe), `util::f32ToHalf`.
+* **App**: `main.cpp` 2335 -> 366 lines; `AppArgs` (CLI), `KgeoScene`
+  (asset/instance assembly), `VgPanel` (UI model, panel, settings
+  resolution, stats readback). The engine never sees the command line.
+* **Bugs fixed on the way**: imposter staging arrays were sized by the
+  gallery count but indexed by mesh id (out-of-bounds write with
+  `--ground` + an imposter-capable `--mesh`); every debug view (`--view
+  1..6`) left the decode's binding 18 unwritten (validation error per
+  frame) - `drawFullscreen` now clamps to the reflected binding count and
+  reports callers that pass too few handles; shadow chains are now shut
+  down.
+* Gate evidence: 4/4 render regressions byte-identical; **old-vs-new A/B**
+  (pre-refactor commit built in a worktree) over 24 cases - 17
+  byte-identical, `gallery_imposter` differs by the imposter fix, the rest
+  match the OLD binary's own run-to-run noise (repeat runs of both);
+  headless `[vgstats]`/`[shadowstats]` identical old vs new (3 scenes);
+  debug views 0 errors (were 10), pixels unchanged; GCC check 100 files
+  clean; MSVC 0 warnings; interactive smoke 0 errors; ctest 7/7.
+* Known issues logged for later: several scenes render
+  nondeterministically run-to-run (VisBuffer atomic depth ties - the knot
+  tests carry a 64 px budget for it); the shadow chains' stats readback
+  returns garbage (`[shadowstats]`, diagnostics only - rendering is
+  verified); the gallery's `checker_albedo.bmp` (32x32) is rejected by
+  the shared texture array (W6, step 1.3).
+
 
 ## 8. Decisions (2026-10-23)
 

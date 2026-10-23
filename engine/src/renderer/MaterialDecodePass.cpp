@@ -176,9 +176,19 @@ static void recordDecode(
                                width, height, shadowLevel, shadowEnabled,
                                scissorRect);
       break;
-    default:
-      backend.drawFullscreen(pipeline, handles, 18, &push, sizeof(push));
+    default: {
+      // The classic SSBO layout maps handle i -> binding i, and binding
+      // 17 (albedoTex, unused by the debug views) is a gap there: a
+      // filler keeps imposterPairs on binding 18 (with 18 handles it was
+      // never written - a validation error every debug-view frame).
+      u32 fullscreenHandles[19];
+      for (u32 i = 0; i < 17; ++i) fullscreenHandles[i] = handles[i];
+      fullscreenHandles[17] = decodeParams;  // gap filler
+      fullscreenHandles[18] = imposterPairsSafe;
+      backend.drawFullscreen(pipeline, fullscreenHandles, 19, &push,
+                             sizeof(push));
       break;
+    }
   }
 }
 

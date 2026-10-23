@@ -75,6 +75,8 @@ add_library(kenshin_engine STATIC
     src/renderer/TranslucentPass.cpp
     src/renderer/BloomPass.cpp
     src/renderer/ExposurePass.cpp
+    src/renderer/Environment.cpp
+    src/renderer/SceneRenderer.cpp
     src/renderer/TonemapPass.cpp
     src/renderer/MaterialDecodePass.cpp
     src/renderer/VisBufferChain.cpp
@@ -85,6 +87,7 @@ add_library(kenshin_engine STATIC
     src/util/BmpReader.cpp
     src/util/BmpWriter.cpp
     src/util/File.cpp
+    src/util/Half.cpp
     src/math/ray.cpp
 )
 add_library(kenshin::engine ALIAS kenshin_engine)
