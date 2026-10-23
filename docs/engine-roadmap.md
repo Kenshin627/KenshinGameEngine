@@ -278,6 +278,54 @@ Each step ends with a commit, its test gate passing, and an entry in §7.
   verified); the gallery's `checker_albedo.bmp` (32x32) is rejected by
   the shared texture array (W6, step 1.3).
 
+### 1.1 ECS — done 2026-10-23 (Windows-verified)
+
+* **Engine** (`kenshin/ecs/`, EnTT 3.16): `ecs::World` wraps
+  `entt::registry` and owns its invariants. Every entity carries Name,
+  Identity (Guid), Transform (local TRS), Hierarchy and WorldTransform;
+  MeshRenderer, Light and Camera are optional. Hierarchy is intrusive
+  ordered sibling lists (roots are one more list). `setParent` keeps
+  world or local pose, takes an insertion point and rejects cycles and
+  bad siblings without changing anything. `destroy` (subtree, now) plus
+  `queueDestroy`/`flushDestroyQueue` (mid-iteration). Lookup by Guid
+  and by name. `updateTransforms` is an iterative pre-order pass (no
+  recursion limit); `computeWorldMatrix`/`setWorldMatrix` are exact.
+  Structural components (Hierarchy, Identity, WorldTransform) are only
+  handed out const - views and `get` included - so callers cannot
+  corrupt the links. `core::Guid`: random RFC 4122 v4, canonical text
+  form, strict parsing.
+* **Conventions**: RH Z-up meters; local +X right, +Y forward, +Z up
+  (cameras/lights point along +Y). `decomposeTransform`: exact for TRS,
+  mirror -> negative X scale, shear dropped, singular -> refused.
+* **Reflection** (`ecs::ComponentRegistry`): per component a stable
+  snake_case name and fields reached through member pointers (no
+  `offsetof`), with type, range, enum labels, color hint and
+  description. Type-erased has/get/add/remove. `setField` validates
+  type, finiteness, range, enum membership and normalizes quaternions,
+  rejecting with an agent-readable message and changing nothing.
+  Registration errors abort. Game components register through the same
+  builder.
+* Gate evidence: 23 test cases / 133,735 assertions in Release and
+  Debug (EnTT and engine asserts live): hierarchy math, sibling
+  ordering, reparent (both modes, singular parent), cycle rejection,
+  subtree destruction and relinking, stale-handle safety, queued
+  destruction from inside a view, a 3000-step random
+  create/reparent/destroy run checked link-by-link against a reference
+  model, a 20,000-deep chain, Guid format/parse, and reflection
+  read/write of every field. **Mutation test**: 10 deliberate engine
+  bugs (link counts, last-child repair, cycle check, keep-world,
+  compose order, Guid index, field wiring, range check, mirror fold,
+  sibling check) are all killed. GCC check 105 files clean (found a
+  latent MinGW `SIGTRAP` break in `Assert.h`, fixed); MSVC 0 warnings;
+  ctest 7/7.
+* Performance (`[bench]`, 100k entities, random tree): create 28 ms,
+  `updateTransforms` 5-6 ms steady (10k: ~0.5 ms), destroy-all 50-65 ms.
+  Building a deep chain was quadratic (new child seeded from
+  `computeWorldMatrix`, 7.6 s for 20k) - now seeded from the parent's
+  cache, 8 ms. For 1.4: sort pools in hierarchy order and skip
+  unchanged subtrees (the change tracking motion vectors and shadow
+  invalidation need anyway).
+
 
 ## 8. Decisions (2026-10-23)
 

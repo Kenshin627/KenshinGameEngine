@@ -11,6 +11,9 @@
 #define KENSHIN_DEBUG_BREAK() __debugbreak()
 #elif defined(__clang__)
 #define KENSHIN_DEBUG_BREAK() __builtin_debugtrap()
+#elif defined(_WIN32)  // MinGW GCC: no SIGTRAP on Windows
+#include <intrin.h>
+#define KENSHIN_DEBUG_BREAK() __debugbreak()
 #else
 #include <csignal>
 #define KENSHIN_DEBUG_BREAK() std::raise(SIGTRAP)

@@ -18,6 +18,7 @@ add_executable(kenshin_tests
     src/cut_coverage_tests.cpp
     src/crc32_tests.cpp
     src/dag_tests.cpp
+    src/ecs_tests.cpp
     src/engine_tests.cpp
     src/kgeo_tests.cpp
     src/lodcut_tests.cpp

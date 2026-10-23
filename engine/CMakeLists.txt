@@ -54,6 +54,7 @@ add_library(kenshin_engine STATIC
     src/backend/vulkan/BufferStore.cpp
     src/backend/vulkan/DescriptorCache.cpp
     src/backend/vulkan/UploadEngine.cpp
+    src/core/Guid.cpp
     src/core/Input.cpp
     src/core/Keys.cpp
     src/core/Log.cpp
@@ -82,6 +83,9 @@ add_library(kenshin_engine STATIC
     src/renderer/VisBufferChain.cpp
     src/renderer/HzbPass.cpp
     src/renderer/StreamingManager.cpp
+    src/ecs/Components.cpp
+    src/ecs/Reflection.cpp
+    src/ecs/World.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
     src/util/BmpReader.cpp
@@ -140,8 +144,10 @@ find_package(glm CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 # SDL3: the platform layer (window, input, Vulkan surface, paths).
 find_package(SDL3 CONFIG REQUIRED)
+# EnTT: the ECS registry (header-only; ecs/World.h exposes its views).
+find_package(EnTT CONFIG REQUIRED)
 target_link_libraries(kenshin_engine PUBLIC spdlog::spdlog glm::glm imgui::imgui
-    SDL3::SDL3)
+    SDL3::SDL3 EnTT::EnTT)
 
 # Vulkan backend deps (kept PRIVATE: raw API types never leave the backend)
 find_package(volk CONFIG REQUIRED)
