@@ -581,6 +581,90 @@ settings hash, importer version), so stale caches rebuild themselves.
   - The KTX2 files are checked by our own reader only; no `ktx
     validate` is available here.
 
+### 1.3b Importer as a library — done 2026-10-24 (Windows-verified)
+
+* **Engine `importer/`**:
+  - `MeshConditioning` (recentre, translucent split + `.tmesh`, BLEND
+    sink, layer separation, double-sided back faces), moved verbatim
+    from the builder.
+  - `MeshCooker` (cluster DAG, imposter bake, v2/v7/v8/v9 `.kgeo`,
+    census).
+  - `KgeoMaterials` (the self-contained `.kgeo` material table with
+    BMP side files).
+  - `kgeo_builder` is now a ~200-line CLI over them (1098 lines
+    before). Dropped: the finished M7.2 index-span probe (logs only).
+* **Scene-graph glTF** (`assets/GltfScene.h`, `importer/GltfModel.h`):
+  - The default scene's node tree, with local transforms conjugated
+    into Z-up (R M R^-1).
+  - One mesh per glTF mesh: mesh-local, instanced by several nodes,
+    material slots.
+  - Full materials: every texture slot with its sampler (wrap modes,
+    nearest), UV set and factors, alpha mode, emissive strength.
+  - Images kept as encoded bytes.
+  - `importGltfModel` turns these into sub-assets with stable keys
+    (`mesh/N`, `material/N`, `texture/N.srgb|linear|normal`) and
+    conditions each mesh, with thresholds relative to its own size.
+    `modelPrefab` emits the 1.2 prefab (Transform + MeshRenderer),
+    with Guids from a caller-supplied key -> Guid function (1.3c).
+  - Unsupported content is reported in `notes`: other UV sets,
+    KHR_texture_transform, vertex colours, skins, animations, cameras,
+    lights.
+  - Unsupported *required* extensions (Draco, meshopt, ...) now fail
+    the load, as the spec demands.
+* **Loader defects fixed**:
+  - Percent-encoded URIs (`my%20image.png`) were validated decoded but
+    opened raw, so the file was never found.
+  - The scheme check only caught `:` at index 0/1 (`http:`/`file:`
+    passed).
+  - JSON `\uXXXX` escapes were kept verbatim; they are now decoded to
+    UTF-8, including surrogate pairs.
+  - Trailing data after the root JSON value was silently ignored;
+    whitespace/NUL padding is still accepted.
+  - The GLB chunk cursor could step past the buffer end on a hostile
+    length.
+  - `KGeoFile` used MSVC-only `_ftelli64`/`_fseeki64`; now
+    `util::tell64/seek64` (`ftello`/`fseeko` on POSIX).
+* **Deliberate change**: BMP side files keep their native size. The
+  array-era box resample to the first image's size is gone; it only
+  remains for AO -> ORM composition. The vulture visor MR map was
+  being upsampled 1024 -> 4096 (16x memory); the render differs by
+  3.3k px (max delta 12) against bit-exact noise.
+* Gate evidence:
+  - The builder is deterministic (two baseline runs identical).
+  - A 17-case matrix: procedural knot/sphere with every flag
+    (albedo, material overrides, v2, v7, imposter), 4 OBJ, 2 GLB, the
+    vulture (default, `--opaque-blend`, `--no-double-sided`) and the
+    F-35. Every `.kgeo` and `.tmesh` is byte-identical to the original
+    builder, after each refactor step and at the end. Side files are
+    identical too until the deliberate no-resample change, which
+    alters exactly one file.
+  - Error exit codes match.
+  - 7 glTF import test cases on a generated reference model:
+    hierarchy, names, `\u` decoding, conjugated transforms,
+    non-uniform scale axis, instancing, slots, computed normals,
+    roles/samplers/UV sets, encoded image bytes via a `%20` URI, notes;
+    sub-asset keys, translucent split, deterministic re-import;
+    hostile files (required extension, bad indices, cycle, depth 300,
+    `../`, `file:`, `http:`, `C:`, trailing data).
+  - **The prefab's world matrices x mesh-local vertices reproduce
+    the flattening loader's world-space vertices**: exactly on the
+    reference model, and on the real vulture (worst 4.6e-5 of a
+    177-unit extent) and F-35 (2.5e-7 of 0.44).
+  - **Mutation test**: 14 deliberate bugs (conjugation, normal frame,
+    slot dedup, wrap mapping, URI decoding, required extensions, cycle
+    guard, trailing data, surrogates, scheme check, data-role colour
+    space, translucent split, prefab mesh ref, prefab transform) are
+    all killed.
+  - ctest 7/7; Debug: 72 cases pass; GCC check 120 files clean; demo
+    renders the rebuilt vulture with 0 errors.
+* Found for later:
+  - The F-35 samples its MR and normal maps through TEXCOORD_1/2; the
+    renderer uses set 0, so those maps shade wrong today (W7, step
+    1.4).
+  - Scene import conditions each mesh separately: the builder's
+    cross-mesh layer separation (merged world space) has no
+    equivalent for instanced meshes. Watch for it in the 1.3e review.
+
 
 ## 8. Decisions (2026-10-23)
 

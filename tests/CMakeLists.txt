@@ -21,6 +21,7 @@ add_executable(kenshin_tests
     src/dag_tests.cpp
     src/ecs_tests.cpp
     src/engine_tests.cpp
+    src/gltf_import_tests.cpp
     src/kgeo_tests.cpp
     src/lodcut_tests.cpp
     src/pagestream_tests.cpp

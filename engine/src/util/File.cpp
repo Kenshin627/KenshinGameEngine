@@ -47,6 +47,23 @@ std::FILE* openFile(const std::string& utf8Path, const char* mode) {
   return openFile(pathFromUtf8(utf8Path), mode);
 }
 
+i64 tell64(std::FILE* file) {
+#ifdef _WIN32
+  return _ftelli64(file);
+#else
+  static_assert(sizeof(off_t) == 8, "64-bit off_t required (_FILE_OFFSET_BITS=64)");
+  return static_cast<i64>(ftello(file));
+#endif
+}
+
+bool seek64(std::FILE* file, i64 offset, int whence) {
+#ifdef _WIN32
+  return _fseeki64(file, offset, whence) == 0;
+#else
+  return fseeko(file, static_cast<off_t>(offset), whence) == 0;
+#endif
+}
+
 bool readFile(const std::filesystem::path& path, std::string& out) {
   std::FILE* f = openFile(path, "rb");
   if (!f) return false;

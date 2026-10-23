@@ -35,6 +35,12 @@ bool readFile(const std::filesystem::path& path, std::string& out);
 bool writeFileAtomic(const std::filesystem::path& path, std::string_view data,
                      std::string* error = nullptr);
 
+/// 64-bit position / seek (fseek/ftell use `long`: 32 bits on Windows,
+/// and files cross 2 GB at scale). seek64 returns true on success; tell64
+/// returns -1 on failure. `whence` = SEEK_SET / SEEK_CUR / SEEK_END.
+i64 tell64(std::FILE* file);
+bool seek64(std::FILE* file, i64 offset, int whence);
+
 /// UTF-8 string -> filesystem path (std::filesystem::path(std::string)
 /// uses the native narrow encoding, which is not UTF-8 on Windows).
 std::filesystem::path pathFromUtf8(const std::string& utf8);

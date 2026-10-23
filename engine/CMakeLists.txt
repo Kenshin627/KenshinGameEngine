@@ -66,6 +66,10 @@ add_library(kenshin_engine STATIC
     src/core/Window.cpp
     src/DebugOverlay.cpp
     src/Engine.cpp
+    src/importer/GltfModel.cpp
+    src/importer/KgeoMaterials.cpp
+    src/importer/MeshConditioning.cpp
+    src/importer/MeshCooker.cpp
     src/manager/MeshPool.cpp
     src/manager/ShaderManager.cpp
     src/manager/TextureManager.cpp

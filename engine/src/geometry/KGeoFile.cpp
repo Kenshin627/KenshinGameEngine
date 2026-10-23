@@ -506,14 +506,14 @@ bool writeKGeoPaged(const std::string& path, const ClusterDag& dag,
   std::vector<PageDirEntryV8> dir(pg.pageCount);
   std::vector<u8> codec;
   for (u32 p = 0; p < pg.pageCount && ok; ++p) {
-    // _ftelli64: .kgeo assets cross the 2GB long boundary at scale.
-    const long long rawPos = _ftelli64(file);
+    // 64-bit: .kgeo assets cross the 2GB long boundary at scale.
+    const long long rawPos = util::tell64(file);
     ok = rawPos >= 0;
     if (!ok) break;
     const usize pos = static_cast<usize>(rawPos);
     const usize pad = (16 - (pos % 16)) % 16;
     for (usize b = 0; b < pad && ok; ++b) ok = std::fputc(0, file) != EOF;
-    const long long dataPos = ok ? _ftelli64(file) : -1;
+    const long long dataPos = ok ? util::tell64(file) : -1;
     ok = ok && dataPos >= 0;
     if (!ok) break;
     const std::vector<u8>& raw = pg.pages[p];
@@ -785,10 +785,10 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
     // more than 256 materials could never be addressed; stringBytes is
     // bounded by the file's own remaining size (a corrupt word must
     // not turn into a multi-GB allocation - reject loudly instead).
-    const long long curPos = _ftelli64(file);
-    _fseeki64(file, 0, SEEK_END);
-    const long long endPos = _ftelli64(file);
-    _fseeki64(file, curPos, SEEK_SET);
+    const long long curPos = util::tell64(file);
+    util::seek64(file, 0, SEEK_END);
+    const long long endPos = util::tell64(file);
+    util::seek64(file, curPos, SEEK_SET);
     if (std::fread(&stringBytes, sizeof(stringBytes), 1, file) != 1 ||
         materialCount == 0 || materialCount > 256 ||
         endPos - curPos - 4 < static_cast<long long>(stringBytes)) {
@@ -962,8 +962,8 @@ bool KGeoPageReader::open(const std::string& path, std::string& log) {
   // (v8+) bytes - the entry width rides the version word.
   const bool v8 = h3.version >= kVersion8;
   const usize entryBytes = v8 ? sizeof(PageDirEntryV8) : sizeof(PageDirEntry);
-  if (_fseeki64(file, -static_cast<long long>(usize(h3.pageCount) * entryBytes),
-                SEEK_END) != 0) {
+  if (!util::seek64(file, -static_cast<i64>(usize(h3.pageCount) * entryBytes),
+                    SEEK_END)) {
     log = "cannot seek to the page directory";
     std::fclose(file);
     return false;
@@ -1017,7 +1017,7 @@ bool KGeoPageReader::readPage(u32 page, std::vector<u8>& out,
   const u64 off = m_offsets[usize(page) * 2];
   const u64 len = m_offsets[usize(page) * 2 + 1];
   const u64 rawLen = m_rawLen[page];
-  bool ok = _fseeki64(file, static_cast<long long>(off), SEEK_SET) == 0;
+  bool ok = util::seek64(file, static_cast<i64>(off), SEEK_SET);
   std::vector<u8> stored;
   stored.resize(len);
   ok = ok && (len == 0 || std::fread(stored.data(), 1, len, file) == len);
