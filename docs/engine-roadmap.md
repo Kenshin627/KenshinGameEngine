@@ -118,11 +118,8 @@ Each step ends with a commit, its test gate passing, and an entry in §7.
   *Gate*: unit tests (hierarchy math, reparenting, destruction).
 - **1.2 Serialization**: scenes/prefabs/project (versioned JSON, GUID refs).
   *Gate*: round-trip byte-identical; golden files; schema migration test.
-- **1.3 Asset system**: project layout, asset DB + `.meta`, in-process glTF
-  import (builder as a library), cooked cache, hot reload; texture rewrite
-  (W6: PNG/JPEG/KTX2, alpha, any size, sRGB/linear, proper mips).
-  *Gate*: import the Khronos glTF sample set (render each, compare to
-  references); asset DB unit tests.
+- **1.3 Asset system** - five sub-steps, each committed with its own
+  gate (detail plan below, "1.3 plan").
 - **1.4 Renderer ↔ ECS**: dynamic transforms, per-object motion vectors
   (W2), shadow invalidation for moving casters (W3), camera-following
   clipmap (W4), N directional/point/spot lights (W5), translucency for all
@@ -181,6 +178,129 @@ Each step ends with a commit, its test gate passing, and an entry in §7.
 ### Phase 9 — Acceptance
 - Build **Tetris (3D)** and a physics sample **only through the agent API**;
   export and run both. *Gate*: playable builds on all three OSes.
+
+### 1.3 plan (approved 2026-10-23)
+
+Survey of what 1.3 replaces: glTF/OBJ import lives in the
+`kgeo_builder` executable (material composition, ORM packing, glTF
+images re-encoded as **BMP24** - alpha lost); at runtime every material
+texture is a layer of **one RGBA8 Texture2DArray**, so all textures must
+share one size (the gallery's 32x32 checker is rejected); mips are a
+GPU linear blit, so sRGB data is filtered in the wrong space (dark
+mips); sRGB is decoded in the shader; samplers have no anisotropy and
+ignore glTF wrap modes; a glTF file becomes ONE merged mesh with node
+transforms baked in.
+
+**Project layout**
+```
+MyGame/
+  project.kproject
+  assets/                 sources + one .meta sidecar per asset (in VCS)
+    models/helmet.glb
+    models/helmet.glb.meta
+    textures/brick.png
+    textures/brick.png.meta
+  .kenshin/cache/         cooked artifacts, disposable (not in VCS)
+```
+A `.meta` (JSON, versioned like scenes) holds the asset's Guid, its
+importer settings and, for container assets, the stable Guids of
+its sub-assets. Moving or renaming a file together with its `.meta`
+keeps every reference; a cooked artifact is keyed by (source hash,
+settings hash, importer version), so stale caches rebuild themselves.
+
+**1.3a Texture pipeline (W6)**
+* Import: PNG/JPEG/TGA/BMP/HDR via stb (alpha kept, any size,
+  16-bit sources kept as 16-bit), plus our own reader for
+  *uncompressed* KTX2.
+* CPU mip chain filtered in linear light (sRGB decoded, then
+  re-encoded); normal maps renormalized per mip.
+* Cooked format: KTX2 (uncompressed RGBA8/RG8/R8/RGBA16F, full mips),
+  with a small writer/reader of our own.
+* GPU: one image per texture in its real format (`*_SRGB` where
+  colour, so the hardware decodes), uploaded with its mips. A
+  **bindless** texture table (Vulkan 1.2 descriptor indexing:
+  runtime-sized `Texture2D[]`, partially bound, non-uniform
+  indexing) and a small sampler table (wrap modes x filtering, 16x
+  anisotropy). Materials hold bindless indices; shaders drop layer
+  indexing and the manual sRGB decode.
+* Gate: unit tests (mip maths, sRGB round trip, KTX2 round trip,
+  odd sizes); the gallery's 32x32 checker loads. The render
+  references **will change** (correct mips plus anisotropy). The
+  old-vs-new image diff is measured and reviewed, then the
+  references are regenerated.
+
+**1.3b Importer as a library**
+* The OBJ/glTF -> cluster-DAG cook moves from `tools/kgeo_builder`
+  into `engine/assets/import/`; `kgeo_builder` becomes a thin CLI over
+  it.
+* glTF import keeps the scene graph: one cooked mesh per glTF mesh
+  (primitives = material slots), materials and textures as separate
+  assets, and the node hierarchy as a **prefab** (1.2 format)
+  holding MeshRenderer entities.
+* Gate: `.kgeo` output byte-identical to the old builder for every
+  test asset (merged mode); glTF import unit tests (hierarchy,
+  transforms, slots, sampler wrap modes, colour space per texture
+  role).
+
+**1.3c Asset database**
+* `AssetDatabase::open(project)`: scans `assets/` and creates missing
+  `.meta` files.
+* Repairs: an orphaned `.meta` is reported; a duplicated Guid (a
+  copied `.meta`) is re-issued to the copy, with a warning.
+* Imports by type: texture, model (glTF/GLB/OBJ -> meshes + materials
+  + textures + prefab), material (`.kmat` JSON: PBR factors, texture
+  Guids, alpha mode/cutoff, double-sided), scene, prefab.
+* Sub-asset Guids are derived deterministically (parent Guid + sub
+  path), so a re-import keeps references.
+* Cache: staleness check, rebuild, garbage collection.
+* Gate: unit tests on temp projects (add / move / rename / delete /
+  copy-with-meta / corrupt meta / settings change / importer-version
+  bump / deleted cache); a re-import is deterministic (same Guids,
+  byte-identical artifacts).
+
+**1.3d Loading + hot reload**
+* Runtime loads by Guid with reference counting: textures go to
+  bindless slots, meshes to the VirtualGeometryScene, materials to
+  the material table.
+* A minimal *static* World -> renderer bridge (instances from
+  MeshRenderer + WorldTransform, built at load), so a project scene
+  or prefab renders. 1.4 makes it dynamic.
+* Hot reload: a portable polling watcher (mtime + size, 4 Hz, cheap
+  for thousands of files) -> re-import -> swap the GPU resource at a
+  frame boundary.
+* Demo: `--project <dir> --scene <path>`.
+* Gate: headless hot-reload test (rewrite a texture on disk -> new
+  pixels within a bounded number of frames, no validation errors); a
+  project scene renders; the old `--kgeo` path is unchanged (render
+  regressions).
+
+**1.3e Khronos sample gate**
+* `tools/fetch_gltf_samples.py` downloads a curated subset of
+  KhronosGroup/glTF-Sample-Assets, pinned to a commit, into an
+  untracked folder.
+  - Core: Box, BoxTextured, Duck, Avocado, WaterBottle, BoomBox,
+    DamagedHelmet, FlightHelmet, Lantern, AntiqueCamera, Sponza,
+    ABeautifulGame.
+  - Feature tests: MetalRoughSpheres, NormalTangentTest,
+    NormalTangentMirrorTest, TextureCoordinateTest,
+    TextureSettingsTest, OrientationTest, AlphaBlendModeTest,
+    MultiUVTest, VertexColorTest, TextureTransformTest,
+    SimpleSparseAccessor.
+  - Roughly 250 MB; the exact size is reported before downloading.
+* Each model is imported and rendered headless. A contact sheet is
+  compared by eye with Khronos' reference screenshots.
+* Each model is classed as correct, or as a known gap tied to its
+  W-item. Expected gaps: MASK, UV1, vertex colours and texture
+  transform (W7, step 1.4).
+* Our renders are then kept as downscaled regression references.
+
+**Out of 1.3 (by design)**
+* GPU texture compression (BC7/BC5/ASTC via Basis Universal) and
+  Basis-compressed KTX2 sources (libktx) belong with export, Phase 8.
+* Asynchronous background import comes with the editor, Phase 6.
+* Per-slot material overrides on MeshRenderer arrive with the
+  inspector.
+* Skinning and animation are W7, later.
 
 ## 7. Results log
 
@@ -378,6 +498,88 @@ Each step ends with a commit, its test gate passing, and an entry in §7.
   would have narrowed silently. Its callback parser was 8x slower than
   the plain one: now a SAX validation pass plus the plain parse. 10k
   entities (4.4 MB): load 400 -> ~120 ms, save ~95 ms.
+
+### 1.3a Texture pipeline — done 2026-10-23 (Windows-verified, RTX 5060 Ti)
+
+* **CPU side** (`assets/`):
+  - `Image`: stb decode of PNG/JPEG/TGA/BMP/HDR, alpha kept, 16-bit
+    and float kept.
+  - `cookTexture`: full mip chain for any size. Each mip texel
+    averages exactly the source area it covers; colour is filtered
+    in linear light and alpha-weighted; normal maps are renormalized;
+    `maxSize` limit; mip 0 is copied verbatim.
+  - KTX 2.0 writer and strict reader: uncompressed RGBA8 UNORM/SRGB,
+    RGBA16 UNORM, RGBA16F; Basic DFD, stable KTXwriter tag.
+  - `util::halfToF32`.
+* **GPU side**:
+  - Each texture is its own image in its real format (`*_SRGB` for
+    colour: the hardware decodes) with the CPU mips uploaded as they
+    are.
+  - `BindlessTable` (set 1): 16384-slot partially-bound
+    update-after-bind `Texture2D[]` plus 18 immutable samplers (3x3
+    wrap modes x linear/nearest, 16x anisotropy). Slot 0 is white;
+    freed slots point back at white.
+  - Descriptor indexing and anisotropy are queried and enabled;
+    initialization fails with a clear message without them.
+  - Materials store 32-bit refs (slot | sampler << 24). The decode
+    pass samples with `SampleGrad` on its analytic UV derivatives, so
+    each texture's own mip and the anisotropic footprint come from
+    the hardware. The translucent pass uses the same table.
+  - Set-0 layouts now honour set numbers; `imposterPairs` moved to
+    binding 17, so set 0 is dense and the debug-view filler handle
+    is gone.
+  - `TextureManager` rewritten (decode -> cook -> upload,
+    deduplicated by path + settings).
+* **Fixed (W6)**: textures of any size; the gallery's 32x32 checker,
+  rejected before, now textures its cube. Mips are filtered in
+  linear light. glTF wrap modes are representable; the importer
+  wires them in 1.3b.
+* Gate evidence:
+  - CPU: 14 test cases. Every half value round-trips; all 256 sRGB
+    codes round-trip. PNG bytes come from an in-test encoder (RGBA,
+    RGB, grey+alpha, 16-bit, multi-block). Mip chains for 8 sizes,
+    including odd ones. Hand-computed expectations: linear-light
+    average 188 (not 128), no colour bleed from transparent texels,
+    area weights at 3->1 and 5->2, unit-length normal mips. Size
+    limit; 16-bit and HDR range; KTX2 round trip in all 4 formats
+    with spec layout checks; 12 malformed-KTX2 cases.
+  - GPU: 4 test cases through `bindless_probe.slang`, which calls
+    the shaders' own `sampleTextureGrad`. Every mip level of a 13x6
+    texture lands where uploaded; hardware sRGB decode matches the
+    cooker's curve; RGBA16F above 1 and RGBA16 come back; slot 0 is
+    white; all wrap/filter modes behave; slots are reused and freed
+    slots read white; bad descriptions are rejected.
+  - **Mutation test**: 13 deliberate bugs (linear-light filter,
+    alpha weighting, renormalize, area weights, KTX2 DFD check and
+    level order, upload mip offsets, sRGB VkFormat, mirror sampler,
+    release-to-white, shader sampler index, shader slot index, half
+    denormals) are all killed. The first run exposed a real gap: the
+    probe had its own sampling code, so the shaders' function was
+    untested. It now goes through `sampleTextureGrad`.
+  - Renders: the 3 untextured references stay byte-identical (set 1
+    bound but unused changes nothing). The albedo knot differs by
+    67k px, max delta 69.
+  - Old-vs-new A/B (previous commit built in a worktree), 7 textured
+    scenes: no errors. The knot grazing view shows linear-light
+    blending at the green/yellow repeat seam; the close view is
+    crisper (anisotropy); vulture and F-35 match visually; the
+    gallery cube now has its texture. After that review,
+    `render_kgeo_albedo_ref.bmp` was regenerated; 3 reruns pass.
+  - Validation layer: 0 errors (knot, vulture: GBuffer +
+    translucent). GCC check 115 files clean. Debug build: 57 cases
+    (ECS + serialization + texture + bindless) pass. ctest 7/7.
+* Costs and notes:
+  - Loading sources now cooks mips on the CPU, about 0.6 s per 4096^2
+    texture (vulture: 5 textures). The 1.3c cooked cache (KTX2)
+    removes this.
+  - The SPIR-V cache keys on the shader file's own mtime: imported
+    modules (`bindless.slang`) need dependency tracking once 1.3d
+    hot-reloads shaders.
+  - `KGeoFile.cpp` uses MSVC-only `_ftelli64`/`_fseeki64`, which
+    MinGW also accepts but Linux does not; fix with the importer move
+    (1.3b).
+  - The KTX2 files are checked by our own reader only; no `ktx
+    validate` is available here.
 
 
 ## 8. Decisions (2026-10-23)

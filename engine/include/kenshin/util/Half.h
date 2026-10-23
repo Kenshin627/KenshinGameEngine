@@ -14,6 +14,8 @@ namespace util {
 /// wrapped to a huge exponent and became +INF - one dark texel in an
 /// env.hdr poisoned its whole mip pyramid (inf/NaN reflections).
 u16 f32ToHalf(float v);
+/// IEEE half bits -> f32 (exact: every half is representable).
+float halfToF32(u16 h);
 
 }  // namespace util
 

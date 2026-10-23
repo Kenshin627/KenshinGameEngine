@@ -76,7 +76,7 @@ VkDescriptorSetLayout DescriptorCache::createStorageLayout(
   u32 maxBinding = 0;
   u32 count = 0;
   for (const auto& r : reflected)
-    if (r.type == manager::ReflectedBinding::Type::StorageBuffer) {
+    if (r.set == 0 && r.type == manager::ReflectedBinding::Type::StorageBuffer) {
       maxBinding = std::max(maxBinding, r.binding);
       ++count;
     }
@@ -139,10 +139,10 @@ VkDescriptorSetLayout DescriptorCache::createMixedLayout(
   u32 count = 0;
   for (const auto& r : reflected) {
     const bool usable =
-        r.type == manager::ReflectedBinding::Type::StorageBuffer ||
+        r.set == 0 && (r.type == manager::ReflectedBinding::Type::StorageBuffer ||
         r.type == manager::ReflectedBinding::Type::CombinedImageSampler ||
         r.type == manager::ReflectedBinding::Type::SampledTexture ||
-        r.type == manager::ReflectedBinding::Type::Sampler;
+        r.type == manager::ReflectedBinding::Type::Sampler);
     if (usable) {
       maxBinding = std::max(maxBinding, r.binding);
       ++count;
@@ -165,7 +165,7 @@ VkDescriptorSetLayout DescriptorCache::createMixedLayout(
     };
   }
   for (const auto& r : reflected) {
-    if (r.binding > maxBinding) continue;
+    if (r.set != 0 || r.binding > maxBinding) continue;
     VkDescriptorType t = VK_DESCRIPTOR_TYPE_MAX_ENUM;
     if (r.type == manager::ReflectedBinding::Type::CombinedImageSampler)
       t = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -189,6 +189,16 @@ VkDescriptorSetLayout DescriptorCache::createMixedLayout(
   if (!KE_VK(vkCreateDescriptorSetLayout(device, &info, nullptr, &layout)))
     return VK_NULL_HANDLE;
   return layout;
+}
+
+bool DescriptorCache::reflectUsesSet(const u32* spirv, usize spirvWords, u32 set) {
+  std::vector<manager::ReflectedBinding> reflected;
+  if (!manager::reflectDescriptorBindings(std::vector<u32>(spirv, spirv + spirvWords),
+                                          reflected))
+    return false;
+  for (const auto& r : reflected)
+    if (r.set == set) return true;
+  return false;
 }
 
 VkDescriptorPool DescriptorCache::createMixedPool(VkDevice device,

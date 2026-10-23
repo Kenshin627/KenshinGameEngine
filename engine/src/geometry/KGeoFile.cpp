@@ -775,8 +775,8 @@ bool readKGeoPagedTables(const std::string& path, const FileHeaderV3& h3,
   }
   if (isV7Plus(h3.version)) {
     // The material section: string blob + per-material path offsets +
-    // 8-f32 records. texPath carries the disk reference; texLayer
-    // stays -1 until the app resolves it through the TextureManager.
+    // 8-f32 records. texPath carries the disk reference; the texture
+    // refs stay kNoTexture until the app resolves them (TextureManager).
     u32 stringBytes = 0;
     std::string strings;
     std::vector<u32> texOff;

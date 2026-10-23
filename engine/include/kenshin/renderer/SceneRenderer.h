@@ -115,7 +115,6 @@ struct SceneRendererDesc {
   /// Per mesh: imposter atlas planes (empty = none) + its single cluster.
   std::vector<std::vector<u32>> imposterDepth, imposterTri;
   std::vector<u32> imposterRootCluster;
-  u32 albedoTexture = 0xFFFFFFFFu;
   DecodeParams decodeParams;  // base (kd etc.); camera/view set per frame
   std::string translucentMeshPath;  // the .tmesh side file, empty = none
 };

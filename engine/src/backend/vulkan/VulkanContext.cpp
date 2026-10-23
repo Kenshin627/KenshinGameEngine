@@ -1,5 +1,7 @@
 #include "VulkanContext.h"
 
+#include <algorithm>
+
 #include "Vk.h"
 #include "kenshin/core/Log.h"
 
@@ -273,6 +275,27 @@ bool VulkanContext::pickPhysicalDevice() {
   supportsSynchronization2 = features13.synchronization2 != VK_FALSE;
   supportsDynamicRendering = features13.dynamicRendering != VK_FALSE;
   supportsDrawParameters = features11.shaderDrawParameters != VK_FALSE;
+  supportsBindless = features12.descriptorIndexing &&
+                     features12.runtimeDescriptorArray &&
+                     features12.shaderSampledImageArrayNonUniformIndexing &&
+                     features12.descriptorBindingPartiallyBound &&
+                     features12.descriptorBindingSampledImageUpdateAfterBind &&
+                     features12.descriptorBindingUpdateUnusedWhilePending;
+  supportsAnisotropy = features2.features.samplerAnisotropy != VK_FALSE;
+  maxSamplerAnisotropy = props.limits.maxSamplerAnisotropy;
+  {
+    VkPhysicalDeviceVulkan12Properties props12{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 props2{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &props12,
+    };
+    vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+    maxBindlessSampledImages =
+        std::min(props12.maxPerStageDescriptorUpdateAfterBindSampledImages,
+                 props12.maxDescriptorSetUpdateAfterBindSampledImages);
+  }
 
   // Device extensions (P0 seam fix: conservative rasterization for the
   // HW path's null pipeline).

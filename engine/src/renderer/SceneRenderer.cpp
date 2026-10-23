@@ -525,7 +525,7 @@ void SceneRenderer::render(const FrameInputs& in,
             be, viewProjJ, scene, decodeParams, ci.width, ci.height,
             m_chain.visBufferCurrent(be), pd, m_chain.pairsCurrent(be),
             m_chain.hwPairsCurrent(be), m_chain.postPairsCurrent(be),
-            m_chain.maxPairs(), m_desc.albedoTexture,
+            m_chain.maxPairs(),
             m_imposterReady ? m_imposter.pairsBuffer() : 0);
       } else {
         m_decode.drawPaged(be, viewProjJ, scene, decodeParams, ci.width,
@@ -540,8 +540,7 @@ void SceneRenderer::render(const FrameInputs& in,
                              ci.height, m_chain.visBufferCurrent(be),
                              m_chain.pairsCurrent(be),
                              m_chain.hwPairsCurrent(be),
-                             m_chain.postPairsCurrent(be), m_chain.maxPairs(),
-                             m_desc.albedoTexture);
+                             m_chain.postPairsCurrent(be), m_chain.maxPairs());
       } else {
         m_decode.draw(be, viewProjJ, scene, decodeParams, ci.width, ci.height,
                       m_chain.visBufferCurrent(be), m_chain.pairsCurrent(be),
@@ -588,7 +587,6 @@ void SceneRenderer::render(const FrameInputs& in,
         tfr.visBuffer = m_chain.visBufferCurrent(be);
         if (scene.paged()) {
           tfr.sceneMaterials = scene.materialTableBuffer();
-          tfr.albedoTexture = m_desc.albedoTexture;
         }
         tfr.instances = tInst;
         m_translucent.draw(be, tfr, ci.width, ci.height);

@@ -170,11 +170,10 @@ class VirtualGeometryScene {
   u32 pageTableBuffer() const { return m_pageTableBuffer; }
   u32 pageHeaderBuffer() const { return m_pageHeaderBuffer; }
   u32 clusterMetaBuffer() const { return m_clusterMetaBuffer; }
-  /// M8.2: the GPU material table (8-f32 records: kd, texLayer, rough,
-  /// metal, 2 pad) + the disk-side texture paths for the app to load
-  /// through the TextureManager BEFORE flushPools runs (layer indices
-  /// are baked into the records at addMeshPaged time from the dag's
-  /// texLayer values).
+  /// M8.2: the GPU material table (12-f32 records: kd + base-colour
+  /// ref, rough/metal + MR/normal refs, emissive + occlusion) + the
+  /// disk-side texture paths. The app resolves the dag's texture refs
+  /// through the TextureManager BEFORE addMeshPaged bakes the records.
   u32 materialTableBuffer() const { return m_materialBuffer; }
   /// GPU material record width (decode_material's GpuMaterial: kdTex,
   /// params, emissive - 3 float4).

@@ -191,6 +191,17 @@ u32 PipelineStore::createFullscreen(
       .offset = 0,
       .size = 128,
   };
+  // 1.3a: these layouts have no set 1 - bindless shaders must use the
+  // fullscreen variants (or compute) instead of silently mis-binding.
+  if (DescriptorCache::reflectUsesSet(info.fsSpirv, info.fsBytes / sizeof(u32), 1) ||
+      DescriptorCache::reflectUsesSet(info.vsSpirv, info.vsBytes / sizeof(u32), 1)) {
+    KENSHIN_ERROR("[vulkan] this pipeline kind cannot sample bindless textures");
+    vkDestroyShaderModule(device, vs, nullptr);
+    vkDestroyShaderModule(device, fs, nullptr);
+    if (pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, pool, nullptr);
+    vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
   const VkPipelineLayoutCreateInfo layoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
       .setLayoutCount = 1,
@@ -376,15 +387,23 @@ u32 PipelineStore::createFullscreenVariant(
       .offset = 0,
       .size = 128,
   };
+  // 1.3a: set 1 = the bindless material textures when a stage uses it.
+  const bool bindless =
+      DescriptorCache::reflectUsesSet(info.fsSpirv, info.fsBytes / sizeof(u32), 1) ||
+      DescriptorCache::reflectUsesSet(info.vsSpirv, info.vsBytes / sizeof(u32), 1);
+  const VkDescriptorSetLayout setLayouts[2] = {setLayout, m_bindlessLayout};
   const VkPipelineLayoutCreateInfo layoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &setLayout,
+      .setLayoutCount = bindless ? 2u : 1u,
+      .pSetLayouts = setLayouts,
       .pushConstantRangeCount = 1,
       .pPushConstantRanges = &pushRange,
   };
+  if (bindless && m_bindlessLayout == VK_NULL_HANDLE)
+    KENSHIN_ERROR("[vulkan] pipeline samples bindless textures before the table exists");
   VkPipelineLayout layout = VK_NULL_HANDLE;
   const bool layoutOk =
+      !(bindless && m_bindlessLayout == VK_NULL_HANDLE) &&
       KE_VK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout));
 
   const VkPipelineVertexInputStateCreateInfo vertexInput{
@@ -501,6 +520,7 @@ u32 PipelineStore::createFullscreenVariant(
   entry.pool = pool;
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) entry.sets[i] = sets[i];
   entry.valid = true;
+  entry.usesBindless = bindless;
   for (u32 b = 0; b < bindingCount && b < DescriptorCache::kMaxMixedBindings;
        ++b)
     entry.bindingTypes[b] = types[b];
@@ -646,6 +666,17 @@ u32 PipelineStore::createNullRaster(
                      DescriptorCache::allocateSets(device, pool, setLayout,
                                                    sets, kMaxFramesInFlight);
 
+  // 1.3a: these layouts have no set 1 - bindless shaders must use the
+  // fullscreen variants (or compute) instead of silently mis-binding.
+  if (DescriptorCache::reflectUsesSet(info.fsSpirv, info.fsBytes / sizeof(u32), 1) ||
+      DescriptorCache::reflectUsesSet(info.vsSpirv, info.vsBytes / sizeof(u32), 1)) {
+    KENSHIN_ERROR("[vulkan] this pipeline kind cannot sample bindless textures");
+    vkDestroyShaderModule(device, vs, nullptr);
+    vkDestroyShaderModule(device, fs, nullptr);
+    if (pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device, pool, nullptr);
+    vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
+    return IRenderBackend::kInvalidPipelineHandle;
+  }
   const VkPipelineLayoutCreateInfo layoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
       .setLayoutCount = 1,
@@ -807,15 +838,21 @@ u32 PipelineStore::createCompute(
       .offset = 0,
       .size = 128,
   };
+  const bool bindless =
+      DescriptorCache::reflectUsesSet(info.csSpirv, info.csBytes / sizeof(u32), 1);
+  const VkDescriptorSetLayout setLayouts[2] = {setLayout, m_bindlessLayout};
   const VkPipelineLayoutCreateInfo layoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1,
-      .pSetLayouts = &setLayout,
+      .setLayoutCount = bindless ? 2u : 1u,
+      .pSetLayouts = setLayouts,
       .pushConstantRangeCount = mixedLayout ? 1u : 0u,
       .pPushConstantRanges = mixedLayout ? &computePush : nullptr,
   };
+  if (bindless && m_bindlessLayout == VK_NULL_HANDLE)
+    KENSHIN_ERROR("[vulkan] compute pipeline samples bindless textures before the table exists");
   VkPipelineLayout layout = VK_NULL_HANDLE;
   const bool layoutOk =
+      !(bindless && m_bindlessLayout == VK_NULL_HANDLE) &&
       KE_VK(vkCreatePipelineLayout(device, &layoutInfo, nullptr, &layout));
 
   VkPipeline pipeline = VK_NULL_HANDLE;
@@ -863,6 +900,7 @@ u32 PipelineStore::createCompute(
       entry.bindingTypes[b] = types[b];
   }
   entry.valid = true;
+  entry.usesBindless = bindless;
   return static_cast<u32>(m_compute.size());
 }
 

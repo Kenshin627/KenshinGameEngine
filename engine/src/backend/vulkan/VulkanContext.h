@@ -32,6 +32,13 @@ struct VulkanContext {
   // P0 seam fix: VK_EXT_conservative_rasterization (the HW raster
   // pipeline's overestimate mode - see createNullRaster).
   bool supportsConservativeRaster = false;
+  // 1.3a bindless material textures: the descriptor-indexing subset
+  // (runtime-sized, partially bound, update-after-bind sampled-image
+  // arrays indexed non-uniformly). Required - initialize fails without.
+  bool supportsBindless = false;
+  u32 maxBindlessSampledImages = 0;  // update-after-bind per-stage limit
+  bool supportsAnisotropy = false;
+  f32 maxSamplerAnisotropy = 1.0f;
   // VK_KHR_portability_subset exposed (MoltenVK): must be enabled.
   bool hasPortabilitySubset = false;
 

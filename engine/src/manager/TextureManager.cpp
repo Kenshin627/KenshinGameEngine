@@ -1,9 +1,12 @@
 #include "kenshin/manager/TextureManager.h"
 
+#include <format>
+
 #include "kenshin/Engine.h"
+#include "kenshin/assets/Image.h"
 #include "kenshin/backend/RenderBackend.h"
 #include "kenshin/core/Log.h"
-#include "kenshin/util/BmpReader.h"
+#include "kenshin/util/File.h"
 
 KENSHIN_NS_BEGIN
 
@@ -14,63 +17,60 @@ bool TextureManager::onInit(Engine& engine) {
   return m_backend != nullptr;
 }
 
-u32 TextureManager::load(const std::string& path) {
-  util::ImageRgba img;
-  std::string log;
-  if (!util::readBmp24(path, img, log)) {
-    KENSHIN_ERROR("[texture] load failed: {}", log);
-    return kInvalidLayer;
-  }
-  if (m_texture != 0xFFFFFFFFu &&
-      (img.width != m_width || img.height != m_height)) {
-    // One shared Texture2DArray = one dimension set (the descriptor
-    // contract). v1 rejects instead of managing multiple arrays.
-    KENSHIN_ERROR(
-        "[texture] {} is {}x{} but the array is {}x{} - all albedo "
-        "textures must share dimensions",
-        path, img.width, img.height, m_width, m_height);
-    return kInvalidLayer;
-  }
+u32 TextureManager::upload(const assets::CookedTexture& texture, const char* debugName) {
+  backend::IRenderBackend::TextureDesc desc;
+  desc.width = texture.width;
+  desc.height = texture.height;
+  desc.mipCount = static_cast<u32>(texture.mips.size());
+  desc.format = texture.format;
+  desc.data = texture.data.data();
+  desc.bytes = texture.data.size();
+  desc.debugName = debugName;
+  const u32 handle = m_backend->createTexture(desc);
+  if (handle != backend::IRenderBackend::kInvalidTextureHandle) m_textures.push_back(handle);
+  return handle;
+}
 
-  m_pixels.insert(m_pixels.end(), img.rgba.begin(), img.rgba.end());
-  const u32 layer = m_layers;
-  if (m_layers == 0) {
-    m_width = img.width;
-    m_height = img.height;
-  }
-  ++m_layers;
+u32 TextureManager::reference(u32 textureHandle, backend::SamplerDesc sampler) const {
+  const u32 slot = m_backend->bindlessSlot(textureHandle);
+  return slot == backend::kNoTexture ? backend::kNoTexture : backend::textureRef(slot, sampler);
+}
 
-  // Re-upload the grown array (scene-load-time path: a handful of
-  // one-shot uploads, the waitIdle inside destroy/create is fine).
-  const u32 old = m_texture;
-  backend::IRenderBackend::TextureArrayDesc desc;
-  desc.width = m_width;
-  desc.height = m_height;
-  desc.layers = m_layers;
-  desc.rgba = m_pixels.data();
-  desc.bytes = m_pixels.size();
-  desc.debugName = "albedo-array";
-  m_texture = m_backend->createTextureArray(desc);
-  if (m_texture == backend::IRenderBackend::kInvalidTextureHandle) {
-    KENSHIN_ERROR("[texture] array upload failed ({} layers)", m_layers);
-    m_texture = old;  // keep the previous handle alive if there was one
-    --m_layers;
-    m_pixels.resize(static_cast<usize>(m_width) * m_height * 4 * m_layers);
-    return kInvalidLayer;
+u32 TextureManager::load(const std::string& path, const assets::TextureSettings& settings,
+                         backend::SamplerDesc sampler) {
+  const std::string key =
+      std::format("{}|{}{}|{}|{}", path, static_cast<int>(settings.colorSpace),
+                  settings.normalMap ? "n" : "", settings.mipmaps ? 1 : 0, settings.maxSize);
+  if (const auto it = m_byKey.find(key); it != m_byKey.end())
+    return reference(it->second, sampler);
+
+  assets::Image image;
+  std::string error;
+  if (!assets::loadImageFile(util::pathFromUtf8(path), image, error)) {
+    KENSHIN_ERROR("[texture] {}", error);
+    return backend::kNoTexture;
   }
-  if (old != 0xFFFFFFFFu) m_backend->destroyTexture(old);
-  KENSHIN_INFO("[texture] {} -> layer {} (array {}x{}x{})", path, layer,
-               m_width, m_height, m_layers);
-  return layer;
+  assets::CookedTexture cooked;
+  if (!assets::cookTexture(image, settings, cooked, error)) {
+    KENSHIN_ERROR("[texture] {}: {}", path, error);
+    return backend::kNoTexture;
+  }
+  const u32 handle = upload(cooked, path.c_str());
+  if (handle == backend::IRenderBackend::kInvalidTextureHandle) {
+    KENSHIN_ERROR("[texture] {}: upload failed", path);
+    return backend::kNoTexture;
+  }
+  m_byKey.emplace(key, handle);
+  KENSHIN_INFO("[texture] {} -> {}x{}, {} mips, slot {}", path, cooked.width, cooked.height,
+               cooked.mips.size(), m_backend->bindlessSlot(handle));
+  return reference(handle, sampler);
 }
 
 void TextureManager::onShutdown() {
-  if (m_backend && m_texture != 0xFFFFFFFFu)
-    m_backend->destroyTexture(m_texture);
-  m_texture = 0xFFFFFFFFu;
-  m_layers = 0;
-  m_pixels.clear();
-  m_pixels.shrink_to_fit();
+  if (m_backend)
+    for (const u32 h : m_textures) m_backend->destroyTexture(h);
+  m_textures.clear();
+  m_byKey.clear();
   m_backend = nullptr;
 }
 

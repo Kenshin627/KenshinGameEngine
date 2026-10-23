@@ -41,6 +41,7 @@ class PipelineStore {
     /// compute pipelines leave bindingCount 0 and carry no push range.
     VkDescriptorType bindingTypes[DescriptorCache::kMaxMixedBindings] = {};
     u32 bindingCount = 0;
+    bool usesBindless = false;  // 1.3a, see Fullscreen
   };
 
   /// Fullscreen entry: graphics pipeline + its SSBO descriptor sets.
@@ -62,7 +63,14 @@ class PipelineStore {
     /// STORAGE_BUFFER) for the classic SSBO pipelines.
     VkDescriptorType bindingTypes[DescriptorCache::kMaxMixedBindings] = {};
     u32 bindingCount = 0;
+    /// 1.3a: the shaders declare set 1 - the layout carries the bindless
+    /// table's set layout there and draws bind the global set.
+    bool usesBindless = false;
   };
+
+  /// 1.3a: the bindless material-texture set layout (set 1). Must be set
+  /// before creating pipelines whose shaders sample material textures.
+  void setBindlessLayout(VkDescriptorSetLayout layout) { m_bindlessLayout = layout; }
 
   /// Create the VkPipelineCache, loading prior data from disk.
   bool init(VkDevice device);
@@ -146,6 +154,7 @@ class PipelineStore {
   VkPipelineLayout layout(u32 handle) const;
 
  private:
+  VkDescriptorSetLayout m_bindlessLayout = VK_NULL_HANDLE;  // not owned
   /// Shared skeleton for the M8.1 fullscreen variants (GBuffer decode +
   /// lighting): createFullscreen's state with parameterized color
   /// formats / optional depth / optional mixed (SSBO + combined image

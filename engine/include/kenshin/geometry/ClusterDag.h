@@ -146,22 +146,23 @@ struct ClusterDag {
   /// v5: per-cluster ordinal into its page's clusterMeta array.
   std::vector<u32> clusterMetaIndex;
   /// v7 (M8.2): the material table. texPath is the disk-side albedo
-  /// reference ("" = untextured); texLayer is RUNTIME-assigned by the
-  /// TextureManager's load order (-1 until the app resolves it).
+  /// reference ("" = untextured); the *Ref fields are RUNTIME bindless
+  /// texture references (backend::textureRef, 1.3a) the app resolves
+  /// through the TextureManager - kNoTexture until then.
   struct DagMaterial {
     f32 kd[3] = {0.75f, 0.75f, 0.78f};
-    f32 texLayer = -1.0f;
+    u32 texRef = 0xFFFFFFFFu;
     f32 roughness = 0.5f;
     f32 metallic = 0.0f;
     std::string texPath;
     // v10: the metallicRoughness map (G=roughness, B=metallic; linear
-    // data). mrTexLayer is resolved by the app (like texLayer).
+    // data). mrTexRef is resolved by the app (like texRef).
     std::string mrPath;
-    f32 mrTexLayer = -1.0f;
+    u32 mrTexRef = 0xFFFFFFFFu;
     // v11: the tangent-space normal map (glTF convention, linear data).
     // The shading frame is derived per triangle from positions + UVs.
     std::string nrmPath;
-    f32 nrmTexLayer = -1.0f;
+    u32 nrmTexRef = 0xFFFFFFFFu;
     // v11: emitted radiance (linear rgb, added unlit by the lighting).
     f32 emissive[3] = {0.0f, 0.0f, 0.0f};
     // v13 record pad: the glTF occlusion strength (0 = no AO). The AO

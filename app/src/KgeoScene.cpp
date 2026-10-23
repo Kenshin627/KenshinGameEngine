@@ -10,6 +10,7 @@
 #include "kenshin/core/Log.h"
 #include "kenshin/geometry/PagePacker.h"
 #include "kenshin/manager/TextureManager.h"
+#include "kenshin/util/File.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 
 namespace demo {
@@ -28,6 +29,29 @@ std::filesystem::path resolveTexture(const std::filesystem::path& dir,
                  !std::filesystem::exists(dir / path)
              ? std::filesystem::path(path)
              : (dir / path);
+}
+
+/// Material texture references -> bindless texture refs before the scene
+/// bakes them into its GPU table: base colour is sRGB colour, the
+/// metallic-roughness and normal maps are linear data. A failed load
+/// leaves the ref at kNoTexture (factor-only shading, logged).
+void resolveMaterialTextures(std::vector<kenshin::geometry::ClusterDag::DagMaterial>& mats,
+                             const std::filesystem::path& dir,
+                             kenshin::manager::TextureManager& textures) {
+  using kenshin::assets::TextureSettings;
+  TextureSettings colour;
+  TextureSettings data;
+  data.colorSpace = TextureSettings::ColorSpace::Linear;
+  TextureSettings normal;
+  normal.normalMap = true;
+  const auto load = [&](const std::string& path, const TextureSettings& settings) {
+    return textures.load(kenshin::util::pathToUtf8(resolveTexture(dir, path)), settings);
+  };
+  for (auto& mat : mats) {
+    if (!mat.texPath.empty()) mat.texRef = load(mat.texPath, colour);
+    if (!mat.mrPath.empty()) mat.mrTexRef = load(mat.mrPath, data);
+    if (!mat.nrmPath.empty()) mat.nrmTexRef = load(mat.nrmPath, normal);
+  }
 }
 
 }  // namespace
@@ -56,27 +80,10 @@ KgeoSceneResult buildKgeoScene(const Args& args, kenshin::Engine& engine,
   // v3+ assets (tables-only dag) take the paged branch - the vertex pools
   // are never uploaded, the pages stream via the StreamingManager.
   const bool pagedAsset = kgeoPreview.dag.paged;
-  // Material texture references -> texture-array LAYERS before the scene
-  // bakes them into its GPU table. A failed load keeps the layer at -1.
-  if (pagedAsset && !kgeoPreview.dag.materials.empty()) {
-    const auto kgeoDir = std::filesystem::path(args.kgeo).parent_path();
-    for (auto& mat : kgeoPreview.dag.materials) {
-      for (int slot = 0; slot < 3; ++slot) {
-        std::string& path = slot == 0   ? mat.texPath
-                            : slot == 1 ? mat.mrPath
-                                        : mat.nrmPath;
-        kenshin::f32& layerF = slot == 0   ? mat.texLayer
-                               : slot == 1 ? mat.mrTexLayer
-                                           : mat.nrmTexLayer;
-        if (path.empty()) continue;
-        const u32 layer =
-            textureManager.load(resolveTexture(kgeoDir, path).string());
-        if (layer != kenshin::manager::TextureManager::kInvalidLayer)
-          layerF = static_cast<kenshin::f32>(layer);
-      }
-    }
-    desc.albedoTexture = textureManager.textureArray();
-  }
+  if (pagedAsset)
+    resolveMaterialTextures(kgeoPreview.dag.materials,
+                            kenshin::util::pathFromUtf8(args.kgeo).parent_path(),
+                            textureManager);
   const u32 vgMeshId = pagedAsset ? vgScene.addMeshPaged(kgeoPreview.dag)
                                   : vgScene.addMesh(kgeoPreview.dag);
   // Pre-v5 paged assets are rejected (their empty v5 tables would
@@ -126,17 +133,9 @@ KgeoSceneResult buildKgeoScene(const Args& args, kenshin::Engine& engine,
       KENSHIN_ERROR("[main] --mesh {} is not a paged asset; rebuild it", path);
       return KgeoSceneResult::Fatal;
     }
-    if (!mp.dag.materials.empty()) {
-      const auto dir = std::filesystem::path(path).parent_path();
-      for (auto& mat : mp.dag.materials) {
-        if (mat.texPath.empty()) continue;
-        const u32 layer =
-            textureManager.load(resolveTexture(dir, mat.texPath).string());
-        if (layer != kenshin::manager::TextureManager::kInvalidLayer)
-          mat.texLayer = static_cast<kenshin::f32>(layer);
-      }
-      desc.albedoTexture = textureManager.textureArray();
-    }
+    resolveMaterialTextures(mp.dag.materials,
+                            kenshin::util::pathFromUtf8(path).parent_path(),
+                            textureManager);
     const u32 id = vgScene.addMeshPaged(mp.dag);
     if (id == 0xFFFFFFFFu) {
       KENSHIN_ERROR(

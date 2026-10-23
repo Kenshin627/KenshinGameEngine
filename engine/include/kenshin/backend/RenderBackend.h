@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "kenshin/Common.h"
+#include "kenshin/backend/TextureFormat.h"
 #include "kenshin/backend/FrameStatus.h"
 
 KENSHIN_NS_BEGIN
@@ -259,6 +260,28 @@ class IRenderBackend {
     usize bytes = 0;  // width*height*(hdr ? 16 : 4)*layers
     const char* debugName = nullptr;
   };
+  /// 1.3a material textures: one 2D image in its real format with its
+  /// CPU-cooked mip chain (assets::cookTexture), registered in the
+  /// bindless table. `data` holds mip 0..mipCount-1 tightly packed,
+  /// each max(1, w >> m) x max(1, h >> m) texels.
+  struct TextureDesc {
+    u32 width = 0;
+    u32 height = 0;
+    u32 mipCount = 1;
+    TextureFormat format = TextureFormat::RGBA8Srgb;
+    const u8* data = nullptr;
+    usize bytes = 0;
+    const char* debugName = nullptr;
+  };
+  /// Uploads (blocking, one-shot) and returns the texture handle, or
+  /// kInvalidTextureHandle (bad desc, out of memory, table full).
+  virtual u32 createTexture(const TextureDesc& desc) = 0;
+  /// The texture's bindless slot (for textureRef), or kNoTexture for
+  /// an invalid handle or a texture array.
+  virtual u32 bindlessSlot(u32 texture) const = 0;
+  /// Bindless table occupancy (slot 0, the white default, excluded).
+  virtual u32 bindlessUsed() const = 0;
+
   /// One-shot upload of a texture array: staging copy of every layer's
   /// mip 0, GPU blit mip chain, final transition to shader-read layout.
   /// Immutable afterwards. All layers must share dimensions (the
@@ -296,14 +319,12 @@ class IRenderBackend {
   /// zero - the lighting pass reads alpha==0 as background), binds the
   /// pipeline's MIXED set and draws the fullscreen triangle. Binding
   /// contract (M8.2): reflected STORAGE_BUFFER bindings take
-  /// `bufferHandles` in ascending order; the reflected SAMPLED_IMAGE
-  /// binding gets `albedoTexture`'s view (an invalid handle falls back
-  /// to a backend-internal 1x1 dummy so the set is always validly
-  /// written) and the SAMPLER binding the backend's albedo sampler.
+  /// `bufferHandles` in ascending order; material textures come from
+  /// the bindless table (set 1, bound automatically - 1.3a).
   /// Self-contained: closes its scope and barriers the targets to
   /// shader-read for the lighting pass.
   virtual void drawGBuffer(u32 pipeline, const u32* bufferHandles,
-                           u32 bufferCount, u32 albedoTexture, const void* push,
+                           u32 bufferCount, const void* push,
                            usize pushBytes, u32 width, u32 height) = 0;
   /// M8.1 deferred shading - the lighting pass: fullscreen VS+FS whose
   /// set layout is MIXED - reflected Sampler2D bindings (in ascending
@@ -340,19 +361,17 @@ class IRenderBackend {
   /// drawLighting; no depth attachment (the shader tests the VisBuffer
   /// depth itself), no culling. Buffer handles fill the reflected
   /// STORAGE_BUFFER bindings in ascending order, `envTexture` the
-  /// combined image sampler, `albedoTexture` the SAMPLED_IMAGE (+ the
-  /// albedo SAMPLER). Defaults: unsupported (no-op).
+  /// combined image sampler; material textures are bindless (set 1).
+  /// Defaults: unsupported (no-op).
   virtual u32 createTranslucentPipeline(const FullscreenPipelineInfo& info) {
     (void)info;
     return kInvalidPipelineHandle;
   }
   virtual void drawTranslucent(u32 pipeline, const u32* bufferHandles,
-                               u32 bufferCount, u32 envTexture,
-                               u32 albedoTexture, const void* push,
+                               u32 bufferCount, u32 envTexture, const void* push,
                                usize pushBytes, u32 vertexCount,
                                u32 instanceCount, u32 width, u32 height) {
     (void)pipeline, (void)bufferHandles, (void)bufferCount, (void)envTexture;
-    (void)albedoTexture;
     (void)push, (void)pushBytes, (void)vertexCount, (void)instanceCount;
     (void)width, (void)height;
   }

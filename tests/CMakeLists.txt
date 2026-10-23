@@ -10,6 +10,7 @@ find_package(Catch2 CONFIG REQUIRED)
 
 add_executable(kenshin_tests
     src/assets_tests.cpp
+    src/bindless_tests.cpp
     src/clod_tests.cpp
     src/cpu_reference_cluster_cull.cpp
     src/cpu_reference_raster.cpp
@@ -28,6 +29,7 @@ add_executable(kenshin_tests
     src/serialization_tests.cpp
     src/shapes_tests.cpp
     src/smoke.cpp
+    src/texture_tests.cpp
     src/input_tests.cpp
     src/vgchain_tests.cpp
     src/hzb_tests.cpp

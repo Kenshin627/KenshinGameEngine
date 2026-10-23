@@ -88,23 +88,21 @@ class MaterialDecodePass {
   /// M8.1 GBuffer variants: the SAME decode chain writing the per-slot
   /// GBuffer targets (fsGBuffer) instead of the final color - the
   /// deferred pair's producer half. Follow with LightingPass::draw.
-  /// M8.2: `albedoTexture` is the TextureManager's texture-array handle
-  /// (kInvalidTextureHandle binds the backend's 1x1 dummy); the
-  /// material table + count come from the scene (paged) or a zero
-  /// dummy (v2 - the shader's paged gate keeps it unread).
+  /// The material table + count come from the scene (paged) or a zero
+  /// dummy (v2 - the shader's paged gate keeps it unread); material
+  /// textures are bindless (1.3a).
   void drawGBuffer(backend::IRenderBackend& backend, const glm::mat4& viewProj,
                    const VirtualGeometryScene& scene,
                    const DecodeParams& params, u32 width, u32 height,
                    u32 visHandle, u32 pairs, u32 hwPairs, u32 postPairs,
-                   u32 pairCapacity, u32 albedoTexture,
-                   u32 imposterPairs = 0);
+                   u32 pairCapacity, u32 imposterPairs = 0);
   void drawGBufferPaged(backend::IRenderBackend& backend,
                         const glm::mat4& viewProj,
                         const VirtualGeometryScene& scene,
                         const DecodeParams& params, u32 width, u32 height,
                         u32 visHandle, const DecodePagedInputs& paged,
                         u32 pairs, u32 hwPairs, u32 postPairs, u32 pairCapacity,
-                        u32 albedoTexture, u32 imposterPairs = 0);
+                        u32 imposterPairs = 0);
   /// M9.1: decode the SHADOW chain's VisBuffer (the light's view) into
   /// light-space depth (fsShadowDepth -> the backend's R32F shadow
   /// target). `viewProj` is the LIGHT's own (Y-flipped) ortho matrix;

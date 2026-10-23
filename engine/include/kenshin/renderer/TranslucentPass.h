@@ -42,10 +42,9 @@ struct TranslucentFrame {
   u32 envTexture = ~0u;
   float envMaxLod = 1.0f;
   u32 visBuffer = ~0u;  // this frame's VisBuffer (u64 per pixel)
-  /// The scene's runtime material table (texture layers) + albedo/MR
-  /// texture array - the opaque decode's own; ~0u = factors only.
+  /// The scene's runtime material table (bindless texture refs) - the
+  /// opaque decode's own; ~0u = factors only.
   u32 sceneMaterials = ~0u;
-  u32 albedoTexture = ~0u;
   /// Instance transforms the translucent mesh draws under (the loaded
   /// asset's instances - mesh 0).
   std::span<const glm::mat4> instances;

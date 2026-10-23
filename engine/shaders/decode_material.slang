@@ -1,4 +1,6 @@
 // S4.5: material decode pass - the VisBuffer consumer.
+import bindless;  // 1.3a: material textures (descriptor set 1)
+
 // Fullscreen triangle (VS) + per-pixel decode (FS) per Karis p.99:
 // load VisBuffer -> cluster -> instance transform -> 3 vert indices ->
 // 3 positions -> transform to screen -> analytic barycentrics (2x2) ->
@@ -157,11 +159,12 @@ float2 v5Uv(uint vi, uint uvBase, uint poolTotal, uint vertexOffset,
                 qm.uvMinY + float(qy) * (qm.uvRangeY / 255.0));
 }
 
-// M8.2: the material table record (8 f32 - the .kgeo v7 section's GPU
-// shape, packed identically in VirtualGeometryScene).
+// M8.2: the material table record (12 f32, packed identically in
+// VirtualGeometryScene). 1.3a: the texture slots hold bindless texture
+// references as raw bits (asuint; 0xFFFFFFFF = none - bindless.slang).
 struct GpuMaterial {
-  float4 kdTex;   // rgb kd, a = texture-array layer (-1 = untextured)
-  float4 params;  // x roughness, y metallic, z MR layer, w normal layer (-1 = none)
+  float4 kdTex;   // rgb kd, a = base-colour texture ref (bits)
+  float4 params;  // x roughness, y metallic, z MR ref, w normal ref (bits)
   float4 emissive;  // rgb emitted radiance (linear), w occlusion strength
 };
 
@@ -212,19 +215,14 @@ struct DecodePush {
 [[vk::binding(15)]] StructuredBuffer<uint>
     clusterMeta;  // v5: per-cluster ordinal into its page's meta array
 // M8.2 (fsGBuffer only - dead-stripped from fsMain's SPIR-V): the
-// material table + the albedo Texture2DArray. decodeParams[1].y
-// carries the material count (the id clamp bound).
+// material table. decodeParams[1].y carries the material count (the id
+// clamp bound). Its textures are bindless (set 1, bindless.slang).
 [[vk::binding(16)]] StructuredBuffer<GpuMaterial> materials;
 // M9.2: listSel==3 routes here - CPU-filled (instance, rootCluster)
 // pairs for tiny-instance imposters. The root cluster is a REAL
 // cluster entry, so everything below the pair resolve is unchanged.
-[[vk::binding(18)]] StructuredBuffer<uint2> imposterPairs;
-// The ONE combined image+sampler binding: the shared TextureManager
-// array carries albedo AND metallicRoughness layers alike - the MR
-// sample rides the same binding with its layer index (a SECOND
-// Sampler2DArray binding gets dropped by Slang's reflection; keep the
-// numbering dense - a gap becomes an SSBO slot that eats a handle).
-[[vk::binding(17)]] Sampler2DArray albedoTex;
+// Keep set 0 dense: a gap becomes an SSBO slot that eats a handle.
+[[vk::binding(17)]] StructuredBuffer<uint2> imposterPairs;
 
 // kPageSlotSize (128 KB) in u32 elements - mirrors rasterize_sw / CPU
 // (v5: all page sections are u32-addressed).
@@ -860,34 +858,24 @@ struct GBufferOut {
     // (-1 = factor-only material).
     float rough = mat.params.x;
     float metal = mat.params.y;
-    float2 duv = max(abs(dUVdx), abs(dUVdy));
-    uint alayers = 1, amips = 1, atw = 1, ath = 1;
-    albedoTex.GetDimensions(0, atw, ath, alayers, amips);
-    const float texScale = float(max(atw, ath));
-    const float foot = max(max(duv.x, duv.y) * texScale, 1e-9f);
-    const float lod = clamp(log2(foot), 0.0, float(amips - 1u));
-    if (mat.kdTex.a >= 0.0) {
-      const float3 sampleUv =
-          float3(uv, min(mat.kdTex.a, float(alayers) - 1.0));
-      kd *= srgbToLinear(albedoTex.SampleLevel(sampleUv, lod).rgb);
-    }
-    if (mat.params.z >= 0.0) {
-      // glTF MR packing: roughness in G, metallic in B. LINEAR
-      // data (never sRGB-decoded); factors multiply the map. The
-      // MR layer rides the SAME array as the albedo (one combined
-      // binding - a second Sampler2DArray gets dropped by Slang's
-      // reflection).
-      const float3 mr =
-          albedoTex
-              .SampleLevel(float3(uv, min(mat.params.z, float(alayers) - 1.0)),
-                           lod)
-              .rgb;
+    // 1.3a: bindless refs; explicit gradients - each texture's own mip
+    // and the anisotropic footprint are the hardware's (colour
+    // textures are *_SRGB: the sample is already linear).
+    const uint albedoRef = asuint(mat.kdTex.a);
+    const uint mrRef = asuint(mat.params.z);
+    const uint nrmRef = asuint(mat.params.w);
+    if (hasTexture(albedoRef))
+      kd *= sampleTextureGrad(albedoRef, uv, dUVdx, dUVdy).rgb;
+    if (hasTexture(mrRef)) {
+      // glTF MR packing: roughness in G, metallic in B (linear data);
+      // factors multiply the map.
+      const float3 mr = sampleTextureGrad(mrRef, uv, dUVdx, dUVdy).rgb;
       rough *= mr.g;
       metal *= mr.b;
       // glTF occlusion (R of the ORM map): ao' = 1 + s * (ao - 1).
       aoLoss = saturate(mat.emissive.w) * (1.0 - saturate(mr.r));
     }
-    // v11 normal map (params.w = its array layer, -1 = none): glTF
+    // v11 normal map (params.w = its texture ref): glTF
     // tangent space (+X = +u, +Y = +v - verified against the F-35
     // asset's own TANGENT data: B == +dP/dv on 96% of triangles, never
     // the opposite), LINEAR texels. No tangent stream: the frame comes
@@ -895,7 +883,7 @@ struct GBufferOut {
     // Gram-Schmidt against the interpolated normal, handedness from
     // dP/dv - the decode already holds both, and the page format stays
     // as is.
-    if (mat.params.w >= 0.0) {
+    if (hasTexture(nrmRef)) {
       const float2 du1 = uv1 - uv0, du2 = uv2 - uv0;
       const float3 e1w = w1 - w0, e2w = w2 - w0;
       const float uvDet = du1.x * du2.y - du2.x * du1.y;
@@ -908,12 +896,7 @@ struct GBufferOut {
           const float hand = dot(cross(nrm, T), dPdv) < 0.0 ? -1.0 : 1.0;
           const float3 B = cross(nrm, T) * hand;
           const float3 nm =
-              albedoTex
-                  .SampleLevel(
-                      float3(uv, min(mat.params.w, float(alayers) - 1.0)), lod)
-                  .rgb *
-                  2.0 -
-              1.0;
+              sampleTextureGrad(nrmRef, uv, dUVdx, dUVdy).rgb * 2.0 - 1.0;
           const float3 pn = T * nm.x + B * nm.y + nrm * nm.z;
           if (dot(pn, pn) > 1e-12) nrm = normalize(pn);
         }
@@ -936,16 +919,6 @@ struct GBufferOut {
     o.a = float4(0, 0, 0, 0);  // reads as background
   }
   return o;
-}
-
-// ── color space ──────────────────────────────────────────────────
-// Texture assets are sRGB-encoded (JPEG/PNG/BMP by convention);
-// lighting math needs linear. The polynomial EOTF (branchless,
-// ~1e-4 of the exact curve). Filtering happens in sRGB space (a
-// hardware sRGB view would filter linear) - acceptable for the
-// 8-bit mips we ship; the alternative is sRGB format views.
-float3 srgbToLinear(float3 c) {
-  return c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878);
 }
 
 // ── M9.1 shadow depth entry ──────────────────────────────────────

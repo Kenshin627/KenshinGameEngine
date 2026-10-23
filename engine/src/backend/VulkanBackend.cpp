@@ -2,6 +2,7 @@
 
 #include "kenshin/core/Log.h"
 #include "kenshin/manager/ShaderManager.h"
+#include "vulkan/BindlessTable.h"
 #include "vulkan/BufferStore.h"
 #include "vulkan/CommandContext.h"
 #include "vulkan/ComputeOneShot.h"
@@ -181,6 +182,11 @@ struct VulkanBackend::Impl {
   GpuImage dummyTexture;
   std::vector<GpuImage> textures;
   std::vector<bool> textureAlive;
+  /// 1.3a: per texture handle, its bindless slot (kNoTexture for the
+  /// texture arrays - environment probes - which are bound directly).
+  std::vector<u32> textureSlot;
+  BindlessTable bindless;
+  GpuImage bindlessWhite;  // slot 0
 
   // GPU timestamps + graphics pipelines (PipelineStore: table + disk cache)
   bool gpuTimestamps = false;
@@ -205,6 +211,135 @@ VulkanBackend::VulkanBackend() : m_impl(std::make_unique<Impl>()) {}
 VulkanBackend::~VulkanBackend() { shutdown(); }
 
 // ── lifecycle ────────────────────────────────────────────────
+
+namespace {
+
+VkFormat toVkFormat(TextureFormat f) {
+  switch (f) {
+    case TextureFormat::RGBA8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
+    case TextureFormat::RGBA8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
+    case TextureFormat::RGBA16Unorm: return VK_FORMAT_R16G16B16A16_UNORM;
+    case TextureFormat::RGBA16Float: return VK_FORMAT_R16G16B16A16_SFLOAT;
+  }
+  return VK_FORMAT_UNDEFINED;
+}
+
+/// Bind the global bindless set (set 1) for pipelines that declare it.
+template <typename Pipeline>
+void bindBindless(VkCommandBuffer cb, VkPipelineBindPoint point, const Pipeline& p,
+                  VkDescriptorSet bindlessSet) {
+  if (!p.usesBindless) return;
+  vkCmdBindDescriptorSets(cb, point, p.layout, 1, 1, &bindlessSet, 0, nullptr);
+}
+
+/// One-shot upload of a 2D image with ALL its mips supplied (no GPU
+/// mip generation): staging copy, one buffer->image copy per level,
+/// final SHADER_READ_ONLY layout. Blocks until the queue is idle.
+bool uploadImage2D(VulkanDevice& dev, GpuImage& out, u32 width, u32 height, u32 mips,
+                   VkFormat format, const u8* data, usize bytes, usize texel) {
+  GpuImage image;
+  if (!image.create(dev.allocator, dev.device, width, height, format,
+                    VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mips, 1, false))
+    return false;
+  const VkBufferCreateInfo stagingInfo{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = static_cast<VkDeviceSize>(bytes),
+      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  const VmaAllocationCreateInfo stagingAlloc{
+      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+               VMA_ALLOCATION_CREATE_MAPPED_BIT,
+      .usage = VMA_MEMORY_USAGE_AUTO,
+      .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+  };
+  VkBuffer staging = VK_NULL_HANDLE;
+  VmaAllocation stagingMem = VK_NULL_HANDLE;
+  VmaAllocationInfo mapped{};
+  if (vmaCreateBuffer(dev.allocator, &stagingInfo, &stagingAlloc, &staging, &stagingMem,
+                      &mapped) != VK_SUCCESS) {
+    image.destroy(dev.allocator, dev.device);
+    return false;
+  }
+  std::memcpy(mapped.pMappedData, data, bytes);
+
+  const VkCommandPoolCreateInfo poolInfo{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+      .queueFamilyIndex = dev.graphicsFamily,
+  };
+  VkCommandPool pool = VK_NULL_HANDLE;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  bool ok = KE_VK(vkCreateCommandPool(dev.device, &poolInfo, nullptr, &pool));
+  if (ok) {
+    const VkCommandBufferAllocateInfo cbInfo{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    const VkCommandBufferBeginInfo begin{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    ok = KE_VK(vkAllocateCommandBuffers(dev.device, &cbInfo, &cmd)) &&
+         KE_VK(vkBeginCommandBuffer(cmd, &begin));
+  }
+  if (ok) {
+    CommandContext::pipelineBarrier(
+        cmd, CommandContext::imageBarrier(image.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                          VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                          VK_ACCESS_2_TRANSFER_WRITE_BIT, 0, mips, 0, 1));
+    std::vector<VkBufferImageCopy> copies(mips);
+    usize offset = 0;
+    for (u32 m = 0; m < mips; ++m) {
+      const u32 w = (std::max)(width >> m, 1u), h = (std::max)(height >> m, 1u);
+      copies[m] = VkBufferImageCopy{
+          .bufferOffset = static_cast<VkDeviceSize>(offset),
+          .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .mipLevel = m,
+                               .baseArrayLayer = 0,
+                               .layerCount = 1},
+          .imageExtent = {w, h, 1},
+      };
+      offset += usize(w) * h * texel;
+    }
+    vkCmdCopyBufferToImage(cmd, staging, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           mips, copies.data());
+    CommandContext::pipelineBarrier(
+        cmd, CommandContext::imageBarrier(
+                 image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, 0, mips, 0, 1));
+    ok = KE_VK(vkEndCommandBuffer(cmd));
+  }
+  if (ok) {
+    const VkCommandBufferSubmitInfo cbSubmit{
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+        .commandBuffer = cmd,
+    };
+    const VkSubmitInfo2 submit{
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .commandBufferInfoCount = 1,
+        .pCommandBufferInfos = &cbSubmit,
+    };
+    ok = KE_VK(vkQueueSubmit2(dev.graphicsQueue, 1, &submit, VK_NULL_HANDLE)) &&
+         KE_VK(vkQueueWaitIdle(dev.graphicsQueue));
+  }
+  if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(dev.device, pool, nullptr);
+  vmaDestroyBuffer(dev.allocator, staging, stagingMem);
+  if (!ok) {
+    image.destroy(dev.allocator, dev.device);
+    return false;
+  }
+  out = std::move(image);
+  return true;
+}
+
+}  // namespace
 
 bool VulkanBackend::initialize(const BackendInitParams& params) {
   // If a validation layer ships next to the exe (vcpkg dev build),
@@ -411,6 +546,34 @@ bool VulkanBackend::initialize(const BackendInitParams& params) {
     m_impl->dummyTexture = m_impl->textures.back();
     m_impl->textures.pop_back();
     m_impl->textureAlive.pop_back();
+    m_impl->textureSlot.pop_back();
+  }
+  // 1.3a: the bindless material-texture table (descriptor set 1).
+  {
+    const VulkanContext& ctx = m_impl->context;
+    if (!ctx.supportsBindless) {
+      KENSHIN_ERROR(
+          "[vulkan] the GPU lacks descriptor indexing (runtime arrays, partially bound, "
+          "update-after-bind sampled images) - bindless textures are required");
+      return false;
+    }
+    const u32 limit = ctx.maxBindlessSampledImages;
+    // Headroom for the set-0 images of the same stage (GBuffer, env).
+    const u32 capacity = (std::min)(16384u, limit > 64 ? limit - 64 : 0u);
+    if (capacity < 256) {
+      KENSHIN_ERROR("[vulkan] bindless sampled-image limit too small ({})", limit);
+      return false;
+    }
+    const u8 white[4] = {255, 255, 255, 255};
+    if (!uploadImage2D(m_impl->device, m_impl->bindlessWhite, 1, 1, 1,
+                       VK_FORMAT_R8G8B8A8_UNORM, white, 4, 4))
+      return false;
+    const f32 aniso =
+        ctx.supportsAnisotropy ? (std::min)(16.0f, ctx.maxSamplerAnisotropy) : 1.0f;
+    if (!m_impl->bindless.init(m_impl->device.device, capacity, aniso,
+                               m_impl->bindlessWhite.view))
+      return false;
+    m_impl->pipelines.setBindlessLayout(m_impl->bindless.layout());
   }
   // M8.1 format gate: the deferred GBuffer needs RGBA16F/RGBA8 as
   // color attachment + sampled (the engine never queried format
@@ -526,6 +689,10 @@ void VulkanBackend::shutdown() {
       t.destroy(m_impl->device.allocator, m_impl->device.device);
   m_impl->textures.clear();
   m_impl->textureAlive.clear();
+  m_impl->textureSlot.clear();
+  m_impl->bindless.shutdown(m_impl->device.device);
+  if (m_impl->bindlessWhite.image != VK_NULL_HANDLE)
+    m_impl->bindlessWhite.destroy(m_impl->device.allocator, m_impl->device.device);
   if (m_impl->dummyTexture.image != VK_NULL_HANDLE)
     m_impl->dummyTexture.destroy(m_impl->device.allocator,
                                  m_impl->device.device);
@@ -1412,6 +1579,7 @@ void VulkanBackend::drawFullscreen(u32 pipeline, const u32* bufferHandles,
 
   vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                           fs.layout, 0, 1, &set, 0, nullptr);
+  bindBindless(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, fs, impl.bindless.set());
   vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                     fs.pipeline);
   vkCmdPushConstants(impl.cmd.cmd(), fs.layout,
@@ -1611,17 +1779,77 @@ u32 VulkanBackend::createTextureArray(const TextureArrayDesc& desc) {
   if (desc.debugName)
     vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE,
                     reinterpret_cast<uint64_t>(image.image), desc.debugName);
+  return storeTexture(std::move(image), kNoTexture);
+}
+
+u32 VulkanBackend::storeTexture(GpuImage&& image, u32 slot) {
+  Impl& impl = *m_impl;
   for (u32 i = 0; i < impl.textures.size(); ++i) {
     if (!impl.textureAlive[i]) {
       impl.textures[i] = std::move(image);
       impl.textureAlive[i] = true;
+      impl.textureSlot[i] = slot;
       return i;
     }
   }
   impl.textures.push_back(std::move(image));
   impl.textureAlive.push_back(true);
+  impl.textureSlot.push_back(slot);
   return static_cast<u32>(impl.textures.size() - 1);
 }
+
+u32 VulkanBackend::createTexture(const TextureDesc& desc) {
+  Impl& impl = *m_impl;
+  if (desc.data == nullptr) {
+    KENSHIN_ERROR("[vulkan] createTexture: no texel data");
+    return kInvalidTextureHandle;
+  }
+  const usize texel = texelBytes(desc.format);
+  usize expect = 0;
+  for (u32 m = 0; m < desc.mipCount; ++m)
+    expect += usize((std::max)(desc.width >> m, 1u)) * (std::max)(desc.height >> m, 1u) * texel;
+  if (desc.width == 0 || desc.height == 0 || desc.width > 16384 || desc.height > 16384 ||
+      desc.mipCount == 0 || desc.mipCount > fullMipCount(desc.width, desc.height) ||
+      desc.bytes != expect) {
+    KENSHIN_ERROR("[vulkan] createTexture: bad desc ({}x{}, {} mips, {} bytes, expected {})",
+                  desc.width, desc.height, desc.mipCount, desc.bytes, expect);
+    return kInvalidTextureHandle;
+  }
+  const VkFormat format = toVkFormat(desc.format);
+  VkFormatProperties fp{};
+  vkGetPhysicalDeviceFormatProperties(impl.context.physicalDevice, format, &fp);
+  const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                    VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                    VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+  if ((fp.optimalTilingFeatures & need) != need) {
+    KENSHIN_ERROR("[vulkan] createTexture: format {} cannot be sampled with filtering here",
+                  static_cast<int>(format));
+    return kInvalidTextureHandle;
+  }
+  GpuImage image;
+  if (!uploadImage2D(impl.device, image, desc.width, desc.height, desc.mipCount, format,
+                     desc.data, desc.bytes, texel)) {
+    KENSHIN_ERROR("[vulkan] createTexture: upload failed ({}x{})", desc.width, desc.height);
+    return kInvalidTextureHandle;
+  }
+  if (desc.debugName)
+    vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE,
+                    reinterpret_cast<uint64_t>(image.image), desc.debugName);
+  const u32 slot = impl.bindless.allocate(impl.device.device, image.view);
+  if (slot == BindlessTable::kInvalidSlot) {
+    image.destroy(impl.device.allocator, impl.device.device);
+    return kInvalidTextureHandle;
+  }
+  return storeTexture(std::move(image), slot);
+}
+
+u32 VulkanBackend::bindlessSlot(u32 texture) const {
+  const Impl& impl = *m_impl;
+  if (texture >= impl.textures.size() || !impl.textureAlive[texture]) return kNoTexture;
+  return impl.textureSlot[texture];
+}
+
+u32 VulkanBackend::bindlessUsed() const { return m_impl->bindless.used(); }
 
 void VulkanBackend::destroyTexture(u32 texture) {
   Impl& impl = *m_impl;
@@ -1632,6 +1860,9 @@ void VulkanBackend::destroyTexture(u32 texture) {
   // Static scene resources only (v1): draining the device is heavy but
   // correct - textures are destroyed at scene teardown, not per frame.
   vkDeviceWaitIdle(impl.device.device);
+  if (impl.textureSlot[texture] != kNoTexture)
+    impl.bindless.release(impl.device.device, impl.textureSlot[texture]);
+  impl.textureSlot[texture] = kNoTexture;
   impl.textures[texture].destroy(impl.device.allocator, impl.device.device);
   impl.textureAlive[texture] = false;
 }
@@ -1641,9 +1872,8 @@ u32 VulkanBackend::createGBufferPipeline(const FullscreenPipelineInfo& info) {
 }
 
 void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
-                                u32 bufferCount, u32 albedoTexture,
-                                const void* push, usize pushBytes, u32 width,
-                                u32 height) {
+                                u32 bufferCount, const void* push,
+                                usize pushBytes, u32 width, u32 height) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
       pipeline > impl.pipelines.fullscreenCount())
@@ -1662,17 +1892,6 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
         .range = impl.buffers.size(bufferHandles[i]),
     };
   }
-  // The albedo binding target: the scene texture when valid, the
-  // backend's 1x1 dummy otherwise (the mixed set must always be
-  // validly written - the SPIR-V sample opcode exists regardless of
-  // whether any material references a texture).
-  const GpuImage* albedo = &impl.dummyTexture;
-  if (albedoTexture < impl.textures.size() && impl.textureAlive[albedoTexture])
-    albedo = &impl.textures[albedoTexture];
-  else if (albedoTexture != kInvalidTextureHandle)
-    KENSHIN_ERROR("[vulkan] drawGBuffer: bad albedo texture {} (dummy)",
-                  albedoTexture);
-
   // The GBuffer targets cycle UNDEFINED/COLOR_ATTACHMENT (this pass) ->
   // SHADER_READ_ONLY (after it) -> COLOR_ATTACHMENT (next frame).
   // DONT_CARE-style: discard last frame's contents on the way in.
@@ -1688,20 +1907,9 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
     const vkutil::ScopedDebugLabel label{impl.cmd.cmd(), "gbuffer-decode"};
     impl.cmd.beginGBufferPass(slot.gbuffer[0].view, slot.gbuffer[1].view,
                               slot.gbuffer[2].view, width, height);
-    // Mixed binding writes (M8.2): STORAGE_BUFFER bindings take the
-    // buffer handles in ascending order; the SAMPLED_IMAGE binding
-    // gets the albedo view and the SAMPLER binding the albedo sampler.
+    // Set 0: STORAGE_BUFFER bindings take the buffer handles in
+    // ascending order. Material textures are bindless (set 1, 1.3a).
     const VkDescriptorSet set = fs.sets[impl.frameSync.frameIndex];
-    VkDescriptorImageInfo albedoImage{
-        .sampler = VK_NULL_HANDLE,
-        .imageView = albedo->view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-    };
-    VkDescriptorImageInfo albedoSamplerInfo{
-        .sampler = impl.albedoSampler,
-        .imageView = VK_NULL_HANDLE,
-        .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    };
     std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
     u32 nextBuffer = 0;
     bool bindMismatch = false;
@@ -1714,19 +1922,7 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
           .descriptorType = fs.bindingTypes[b],
       };
       switch (fs.bindingTypes[b]) {
-        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-          writes[b].pImageInfo = &albedoImage;
-          break;
-        case VK_DESCRIPTOR_TYPE_SAMPLER:
-          writes[b].pImageInfo = &albedoSamplerInfo;
-          break;
-        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
-          // fsGBuffer uses separate image+sampler; a combined binding
-          // (if one ever appears) gets view + albedo sampler.
-          albedoImage.sampler = impl.albedoSampler;
-          writes[b].pImageInfo = &albedoImage;
-          break;
-        default:
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
           // Never early-return here: the GBuffer pass is OPEN - a
           // mismatch means a programming error; log once, skip the
           // draw, and let the scope close below.
@@ -1738,6 +1934,10 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
           }
           writes[b].pBufferInfo = &infos[nextBuffer++];
           break;
+        default:
+          KENSHIN_ERROR("[vulkan] drawGBuffer: unexpected image binding {} in set 0", b);
+          bindMismatch = true;
+          break;
       }
     }
     if (!bindMismatch) {
@@ -1745,6 +1945,7 @@ void VulkanBackend::drawGBuffer(u32 pipeline, const u32* bufferHandles,
                              0, nullptr);
       vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                               fs.layout, 0, 1, &set, 0, nullptr);
+      bindBindless(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, fs, impl.bindless.set());
       vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                         fs.pipeline);
       vkCmdPushConstants(
@@ -1787,9 +1988,9 @@ u32 VulkanBackend::createTranslucentPipeline(
 
 void VulkanBackend::drawTranslucent(u32 pipeline, const u32* bufferHandles,
                                     u32 bufferCount, u32 envTexture,
-                                    u32 albedoTexture, const void* push,
-                                    usize pushBytes, u32 vertexCount,
-                                    u32 instanceCount, u32 width, u32 height) {
+                                    const void* push, usize pushBytes,
+                                    u32 vertexCount, u32 instanceCount,
+                                    u32 width, u32 height) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
       pipeline > impl.pipelines.fullscreenCount() || vertexCount == 0 ||
@@ -1816,22 +2017,7 @@ void VulkanBackend::drawTranslucent(u32 pipeline, const u32* bufferHandles,
               : impl.dummyTexture.view,
       .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
   };
-  // The scene's albedo/MR array (or the dummy - the set must always be
-  // validly written) as SAMPLED_IMAGE + SAMPLER, decode's pairing.
-  const VkDescriptorImageInfo albedoInfo{
-      .sampler = VK_NULL_HANDLE,
-      .imageView = albedoTexture < impl.textures.size() &&
-                           impl.textureAlive[albedoTexture]
-                       ? impl.textures[albedoTexture].view
-                       : impl.dummyTexture.view,
-      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-  };
-  const VkDescriptorImageInfo albedoSamplerInfo{
-      .sampler = impl.albedoSampler,
-      .imageView = VK_NULL_HANDLE,
-      .imageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-  };
-  // Binding 10: GBuffer C (the opaque emission, SHADER_READ since
+  // Binding 8: GBuffer C (the opaque emission, SHADER_READ since
   // drawLighting) for the emissive pass-through.
   if (slot.gbuffer[2].view == VK_NULL_HANDLE) return;
   const VkDescriptorImageInfo gbufferCInfo{
@@ -1852,11 +2038,10 @@ void VulkanBackend::drawTranslucent(u32 pipeline, const u32* bufferHandles,
         .descriptorType = fs.bindingTypes[b],
     };
     if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-      writes[b].pImageInfo = b == 10 ? &gbufferCInfo : &envInfo;
-    } else if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
-      writes[b].pImageInfo = &albedoInfo;
-    } else if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_SAMPLER) {
-      writes[b].pImageInfo = &albedoSamplerInfo;
+      writes[b].pImageInfo = b == 8 ? &gbufferCInfo : &envInfo;
+    } else if (fs.bindingTypes[b] != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+      KENSHIN_ERROR("[vulkan] drawTranslucent: unexpected image binding {} in set 0", b);
+      return;
     } else {
       if (nextBuffer >= bufferCount) {
         KENSHIN_ERROR("[vulkan] drawTranslucent: {} handles < {} bindings",
@@ -1888,6 +2073,7 @@ void VulkanBackend::drawTranslucent(u32 pipeline, const u32* bufferHandles,
                            0, nullptr);
     vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                             fs.layout, 0, 1, &set, 0, nullptr);
+    bindBindless(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, fs, impl.bindless.set());
     vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                       fs.pipeline);
     vkCmdPushConstants(
@@ -2013,6 +2199,7 @@ bool VulkanBackend::drawBloom(const u32* downPipelines,
                             VkRect2D{{0, 0}, {w, h}}, 0.0f);
     vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                             fs.layout, 0, 1, &set, 0, nullptr);
+    bindBindless(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, fs, impl.bindless.set());
     vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                       fs.pipeline);
     const float push[8] = {1.0f / float(srcW), 1.0f / float(srcH),
@@ -2163,6 +2350,7 @@ bool VulkanBackend::drawExposure(u32 histogramPipeline, u32 adaptPipeline,
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp.pipeline);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp.layout, 0,
                             1, &set, 0, nullptr);
+    bindBindless(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp, impl.bindless.set());
     vkCmdPushConstants(cb, cp.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                        static_cast<u32>(pushBytes), push);
     vkCmdDispatch(cb, gx, gy, 1);
@@ -2343,6 +2531,7 @@ void VulkanBackend::drawLighting(u32 pipeline, const u32* bufferHandles,
                              0, nullptr);
       vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                               fs.layout, 0, 1, &set, 0, nullptr);
+      bindBindless(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, fs, impl.bindless.set());
       vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                         fs.pipeline);
       vkCmdPushConstants(
@@ -2490,6 +2679,7 @@ void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
                              nullptr);
       vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                               fs.layout, 0, 1, &set, 0, nullptr);
+      bindBindless(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, fs, impl.bindless.set());
       vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                         fs.pipeline);
       vkCmdPushConstants(
@@ -2719,6 +2909,7 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
                            0, nullptr);
     vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                             fs.layout, 0, 1, &set, 0, nullptr);
+    bindBindless(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, fs, impl.bindless.set());
     vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                       fs.pipeline);
     if (pushBytes > 0)
@@ -2830,6 +3021,7 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
                            0, nullptr);
     vkCmdBindDescriptorSets(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                             fs.layout, 0, 1, &set, 0, nullptr);
+    bindBindless(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, fs, impl.bindless.set());
     vkCmdBindPipeline(impl.cmd.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS,
                       fs.pipeline);
     vkCmdPushConstants(
@@ -3454,6 +3646,7 @@ void VulkanBackend::dispatchCompute(u32 pipeline, const u32* bufferHandles,
 
   vkCmdBindDescriptorSets(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c.layout,
                           0, 1, &set, 0, nullptr);
+  bindBindless(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c, impl.bindless.set());
   vkCmdBindPipeline(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
   vkCmdDispatch(impl.rc(), groupsX, groupsY, groupsZ);
 }
@@ -3516,6 +3709,7 @@ void VulkanBackend::dispatchComputeIndirect(u32 pipeline,
                          nullptr);
   vkCmdBindDescriptorSets(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c.layout,
                           0, 1, &set, 0, nullptr);
+  bindBindless(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c, impl.bindless.set());
   vkCmdBindPipeline(impl.rc(), VK_PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
   vkCmdDispatchIndirect(impl.rc(), impl.buffers.buffer(countBuffer),
                         static_cast<VkDeviceSize>(countOffset));

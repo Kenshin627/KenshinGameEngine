@@ -56,6 +56,10 @@ class DescriptorCache {
   // 22 slots used: decode_material binds 0..19 (SSBOs + imposter
   // pairs) plus the v10 metallicRoughness array (20/21).
   static constexpr u32 kMaxMixedBindings = 24;
+  /// True when the module declares any binding in descriptor set `set`
+  /// (set 1 = the bindless material textures, 1.3a). The layout
+  /// builders above cover set 0 only.
+  static bool reflectUsesSet(const u32* spirv, usize spirvWords, u32 set);
   static VkDescriptorSetLayout createMixedLayout(VkDevice device,
                                                  const u32* spirv,
                                                  usize spirvWords,

@@ -44,12 +44,15 @@ class VulkanBackend final : public IRenderBackend {
   bool readbackBuffer(u32 buffer, usize offset, usize bytes,
                       std::vector<u8>& out) override;
   u32 createFullscreenPipeline(const FullscreenPipelineInfo& info) override;
+  u32 createTexture(const TextureDesc& desc) override;
+  u32 bindlessSlot(u32 texture) const override;
+  u32 bindlessUsed() const override;
   u32 createTextureArray(const TextureArrayDesc& desc) override;
   void destroyTexture(u32 texture) override;
   u32 createGBufferPipeline(const FullscreenPipelineInfo& info) override;
   void drawGBuffer(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
-                   u32 albedoTexture, const void* push, usize pushBytes,
-                   u32 width, u32 height) override;
+                   const void* push, usize pushBytes, u32 width,
+                   u32 height) override;
   u32 createLightingPipeline(const FullscreenPipelineInfo& info) override;
   void drawLighting(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
                     const void* push, usize pushBytes, u32 width, u32 height,
@@ -70,7 +73,7 @@ class VulkanBackend final : public IRenderBackend {
                  bool fromTaa, u32 width, u32 height) override;
   u32 createTranslucentPipeline(const FullscreenPipelineInfo& info) override;
   void drawTranslucent(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
-                       u32 envTexture, u32 albedoTexture, const void* push,
+                       u32 envTexture, const void* push,
                        usize pushBytes, u32 vertexCount, u32 instanceCount,
                        u32 width, u32 height) override;
   void drawTaa(u32 pipeline, const u32* bufferHandles, u32 bufferCount,
@@ -128,6 +131,9 @@ class VulkanBackend final : public IRenderBackend {
   /// M6.2: transfer-queue page-upload resources (pools, timeline,
   /// staging arena). Eagerly created - cheap and always testable.
   bool initPageStreaming();
+  /// Register an uploaded image under a texture handle (bindless slot
+  /// or kNoTexture).
+  u32 storeTexture(struct GpuImage&& image, u32 slot);
 
   /// (Re)create ImGui descriptor sets when offscreen targets change.
   void ensureViewportTextures();

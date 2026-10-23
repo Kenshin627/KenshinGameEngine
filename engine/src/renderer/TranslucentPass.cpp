@@ -161,9 +161,9 @@ void TranslucentPass::draw(backend::IRenderBackend& backend,
                           backend.snapshotHostBuffer(m_env),
                           frame.visBuffer,
                           sceneTable ? frame.sceneMaterials : m_materials};
-  backend.drawTranslucent(m_pipeline, handles, 7, frame.envTexture,
-                          frame.albedoTexture, &push, sizeof(push),
-                          m_vertexCount, instanceCount, width, height);
+  backend.drawTranslucent(m_pipeline, handles, 7, frame.envTexture, &push,
+                          sizeof(push), m_vertexCount, instanceCount, width,
+                          height);
 }
 
 void TranslucentPass::onShutdown(backend::IRenderBackend& backend) {

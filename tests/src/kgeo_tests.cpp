@@ -193,7 +193,7 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
   REQUIRE(loaded.paged);
   REQUIRE(loaded.pagesQuantized);  // v5 gate
   // v7: the material table roundtrips (texPath from the string blob,
-  // texLayer stays runtime-assigned = -1 out of the file).
+  // the texture refs stay runtime-assigned = kNoTexture out of the file).
   REQUIRE(loaded.hasMaterialTable);
   REQUIRE(loaded.materials.size() == 2);
   REQUIRE(loaded.materials[0].kd[0] == 0.8f);
@@ -202,7 +202,7 @@ TEST_CASE("kgeo v5 paged quantized roundtrip", "[geometry][kgeo][paged]") {
   REQUIRE(loaded.materials[0].roughness == 0.35f);
   REQUIRE(loaded.materials[0].metallic == 0.1f);
   REQUIRE(loaded.materials[0].texPath == "checker_64.bmp");
-  REQUIRE(loaded.materials[0].texLayer == -1.0f);
+  REQUIRE(loaded.materials[0].texRef == 0xFFFFFFFFu);
   REQUIRE(loaded.materials[1].kd[0] == 0.2f);
   REQUIRE(loaded.materials[1].roughness == 0.9f);
   REQUIRE(loaded.materials[1].texPath.empty());

@@ -41,14 +41,14 @@
 //                           same ids; the texture layers the
 //                           app resolved at load time live here
 //   7: Sampler2DArray envMap - the IBL probe (layer 0)
-//   8/9: Texture2DArray albedoTex + SamplerState albedoSampler - the
-//                           scene's albedo/MR array (separate image +
-//                           sampler: a second combined array sampler is
-//                           the reflection-drop pattern noted in M8.2)
+//   8: Sampler2D gbufferC   - the opaque frame's emission
+//   set 1: the bindless material textures (bindless.slang, 1.3a)
 //
 // Push (112B): viewProj columns | camPos + lightCount |
 //   (width, height, near, far) | (envMaxLod, envIntensity,
 //   sceneTableValid, 0)
+
+import bindless;
 
 struct TranslucentPush {
   float4 vp[4];
@@ -73,11 +73,9 @@ struct GpuLight {
 [[vk::binding(5)]] StructuredBuffer<uint> vis;
 [[vk::binding(6)]] StructuredBuffer<float4> sceneMaterials;
 [[vk::binding(7)]] Sampler2DArray envMap;
-[[vk::binding(8)]] Texture2DArray albedoTex;
-[[vk::binding(9)]] SamplerState albedoSampler;
 // The opaque frame's emission (GBuffer C rgb, before the emissive
 // strength) - the pass-through term below.
-[[vk::binding(10)]] Sampler2D gbufferC;
+[[vk::binding(8)]] Sampler2D gbufferC;
 
 struct VSOut {
   float4 pos : SV_Position;
@@ -163,9 +161,9 @@ float4 fsMain(VSOut i) : SV_Target {
   float metal = m1.y;
   if (push.envParams.z > 0.5) {
     // The opaque path's material chain (decode_material fsGBuffer):
-    // factor x sRGB-decoded albedo texel; MR texel G = roughness, B =
-    // metallic (linear data), factors multiply. Real derivatives here -
-    // this is a forward pass, implicit LOD is valid.
+    // factor x albedo texel (sRGB format: sampled linear); MR texel G =
+    // roughness, B = metallic (linear data), factors multiply. Real
+    // derivatives here - this is a forward pass, implicit LOD is valid.
     const float4 kdTex = sceneMaterials[i.mat * 3u];
     const float4 params = sceneMaterials[i.mat * 3u + 1u];
     emissive = max(sceneMaterials[i.mat * 3u + 2u].rgb, float3(0.0)) *
@@ -173,14 +171,10 @@ float4 fsMain(VSOut i) : SV_Target {
     albedo = kdTex.rgb;
     rough = params.x;
     metal = params.y;
-    if (kdTex.a >= 0.0) {
-      const float3 c =
-          albedoTex.Sample(albedoSampler, float3(i.uv, kdTex.a)).rgb;
-      albedo *= c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878);
-    }
-    if (params.z >= 0.0) {
-      const float3 mr =
-          albedoTex.Sample(albedoSampler, float3(i.uv, params.z)).rgb;
+    if (hasTexture(asuint(kdTex.a)))
+      albedo *= sampleTexture(asuint(kdTex.a), i.uv).rgb;
+    if (hasTexture(asuint(params.z))) {
+      const float3 mr = sampleTexture(asuint(params.z), i.uv).rgb;
       rough *= mr.g;
       metal *= mr.b;
     }

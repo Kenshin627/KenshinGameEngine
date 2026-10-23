@@ -20,6 +20,9 @@ endif()
 
 add_library(kenshin_engine STATIC
     src/assets/GltfLoader.cpp
+    src/assets/Image.cpp
+    src/assets/Ktx2.cpp
+    src/assets/TextureCooker.cpp
     src/assets/ObjLoader.cpp
     src/geometry/ClusterDag.cpp
     src/geometry/ClusterQuant.cpp
@@ -41,6 +44,7 @@ add_library(kenshin_engine STATIC
     src/platform/CrashHandler.cpp
     src/platform/Paths.cpp
     src/backend/VulkanBackend.cpp
+    src/backend/vulkan/BindlessTable.cpp
     src/backend/vulkan/FrameSync.cpp
     src/backend/vulkan/GpuImage.cpp
     src/backend/vulkan/Swapchain.cpp

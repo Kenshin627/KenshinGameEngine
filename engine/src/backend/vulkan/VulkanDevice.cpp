@@ -96,6 +96,15 @@ bool VulkanDevice::init(const VulkanContext& context) {
           enabledBufferInt64Atomics ? VK_TRUE : VK_FALSE,
       .timelineSemaphore = enabledTimelineSemaphore ? VK_TRUE : VK_FALSE,
   };
+  // 1.3a bindless textures (checked by VulkanBackend::initialize).
+  if (context.supportsBindless) {
+    features12.descriptorIndexing = VK_TRUE;
+    features12.runtimeDescriptorArray = VK_TRUE;
+    features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    features12.descriptorBindingPartiallyBound = VK_TRUE;
+    features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+    features12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+  }
   // SV_VertexID (the decode pass's fullscreen triangle) lowers to
   // SPIR-V CapabilityDrawParameters.
   VkPhysicalDeviceVulkan11Features features11{
@@ -121,6 +130,9 @@ bool VulkanDevice::init(const VulkanContext& context) {
   // skips into an SSBO - the vertex-stage twin of the feature above.
   features2.features.vertexPipelineStoresAndAtomics =
       coreFeatures.vertexPipelineStoresAndAtomics ? VK_TRUE : VK_FALSE;
+  // 1.3a: anisotropic filtering of material textures.
+  features2.features.samplerAnisotropy =
+      coreFeatures.samplerAnisotropy ? VK_TRUE : VK_FALSE;
 
   const float priority = 1.0f;
   std::vector<VkDeviceQueueCreateInfo> queueInfos;

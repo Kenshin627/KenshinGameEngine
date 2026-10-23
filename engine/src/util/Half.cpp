@@ -37,6 +37,30 @@ u16 f32ToHalf(float v) {
   return u16(sign | ((he << 10) + hm));
 }
 
+float halfToF32(u16 h) {
+  const u32 sign = u32(h & 0x8000u) << 16;
+  const u32 ex = (h >> 10) & 0x1Fu;
+  u32 man = h & 0x3FFu;
+  u32 bits;
+  if (ex == 0x1Fu) {
+    bits = sign | 0x7F800000u | (man << 13);  // inf / NaN
+  } else if (ex != 0) {
+    bits = sign | ((ex + 112u) << 23) | (man << 13);
+  } else if (man == 0) {
+    bits = sign;  // +-0
+  } else {  // denormal: normalize
+    int e = -1;
+    do {
+      ++e;
+      man <<= 1;
+    } while ((man & 0x400u) == 0);
+    bits = sign | (u32(112 - e) << 23) | ((man & 0x3FFu) << 13);
+  }
+  float f;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+
 }  // namespace util
 
 KENSHIN_NS_END
