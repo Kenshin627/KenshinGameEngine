@@ -55,7 +55,12 @@ class VulkanBackend final : public IRenderBackend {
                     u32 envTexture) override;
   u32 createTonemapPipeline(const FullscreenPipelineInfo& info) override;
   void drawTonemap(u32 pipeline, const void* push, usize pushBytes, u32 width,
-                   u32 height, bool fromTaa = false) override;
+                   u32 height, bool fromTaa = false,
+                   u32 exposureState = kInvalidBufferHandle) override;
+  u32 createExposurePipeline(const ComputePipelineInfo& info) override;
+  bool drawExposure(u32 histogramPipeline, u32 adaptPipeline, u32 histogram,
+                    u32 state, u32 envTexture, bool fromTaa, u32 width,
+                    u32 height, const void* push, usize pushBytes) override;
   u32 createTaaPipeline(const FullscreenPipelineInfo& info) override;
   u32 createBloomPipeline(const FullscreenPipelineInfo& info,
                           bool additive) override;

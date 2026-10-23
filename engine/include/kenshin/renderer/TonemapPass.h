@@ -40,13 +40,17 @@ class TonemapPass {
   /// every deferred frame; reads this slot's HDR target implicitly.
   /// bloomStrength > 0 composites the BloomPass chain drawn this frame
   /// (bloomInvLevels = 1 / BloomPass::kLevels); 0 = no bloom.
+  /// exposureState (ExposurePass::stateBuffer, written this frame)
+  /// replaces `exposure` with the adapted scale; ~0u = manual.
   void draw(backend::IRenderBackend& backend, Operator op, float exposure,
             const glm::vec4& clearColor, u32 width, u32 height,
             bool fromTaa = false, float sharpen = 0.0f,
-            float bloomStrength = 0.0f, float bloomInvLevels = 0.0f);
+            float bloomStrength = 0.0f, float bloomInvLevels = 0.0f,
+            u32 exposureState = ~0u);
 
  private:
   u32 m_pipeline = ~0u;
+  u32 m_dummyState = ~0u;  // bound when auto exposure is off
 };
 
 }  // namespace renderer

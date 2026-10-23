@@ -38,13 +38,16 @@
 // Push (48B):
 //   float4 clearColorExp - rgb the frame's clear color, a exposure
 //   float4 modeViewport  - x operator, yz = 1/w, 1/h, w = TAA sharpen
-//   float4 bloomParams   - x strength (0 = off), y 1 / level count
+//   float4 bloomParams   - x strength (0 = off), y 1 / level count,
+//                          z auto exposure (1 = exposureState[0].x
+//                          replaces clearColorExp.a)
 
 struct TonemapPush
 {
     float4 clearColorExp;
     float4 modeViewport;
-    float4 bloomParams;  // x bloom strength (0 = off), y 1 / level count
+    float4 bloomParams;  // x bloom strength (0 = off), y 1 / level count,
+                         // z auto exposure flag
 };
 
 [[vk::push_constant]] ConstantBuffer<TonemapPush> push;
@@ -53,6 +56,9 @@ struct TonemapPush
 // The bloom chain's top level (half resolution, bilinear upsampled);
 // the backend binds the HDR view here when no bloom ran this frame.
 [[vk::binding(1)]] Sampler2D bloomTex;
+// exposure.slang's state ([0].x = this frame's adapted image scale);
+// TonemapPass binds a 1-entry dummy when auto exposure is off.
+[[vk::binding(2)]] StructuredBuffer<float4> exposureState;
 
 struct VSOut
 {
@@ -287,6 +293,12 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     // level count - the chain SUMS its levels). Energy-conserving on
     // surfaces: scene * (1 - s) + bloom * s.
     const float s = push.bloomParams.x;
+    float exposure = push.clearColorExp.a;
+    if (push.bloomParams.z > 0.5)
+    {
+        const float autoScale = exposureState[0].x;
+        if (autoScale > 0.0 && autoScale < 1e6) exposure = autoScale;
+    }
     float3 bloom = float3(0.0);
     if (s > 0.0)
         bloom = max(bloomTex.SampleLevel(uv, 0.0).rgb, float3(0.0)) *
@@ -298,7 +310,7 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     float3 background = push.clearColorExp.rgb;
     if (s > 0.0)
     {
-        const float3 halo = toneMapOp(bloom * s * push.clearColorExp.a);
+        const float3 halo = toneMapOp(bloom * s * exposure);
         if (max(halo.x, max(halo.y, halo.z)) > 0.5 / 255.0)
             background = linearToSrgb(
                 saturate(srgbToLinearExact(push.clearColorExp.rgb) + halo));
@@ -345,7 +357,7 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const float coverage = hdr4.a;
     float3 hdr = hdr4.rgb / coverage;  // un-premultiply
     if (s > 0.0) hdr = hdr * (1.0 - s) + bloom * s;
-    const float3 outColor = toneMapOp(hdr * push.clearColorExp.a);
+    const float3 outColor = toneMapOp(hdr * exposure);
     if (!(outColor.x >= 0.0) || !(outColor.y >= 0.0) ||
         !(outColor.z >= 0.0))
         return float4(0.5, 0.0, 0.5, 1.0);  // magenta sentinel

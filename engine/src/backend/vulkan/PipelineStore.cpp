@@ -770,7 +770,8 @@ u32 PipelineStore::createNullRaster(
 }
 
 u32 PipelineStore::createCompute(
-    VkDevice device, const IRenderBackend::ComputePipelineInfo& info) {
+    VkDevice device, const IRenderBackend::ComputePipelineInfo& info,
+    bool mixedLayout) {
   if (info.csSpirv == nullptr || info.csBytes == 0)
     return IRenderBackend::kInvalidPipelineHandle;
 
@@ -786,23 +787,39 @@ u32 PipelineStore::createCompute(
   // SSBO set layout from reflection; one set per frame slot, re-written
   // by that slot's dispatch.
   u32 bindingCount = 0;
-  const VkDescriptorSetLayout setLayout = DescriptorCache::createStorageLayout(
-      device, info.csSpirv, info.csBytes / sizeof(u32), &bindingCount);
+  VkDescriptorType types[DescriptorCache::kMaxMixedBindings] = {};
+  const VkDescriptorSetLayout setLayout =
+      mixedLayout ? DescriptorCache::createMixedLayout(
+                        device, info.csSpirv, info.csBytes / sizeof(u32),
+                        types, &bindingCount)
+                  : DescriptorCache::createStorageLayout(
+                        device, info.csSpirv, info.csBytes / sizeof(u32),
+                        &bindingCount);
   if (setLayout == VK_NULL_HANDLE) {
     vkDestroyShaderModule(device, module, nullptr);
     return IRenderBackend::kInvalidPipelineHandle;
   }
-  VkDescriptorPool pool = DescriptorCache::createStoragePool(
-      device, setLayout, bindingCount, kMaxFramesInFlight);
+  VkDescriptorPool pool =
+      mixedLayout ? DescriptorCache::createMixedPool(device, types, bindingCount,
+                                                     kMaxFramesInFlight)
+                  : DescriptorCache::createStoragePool(
+                        device, setLayout, bindingCount, kMaxFramesInFlight);
   VkDescriptorSet sets[kMaxFramesInFlight] = {};
   const bool setOk = pool != VK_NULL_HANDLE &&
                      DescriptorCache::allocateSets(device, pool, setLayout,
                                                    sets, kMaxFramesInFlight);
 
+  const VkPushConstantRange computePush{
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0,
+      .size = 128,
+  };
   const VkPipelineLayoutCreateInfo layoutInfo{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
       .setLayoutCount = 1,
       .pSetLayouts = &setLayout,
+      .pushConstantRangeCount = mixedLayout ? 1u : 0u,
+      .pPushConstantRanges = mixedLayout ? &computePush : nullptr,
   };
   VkPipelineLayout layout = VK_NULL_HANDLE;
   const bool layoutOk =
@@ -846,6 +863,12 @@ u32 PipelineStore::createCompute(
   entry.setLayout = setLayout;
   entry.pool = pool;
   for (u32 i = 0; i < kMaxFramesInFlight; ++i) entry.sets[i] = sets[i];
+  if (mixedLayout) {
+    entry.bindingCount = bindingCount;
+    for (u32 b = 0; b < bindingCount && b < DescriptorCache::kMaxMixedBindings;
+         ++b)
+      entry.bindingTypes[b] = types[b];
+  }
   entry.valid = true;
   return static_cast<u32>(m_compute.size());
 }

@@ -56,6 +56,7 @@
 #include "kenshin/renderer/TaaPass.h"
 #include "kenshin/renderer/TonemapPass.h"
 #include "kenshin/renderer/BloomPass.h"
+#include "kenshin/renderer/ExposurePass.h"
 #include "kenshin/renderer/TranslucentPass.h"
 #include "kenshin/renderer/VirtualGeometryScene.h"
 #include "kenshin/renderer/VisBufferChain.h"
@@ -168,6 +169,8 @@ struct Args {
   float exposure = -1.0f;       // --exposure: seeds the panel value
   float envIntensity = -1.0f;   // --env-intensity: seeds the panel value
   bool noBloom = false;         // --no-bloom
+  bool noAutoExposure = false;  // --no-auto-exposure (--exposure implies it)
+  float exposureBias = -1e9f;   // --exposure-bias <EV>: seeds the panel
   std::string envPath;          // --env: an explicit Radiance HDRI
   float taaSharpen = -1.0f;     // --taa-sharpen: seeds the panel value
   float bloomStrength = -1.0f;  // --bloom-strength: seeds the panel value
@@ -202,6 +205,10 @@ Args parseArgs(int argc, char** argv) {
       args.taaSharpen = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--env") == 0 && i + 1 < argc)
       args.envPath = argv[++i];
+    else if (std::strcmp(argv[i], "--no-auto-exposure") == 0)
+      args.noAutoExposure = true;
+    else if (std::strcmp(argv[i], "--exposure-bias") == 0 && i + 1 < argc)
+      args.exposureBias = static_cast<float>(std::atof(argv[++i]));
     else if (std::strcmp(argv[i], "--no-bloom") == 0)
       args.noBloom = true;
     else if (std::strcmp(argv[i], "--bloom-strength") == 0 && i + 1 < argc)
@@ -479,6 +486,12 @@ struct VgDebugState {
   // needs > 1 to bloom). 16: the Vulture's eyes sit behind a 91%
   // opaque visor - x16 transmits ~1.4 HDR, enough to read as a glow
   // with a halo at s = 0.08 without washing the hue out (x30 does).
+  // Histogram auto exposure (ExposurePass, UE AEM_Histogram); off =
+  // the manual `exposure` above. autoScale: the GPU's last adapted
+  // scale (panel readout; also the TAA's HDR weight).
+  bool autoExposure = true;
+  kenshin::renderer::ExposureSettings exposureSettings;
+  float autoScale = 0.0f, autoAvgLum = 0.0f;
   bool bloom = true;
   kenshin::f32 bloomStrength = 0.08f;
   kenshin::f32 emissiveStrength = 16.0f;
@@ -610,6 +623,7 @@ int main(int argc, char** argv) {
   kenshin::renderer::TonemapPass tonemapPass;  // M8.3 HDR chain tail
   kenshin::renderer::TaaPass taaPass;          // M9 temporal resolve
   kenshin::renderer::BloomPass bloomPass;      // HDR bloom chain
+  kenshin::renderer::ExposurePass exposurePass;  // histogram auto exposure
   // glTF BLEND materials: the builder's <name>.tmesh side file, drawn
   // forward-lit after the deferred lighting (UE: translucency never
   // goes through Nanite).
@@ -625,6 +639,7 @@ int main(int argc, char** argv) {
   std::vector<glm::vec4> realBounds;  // M9.2: instance bounds pre-parking
   bool taaReady = false;
   bool bloomTried = false;
+  bool exposureTried = false;
   glm::mat4 taaPrevViewProj{1.0f};  // UNJITTERED previous frame VP
   bool taaPrevValid = false;
   int taaWarmup = 0;  // frames since (re)validation
@@ -657,7 +672,15 @@ int main(int argc, char** argv) {
       kgeoMode = true;
       vgDebug.pixelThreshold = args.lodThreshold;
       if (args.hwThresholdPx > 0.0f) vgDebug.hwThresholdPx = args.hwThresholdPx;
-      if (args.exposure > 0.0f) vgDebug.exposure = args.exposure;
+      // An explicit --exposure pins the old manual pipeline (existing
+      // command lines keep reproducing their images).
+      if (args.exposure > 0.0f) {
+        vgDebug.exposure = args.exposure;
+        vgDebug.autoExposure = false;
+      }
+      if (args.noAutoExposure) vgDebug.autoExposure = false;
+      if (args.exposureBias > -1e8f)
+        vgDebug.exposureSettings.biasEv = args.exposureBias;
       if (args.envIntensity >= 0.0f) vgDebug.envIntensity = args.envIntensity;
       if (args.noBloom) vgDebug.bloom = false;
       if (args.taaSharpen >= 0.0f) vgDebug.taaSharpen = args.taaSharpen;
@@ -1047,8 +1070,21 @@ int main(int argc, char** argv) {
             ImGui::ColorEdit3("ground (no probe)", &vgDebug.groundColor.x);
             ImGui::SliderFloat("ambient (no probe)", &vgDebug.ambient, 0.0f,
                                0.5f, "%.3f");
-            ImGui::SliderFloat("exposure", &vgDebug.exposure, 0.1f, 4.0f,
-                               "%.2f");
+            ImGui::Checkbox("auto exposure", &vgDebug.autoExposure);
+            if (vgDebug.autoExposure) {
+              auto& es = vgDebug.exposureSettings;
+              ImGui::SliderFloat("exposure bias (EV)", &es.biasEv, -4.0f,
+                                 4.0f, "%.2f");
+              ImGui::SliderFloat("adapt up (EV/s)", &es.speedUp, 0.1f, 10.0f,
+                                 "%.1f");
+              ImGui::SliderFloat("adapt down (EV/s)", &es.speedDown, 0.1f,
+                                 10.0f, "%.1f");
+              ImGui::Text("scale %.3f  avg lum %.4f", vgDebug.autoScale,
+                          vgDebug.autoAvgLum);
+            } else {
+              ImGui::SliderFloat("exposure", &vgDebug.exposure, 0.1f, 4.0f,
+                                 "%.2f");
+            }
             ImGui::Checkbox("bloom", &vgDebug.bloom);
             if (vgDebug.bloom)
               ImGui::SliderFloat("bloom strength", &vgDebug.bloomStrength,
@@ -1632,6 +1668,10 @@ int main(int argc, char** argv) {
         bloomTried = true;
         bloomPass.init(*vgBackend, shaders);
       }
+      if (!exposureTried) {
+        exposureTried = true;
+        exposurePass.init(*vgBackend, shaders);
+      }
       if (chainReady && decodeReady) {
         // Same camera, same frame: the chain's inputs and the decode's
         // matrices cannot disagree anymore.
@@ -2106,7 +2146,11 @@ int main(int argc, char** argv) {
             tf.blend = taaPrevValid && taaWarmup > 1 ? 0.95f : 0.0f;
             tf.jitter = taaJitterUV;
             tf.sharpen = vgDebug.taaSharpen;
-            tf.exposure = vgDebug.exposure;
+            // The HDR weight's exposure: the adapted scale (a frame or
+            // two behind) under auto exposure.
+            tf.exposure = vgDebug.autoExposure && vgDebug.autoScale > 0.0f
+                              ? vgDebug.autoScale
+                              : vgDebug.exposure;
             taaPass.draw(*vgBackend, tf, ci.width, ci.height);
             resolvedByTaa = true;
             taaRanThisFrame = true;
@@ -2114,6 +2158,29 @@ int main(int argc, char** argv) {
           taaPrevViewProj = camera.viewProjMatrix();
           taaPrevValid = true;
           ++taaWarmup;
+          // Auto exposure over the resolved HDR (before bloom/tonemap
+          // read it). Headless runs jump to the target every frame:
+          // screenshots stay deterministic whatever the frame timing.
+          bool autoExposed = false;
+          if (vgDebug.autoExposure && exposurePass.ready()) {
+            kenshin::renderer::ExposureView ev;
+            ev.invViewProj = glm::inverse(camera.viewProjMatrix());
+            ev.envTexture = envTexture;
+            ev.envMip = std::max(envMaxLod - 5.0f, 0.0f);  // 1K -> 32x16
+            ev.envIntensity = vgDebug.envIntensity;
+            autoExposed = exposurePass.draw(
+                *vgBackend, vgDebug.exposureSettings, ev, resolvedByTaa,
+                ci.width, ci.height, dt, args.frames >= 0);
+            float st[4];
+            if (exposurePass.readState(*vgBackend, st)) {
+              vgDebug.autoScale = st[0];
+              vgDebug.autoAvgLum = st[2];
+              if (isLastFrame)
+                KENSHIN_INFO("[exposure] scale {:.4f} target {:.4f} avg lum "
+                             "{:.5f}",
+                             st[0], st[1], st[2]);
+            }
+          }
           // Bloom over the resolved HDR (Final view only - the debug
           // views' false colors must stay readable).
           const bool bloomed =
@@ -2131,7 +2198,8 @@ int main(int argc, char** argv) {
                 resolvedByTaa ? vgDebug.taaSharpen : 0.0f,
                 bloomed ? vgDebug.bloomStrength : 0.0f,
                 1.0f / static_cast<float>(
-                           kenshin::renderer::BloomPass::kLevels));
+                           kenshin::renderer::BloomPass::kLevels),
+                autoExposed ? exposurePass.stateBuffer() : ~0u);
         }
       }
     }
@@ -2236,6 +2304,7 @@ int main(int argc, char** argv) {
     decodePass.onShutdown(*vgBackend);
     if (lightingReady) lightingPass.onShutdown(*vgBackend);
     if (tonemapReady) tonemapPass.onShutdown(*vgBackend);
+    exposurePass.onShutdown(*vgBackend);
     if (taaReady) taaPass.onShutdown(*vgBackend);
     translucentPass.onShutdown(*vgBackend);
     if (imposterReady) imposterPass.onShutdown(*vgBackend);

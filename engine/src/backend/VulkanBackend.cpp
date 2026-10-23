@@ -2003,6 +2003,145 @@ bool VulkanBackend::drawBloom(const u32* downPipelines,
   return true;
 }
 
+u32 VulkanBackend::createExposurePipeline(const ComputePipelineInfo& info) {
+  return m_impl->pipelines.createCompute(m_impl->device.device, info, true);
+}
+
+bool VulkanBackend::drawExposure(u32 histogramPipeline, u32 adaptPipeline,
+                                 u32 histogram, u32 state, u32 envTexture,
+                                 bool fromTaa, u32 width, u32 height,
+                                 const void* push, usize pushBytes) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || width == 0 || height == 0 || pushBytes > 128)
+    return false;
+  if (fromTaa && !impl.taaActive) return false;
+  const auto computeOk = [&](u32 h) {
+    return h != kInvalidPipelineHandle && h != 0 &&
+           h <= impl.pipelines.computeCount() &&
+           impl.pipelines.compute(h).valid &&
+           impl.pipelines.compute(h).bindingCount > 0;
+  };
+  if (!computeOk(histogramPipeline) || !computeOk(adaptPipeline) ||
+      !impl.buffers.valid(histogram) || !impl.buffers.valid(state))
+    return false;
+  FrameSlot& slot = impl.frameSync.slots[impl.frameSync.frameIndex];
+  if (slot.hdr.view == VK_NULL_HANDLE) return false;
+  const VkImage sceneImage =
+      fromTaa ? impl.taa[impl.taaParity].image : slot.hdr.image;
+  const VkImageView sceneView =
+      fromTaa ? impl.taa[impl.taaParity].view : slot.hdr.view;
+
+  impl.cmd.endPass();
+  const VkCommandBuffer cb = impl.cmd.cmd();
+  const vkutil::ScopedDebugLabel label{cb, "auto exposure"};
+  const auto memoryBarrier = [&](VkPipelineStageFlags2 srcStage,
+                                 VkAccessFlags2 srcAccess,
+                                 VkPipelineStageFlags2 dstStage,
+                                 VkAccessFlags2 dstAccess) {
+    const VkMemoryBarrier2 mb{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = srcStage,
+        .srcAccessMask = srcAccess,
+        .dstStageMask = dstStage,
+        .dstAccessMask = dstAccess,
+    };
+    const VkDependencyInfo dep{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &mb,
+    };
+    vkCmdPipelineBarrier2(cb, &dep);
+  };
+  // The scene HDR reached SHADER_READ with a FRAGMENT-stage destination
+  // (TAA / lighting); widen the visibility to this compute read.
+  CommandContext::pipelineBarrier(
+      cb, CommandContext::imageBarrier(
+              sceneImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              VK_ACCESS_2_SHADER_SAMPLED_READ_BIT));
+  // Clear the histogram: WAR vs the previous frame's adapt read (one
+  // queue - barrier scopes span submission order), then fill -> compute.
+  memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+  vkCmdFillBuffer(cb, impl.buffers.buffer(histogram), 0, VK_WHOLE_SIZE, 0u);
+  memoryBarrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+  const VkDescriptorImageInfo sceneInfo{
+      .sampler = impl.linearSampler,
+      .imageView = sceneView,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  // Binding 3 (Sampler2DArray envMap) needs an ARRAYED view - a 2D view
+  // there is a view-type mismatch (the IBL cache-poison lesson). Without
+  // an env texture the auto exposure does not run.
+  if (!(envTexture < impl.textures.size() && impl.textureAlive[envTexture]))
+    return false;
+  const VkDescriptorImageInfo envInfo{
+      .sampler = impl.linearSampler,
+      .imageView = impl.textures[envTexture].view,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  const u32 bindingBuffers[3] = {histogram, histogram, state};
+  const auto dispatch = [&](u32 handle, u32 gx, u32 gy) {
+    const PipelineStore::Compute& cp = impl.pipelines.compute(handle);
+    const VkDescriptorSet set = cp.sets[impl.frameSync.frameIndex];
+    std::vector<VkDescriptorBufferInfo> bufInfos(cp.bindingCount);
+    std::vector<VkWriteDescriptorSet> writes(cp.bindingCount);
+    for (u32 b = 0; b < cp.bindingCount; ++b) {
+      writes[b] = VkWriteDescriptorSet{
+          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+          .dstSet = set,
+          .dstBinding = b,
+          .descriptorCount = 1,
+          .descriptorType = cp.bindingTypes[b],
+      };
+      if (cp.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+        writes[b].pImageInfo = b == 0 ? &sceneInfo : &envInfo;
+      } else {
+        const u32 buf = bindingBuffers[(std::min)(b, 2u)];
+        bufInfos[b] = VkDescriptorBufferInfo{
+            .buffer = impl.buffers.buffer(buf),
+            .offset = 0,
+            .range = impl.buffers.size(buf),
+        };
+        writes[b].pBufferInfo = &bufInfos[b];
+      }
+    }
+    vkUpdateDescriptorSets(impl.device.device, cp.bindingCount, writes.data(),
+                           0, nullptr);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp.pipeline);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp.layout, 0,
+                            1, &set, 0, nullptr);
+    vkCmdPushConstants(cb, cp.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       static_cast<u32>(pushBytes), push);
+    vkCmdDispatch(cb, gx, gy, 1);
+  };
+  dispatch(histogramPipeline, (width + 15) / 16, (height + 15) / 16);
+  memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+  dispatch(adaptPipeline, 1, 1);
+  // state -> the tonemap's fragment read (and the host's panel readout
+  // after the frame fence).
+  memoryBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                    VK_PIPELINE_STAGE_2_HOST_BIT,
+                VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                    VK_ACCESS_2_HOST_READ_BIT);
+  return true;
+}
+
 u32 VulkanBackend::createShadowDecodePipeline(
     const FullscreenPipelineInfo& info) {
   return m_impl->pipelines.createShadowDecode(m_impl->device.device, info);
@@ -2561,7 +2700,8 @@ void VulkanBackend::drawTaa(u32 pipeline, const u32* bufferHandles,
 }
 
 void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
-                                u32 width, u32 height, bool fromTaa) {
+                                u32 width, u32 height, bool fromTaa,
+                                u32 exposureState) {
   Impl& impl = *m_impl;
   if (!impl.frameActive || pipeline == kInvalidPipelineHandle ||
       pipeline > impl.pipelines.fullscreenCount())
@@ -2574,6 +2714,14 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
   // fromTaa: sample the freshly written resolve instead of the raw
   // slot HDR (impl.taaParity points at it after drawTaa).
   if (fromTaa && !impl.taaActive) return;
+  // The SSBO slot (exposure state) must be written - a draw with an
+  // unwritten statically-used binding is invalid.
+  for (u32 b = 0; b < fs.bindingCount; ++b)
+    if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
+        !impl.buffers.valid(exposureState)) {
+      KENSHIN_ERROR("[vulkan] drawTonemap: no exposure state buffer");
+      return;
+    }
 
   impl.cmd.endPass();
   {
@@ -2592,6 +2740,13 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
     VkDescriptorImageInfo bloomInfo = imageInfo;
     if (impl.bloomActive) bloomInfo.imageView = impl.bloom[0].view;
     u32 nextImage = 0;
+    VkDescriptorBufferInfo stateInfo{};
+    if (impl.buffers.valid(exposureState))
+      stateInfo = VkDescriptorBufferInfo{
+          .buffer = impl.buffers.buffer(exposureState),
+          .offset = 0,
+          .range = impl.buffers.size(exposureState),
+      };
     std::vector<VkWriteDescriptorSet> writes(fs.bindingCount);
     for (u32 b = 0; b < fs.bindingCount; ++b) {
       writes[b] = VkWriteDescriptorSet{
@@ -2603,10 +2758,9 @@ void VulkanBackend::drawTonemap(u32 pipeline, const void* push, usize pushBytes,
       };
       if (fs.bindingTypes[b] == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
         writes[b].pImageInfo = nextImage++ == 0 ? &imageInfo : &bloomInfo;
+      } else {
+        writes[b].pBufferInfo = &stateInfo;  // binding 2: exposure state
       }
-      // The tonemap shader declares no buffer bindings - anything else
-      // in the reflection is a programming error; the dense mixed
-      // layout leaves unwritten SSBO slots harmless.
     }
     vkUpdateDescriptorSets(impl.device.device, fs.bindingCount, writes.data(),
                            0, nullptr);

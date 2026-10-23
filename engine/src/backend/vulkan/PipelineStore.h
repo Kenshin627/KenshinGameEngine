@@ -36,6 +36,11 @@ class PipelineStore {
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkDescriptorSet sets[kMaxFramesInFlight] = {};
     bool valid = false;
+    /// Mixed-layout variant only (createCompute(..., true)): per-binding
+    /// descriptor types + a 128-byte compute push range. Classic SSBO
+    /// compute pipelines leave bindingCount 0 and carry no push range.
+    VkDescriptorType bindingTypes[DescriptorCache::kMaxMixedBindings] = {};
+    u32 bindingCount = 0;
   };
 
   /// Fullscreen entry: graphics pipeline + its SSBO descriptor sets.
@@ -115,9 +120,12 @@ class PipelineStore {
   /// attachment; SSBO layout like the classic fullscreen pipelines).
   u32 createShadowDecode(VkDevice device,
                          const IRenderBackend::FullscreenPipelineInfo& info);
-  /// Persistent compute pipeline (in-frame chain passes).
+  /// Persistent compute pipeline (in-frame chain passes). mixedLayout:
+  /// sampler + SSBO bindings from reflection and a 128-byte push range
+  /// (the auto exposure histogram reads the HDR image).
   u32 createCompute(VkDevice device,
-                    const IRenderBackend::ComputePipelineInfo& info);
+                    const IRenderBackend::ComputePipelineInfo& info,
+                    bool mixedLayout = false);
   const Compute& compute(u32 handle) const { return m_compute[handle - 1]; }
   u32 computeCount() const { return static_cast<u32>(m_compute.size()); }
   const Fullscreen& fullscreen(u32 handle) const {

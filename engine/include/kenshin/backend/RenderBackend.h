@@ -310,8 +310,11 @@ class IRenderBackend {
   /// the exposure/tonemapped LDR into the frame color target via a
   /// depth-less color scope. Follows drawLighting every deferred frame.
   virtual u32 createTonemapPipeline(const FullscreenPipelineInfo& info) = 0;
+  /// `exposureState` binds to the shader's SSBO slot (exposure.slang's
+  /// state, or the TonemapPass dummy when auto exposure is off).
   virtual void drawTonemap(u32 pipeline, const void* push, usize pushBytes,
-                           u32 width, u32 height, bool fromTaa = false) = 0;
+                           u32 width, u32 height, bool fromTaa = false,
+                           u32 exposureState = kInvalidBufferHandle) = 0;
   /// M9 TAA resolve: samples this slot's HDR + GBuffer A + the history
   /// ping-pong pair (all backend-internal) and writes the resolved
   /// RGBA16F; the SSBO `bufferHandles` carry the matrices/blend block
@@ -350,9 +353,9 @@ class IRenderBackend {
   /// downsamples into backend-owned half-resolution targets (one
   /// pipeline instance per pass - a descriptor set is written once per
   /// frame), then levels-1 tent upsamples blended additively into the
-  /// next larger level. `push` holds one 32B block per pass, downs
-  /// first. A following drawTonemap samples the top level. Returns
-  /// false when nothing was recorded (tonemap then gets no bloom).
+  /// next larger level. A following drawTonemap samples the top level.
+  /// Returns false when nothing was recorded (tonemap then gets no
+  /// bloom).
   virtual bool drawBloom(const u32* downPipelines, const u32* upPipelines,
                          u32 levels, bool fromTaa, u32 width, u32 height) {
     (void)downPipelines, (void)upPipelines, (void)levels, (void)fromTaa;
@@ -504,6 +507,30 @@ class IRenderBackend {
   };
   virtual u32 createComputePipeline(const ComputePipelineInfo& info) = 0;
   virtual void destroyComputePipeline(u32 pipeline) = 0;
+  /// Auto exposure (exposure.slang): a mixed-layout compute pipeline -
+  /// sampler + SSBO bindings from reflection, 128-byte compute push.
+  virtual u32 createExposurePipeline(const ComputePipelineInfo& info) {
+    (void)info;
+    return kInvalidPipelineHandle;
+  }
+  /// Record the exposure passes over this frame's resolved HDR (the TAA
+  /// output when `fromTaa`): clear `histogram`, the histogram pass
+  /// (16x16 groups over width x height), then the one-group adapt pass
+  /// writing `state`, which is made visible to the following
+  /// drawTonemap's fragment reads. Binding i of either pipeline takes
+  /// the scene image (sampler 0), `envTexture` (sampler 3, arrayed view;
+  /// ~0u = the scene image - the shader then never samples it) or
+  /// {-, histogram, state}[i] (SSBO); the same `push` feeds both.
+  /// Returns false when nothing was recorded.
+  virtual bool drawExposure(u32 histogramPipeline, u32 adaptPipeline,
+                            u32 histogram, u32 state, u32 envTexture,
+                            bool fromTaa, u32 width, u32 height,
+                            const void* push, usize pushBytes) {
+    (void)histogramPipeline, (void)adaptPipeline, (void)histogram;
+    (void)state, (void)envTexture, (void)fromTaa, (void)width, (void)height;
+    (void)push, (void)pushBytes;
+    return false;
+  }
   /// Record a dispatch into the CURRENT frame's command buffer. Writes
   /// this frame slot's descriptor set (like drawFullscreen) - safe to
   /// re-dispatch with changing buffer contents every frame.
