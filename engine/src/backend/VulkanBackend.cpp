@@ -2348,7 +2348,11 @@ void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
     if (!impl.shadowMap[level].create(
             impl.device.allocator, impl.device.device, impl.shadowMapSize,
             impl.shadowMapSize, VK_FORMAT_R32_SFLOAT,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            // TRANSFER_DST: the shadows-off path clears to "far" with
+            // vkCmdClearColorImage (missing, it was a validation error
+            // whenever shadows were disabled).
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
       KENSHIN_ERROR("[vulkan] shadow target creation failed");
       return;
@@ -2376,9 +2380,17 @@ void VulkanBackend::drawShadowDecode(u32 pipeline, const u32* bufferHandles,
     }
   }
 
+  // Invalid inputs (the shadow chain has not run - e.g. --no-shadows)
+  // take the clear-to-far path instead of returning: the target must
+  // still end in SHADER_READ, which drawLighting binds unconditionally
+  // (an early return here left a fresh target in COLOR_ATTACHMENT - a
+  // validation error every frame with shadows off).
   std::vector<VkDescriptorBufferInfo> infos(bufferCount);
-  for (u32 i = 0; i < bufferCount; ++i) {
-    if (!impl.buffers.valid(bufferHandles[i])) return;
+  for (u32 i = 0; i < bufferCount && shadowEnabled; ++i) {
+    if (!impl.buffers.valid(bufferHandles[i])) {
+      shadowEnabled = false;
+      break;
+    }
     infos[i] = VkDescriptorBufferInfo{
         .buffer = impl.buffers.buffer(bufferHandles[i]),
         .offset = 0,
