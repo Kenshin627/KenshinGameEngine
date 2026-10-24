@@ -53,6 +53,7 @@ DagMaterial recordOf(const assets::MaterialDesc& m, const manager::AssetManager&
   d.texRef = ref(m.baseColorTexture);
   d.mrTexRef = ref(m.metallicRoughnessTexture);
   d.nrmTexRef = ref(m.normalTexture);
+  d.emTexRef = ref(m.emissiveTexture);
   // AO rides the MR map's R channel (ORM packing) - only then.
   d.occlusion = m.occlusionTexture.valid() &&
                         m.occlusionTexture.texture == m.metallicRoughnessTexture.texture
@@ -102,7 +103,7 @@ std::unique_ptr<WorldRenderer::Build> WorldRenderer::makeBuild(const ecs::World&
   std::vector<Item> items;
   std::unordered_map<core::Guid, u32> meshIndex;
   std::vector<const ClusterDag*> dags;
-  usize notes[4] = {};  // translucent, separate AO, emissive map, alpha mask
+  usize notes[3] = {};  // translucent, separate AO, alpha mask
   for (const ecs::Entity e : world.preOrder()) {
     const ecs::MeshRenderer* mr = world.tryGet<ecs::MeshRenderer>(e);
     if (mr == nullptr || !mr->visible || mr->mesh.isNull()) continue;
@@ -141,8 +142,7 @@ std::unique_ptr<WorldRenderer::Build> WorldRenderer::makeBuild(const ecs::World&
     out = recordOf(*m, assets);
     if (m->occlusionTexture.valid() && m->occlusionTexture.texture != m->metallicRoughnessTexture.texture)
       ++notes[1];
-    if (m->emissiveTexture.valid()) ++notes[2];
-    if (m->alphaMode == assets::MaterialDesc::AlphaMode::Mask) ++notes[3];
+    if (m->alphaMode == assets::MaterialDesc::AlphaMode::Mask) ++notes[2];
     return true;
   };
   build->scene = std::make_unique<VirtualGeometryScene>();
@@ -276,8 +276,7 @@ std::unique_ptr<WorldRenderer::Build> WorldRenderer::makeBuild(const ecs::World&
 
   if (notes[0]) KENSHIN_WARN("[world] {} translucent sub-mesh(es) not drawn yet (BLEND, 1.4)", notes[0]);
   if (notes[1]) KENSHIN_WARN("[world] {} material(s) with a separate occlusion map: AO ignored", notes[1]);
-  if (notes[2]) KENSHIN_WARN("[world] {} material(s) with an emissive map: map ignored", notes[2]);
-  if (notes[3]) KENSHIN_WARN("[world] {} alpha-mask material(s): cutoff ignored", notes[3]);
+  if (notes[2]) KENSHIN_WARN("[world] {} alpha-mask material(s): cutoff ignored", notes[2]);
   KENSHIN_INFO("[world] built: {} instances, {} meshes, {} material records, {} streamed pages",
                build->instances, meshCount, scene.materialCount(), scene.pageCount());
   return build;

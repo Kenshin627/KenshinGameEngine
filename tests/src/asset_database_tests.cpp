@@ -417,6 +417,7 @@ TEST_CASE("asset db: model sub-assets with derived guids", "[assetdb]") {
   CHECK(artifact(db, "mesh/0")->materials == quadSlots);
   CHECK(artifact(db, "mesh/0#translucent")->materials == quadSlots);
   CHECK(artifact(db, "material/0")->materials.empty());
+  CHECK(artifact(db, "mesh/1")->materials == std::vector<core::Guid>{core::Guid()});  // Tri: no material
   for (const auto& a : model->artifacts) {
     std::string bytes;
     REQUIRE(util::readFile(db.artifactPath(a.guid), bytes));
@@ -425,6 +426,7 @@ TEST_CASE("asset db: model sub-assets with derived guids", "[assetdb]") {
   {
     AssetDatabase again = openDb(p);
     CHECK(artifact(again, "mesh/0")->materials == quadSlots);
+    CHECK(artifact(again, "mesh/1")->materials == std::vector<core::Guid>{core::Guid()});
     CHECK(artifact(again, "texture/0.srgb")->sha1 == artifact(db, "texture/0.srgb")->sha1);
     CHECK_FALSE(artifact(again, "prefab")->sha1.empty());
   }

@@ -169,6 +169,10 @@ struct ClusterDag {
     // itself rides the MR map's R channel (ORM packing; the builder
     // composes it in when the asset stores AO separately).
     f32 occlusion = 0.0f;
+    // 1.3e: the emissive map (sRGB colour; multiplies `emissive`).
+    // Runtime only - resolved from material assets like texRef; .kgeo
+    // files carry no emissive map.
+    u32 emTexRef = 0xFFFFFFFFu;
   };
   std::vector<DagMaterial> materials;
   /// Per-cluster material id into `materials` (u8 range; stamped into

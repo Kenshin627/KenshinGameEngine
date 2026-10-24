@@ -24,7 +24,7 @@ using serialization::Json;
 u32 baseImporterVersion(AssetType type) {
   switch (type) {
     case AssetType::Texture: return 1;
-    case AssetType::Model: return 2;  // 2: mesh slot materials
+    case AssetType::Model: return 3;  // 2: mesh slot materials; 3: one-primitive conditioning
     case AssetType::Material: return 1;
     case AssetType::Scene: return 1;
     case AssetType::Prefab: return 1;
@@ -181,7 +181,7 @@ bool cookModel(ImportContext& ctx, importer::ImportedModel& model, std::string& 
     std::vector<GltfMaterial> slots;
     std::vector<core::Guid> slotGuids;
     for (const std::string& key : m.slotMaterials) {
-      slotGuids.push_back(sub(key));
+      slotGuids.push_back(key.empty() ? core::Guid() : sub(key));  // no material: null
       GltfMaterial gm;
       for (const importer::ImportedMaterial& im : model.materials)
         if (im.key == key) {

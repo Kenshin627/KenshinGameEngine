@@ -106,6 +106,8 @@ Args parseArgs(int argc, char** argv) {
       args.grid = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--wall") == 0)
       args.wall = true;
+    else if (std::strcmp(argv[i], "--frame") == 0 && i + 1 < argc)
+      std::sscanf(argv[++i], "%f,%f,%f", &args.frameYaw, &args.framePitch, &args.frameScale);
     else if (std::strcmp(argv[i], "--project") == 0 && i + 1 < argc)
       args.project = argv[++i];
     else if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc)

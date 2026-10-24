@@ -18,8 +18,8 @@
 //   the page streamer, which reopens the mesh files by path for every
 //   page, before a re-import replaces them.
 // * Not drawn yet (logged per build): translucent sub-meshes (BLEND),
-//   occlusion maps not packed into the metallic-roughness map, emissive
-//   maps, alpha-mask cutoffs.
+//   occlusion maps not packed into the metallic-roughness map,
+//   alpha-mask cutoffs.
 
 #include <memory>
 #include <string>

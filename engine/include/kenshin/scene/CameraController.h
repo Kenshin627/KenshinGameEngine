@@ -40,6 +40,10 @@ class CameraController {
   f32 fovYDeg = 60.0f;  // re-applied to the camera each frame
   f32 nearPlane = 0.01f;
   f32 farPlane = 1000.0f;
+  /// Orbit distance range (zoom and the camera's own clamp). Scale it
+  /// with the content: a 2 cm prop needs a floor well below 0.1 m.
+  f32 minDistance = 0.1f;
+  f32 maxDistance = 100.0f;
 
   /// Initial placement from the CLI/defaults. Angles in degrees:
   /// yaw = azimuth around +Z, pitch = elevation above the X/Y plane.

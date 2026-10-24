@@ -123,17 +123,18 @@ bool VirtualGeometryScene::init(backend::IRenderBackend& backend) {
 
 void VirtualGeometryScene::packMaterial(const geometry::ClusterDag::DagMaterial& mat,
                                         f32 (&r)[kMaterialFloats]) {
-  // decode_material's GpuMaterial: kdTex, params, emissive (3 float4;
-  // emissive.w = occlusion strength, live only with an MR map). The
-  // texture slots carry bindless refs as raw bits (asuint in the
-  // shaders, 1.3a).
+  // decode_material's GpuMaterial: kdTex, params, emissive, ext (4
+  // float4; emissive.w = occlusion strength, live only with an MR map;
+  // ext.x = the emissive map). The texture slots carry bindless refs as
+  // raw bits (asuint in the shaders, 1.3a).
   const bool hasMr = mat.mrTexRef != backend::kNoTexture;
   const f32 v[kMaterialFloats] = {mat.kd[0],       mat.kd[1],       mat.kd[2],
                                   std::bit_cast<f32>(mat.texRef), mat.roughness, mat.metallic,
                                   std::bit_cast<f32>(mat.mrTexRef),
                                   std::bit_cast<f32>(mat.nrmTexRef), mat.emissive[0],
                                   mat.emissive[1], mat.emissive[2],
-                                  hasMr ? mat.occlusion : 0.0f};
+                                  hasMr ? mat.occlusion : 0.0f,
+                                  std::bit_cast<f32>(mat.emTexRef), 0.0f, 0.0f, 0.0f};
   std::memcpy(r, v, sizeof(v));
 }
 

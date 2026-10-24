@@ -276,6 +276,38 @@ TEST_CASE("asset manager: materials hold their textures; a reload swaps them", "
   be->shutdown();
 }
 
+// ── Scene documents ────────────────────────────────────────────
+
+TEST_CASE("scene assets: a scene, a model and a prefab sub-asset load as worlds", "[hotreload]") {
+  Fixture f("documents");
+  const auto meshRenderers = [](const ecs::World& w) {
+    usize n = 0;
+    for (const ecs::Entity e : w.preOrder()) n += w.has<ecs::MeshRenderer>(e) ? 1 : 0;
+    return n;
+  };
+  std::string err;
+  INFO(err);
+  ecs::World world;
+  REQUIRE(scene::loadWorldAsset(f.db, f.guid("assets/scenes/main.kscene"), f.registry, world, &err));
+  CHECK(meshRenderers(world) == 3);
+  // The model: its prefab (one instance of each node's mesh), whether
+  // named by the model's Guid or by the prefab sub-asset's.
+  const core::Guid model = f.guid("assets/models/spheres.gltf");
+  CHECK(scene::worldDocumentOf(f.db, model) == f.sub("assets/models/spheres.gltf", "prefab"));
+  ecs::World fromModel;
+  REQUIRE(scene::loadWorldAsset(f.db, model, f.registry, fromModel, &err));
+  CHECK(meshRenderers(fromModel) == 2);
+  ecs::World fromPrefab;
+  REQUIRE(scene::loadWorldAsset(f.db, f.sub("assets/models/spheres.gltf", "prefab"), f.registry,
+                                fromPrefab, &err));
+  CHECK(meshRenderers(fromPrefab) == 2);
+  // Not documents: a texture, a mesh sub-asset; the world is untouched.
+  CHECK_FALSE(scene::loadWorldAsset(f.db, f.guid("assets/textures/swatch.png"), f.registry, world, &err));
+  CHECK_FALSE(scene::loadWorldAsset(f.db, f.sub("assets/models/spheres.gltf", "mesh/0"), f.registry,
+                                    world, &err));
+  CHECK(meshRenderers(world) == 3);
+}
+
 // ── WorldRenderer ──────────────────────────────────────────────
 
 TEST_CASE("world renderer: a project scene's instances, slots and overrides", "[gpu][hotreload]") {
@@ -314,7 +346,8 @@ TEST_CASE("world renderer: a project scene's instances, slots and overrides", "[
     CHECK(am.references(swatch) == 1);
     const auto record = [&](u32 i) {
       const auto d = wr.scene()->materialData();
-      return std::vector<f32>(d.begin() + i * 12, d.begin() + (i + 1) * 12);
+      constexpr u32 n = renderer::VirtualGeometryScene::kMaterialFloats;
+      return std::vector<f32>(d.begin() + i * n, d.begin() + (i + 1) * n);
     };
     const auto bits = [](f32 v) { return std::bit_cast<u32>(v); };
     std::vector<std::vector<f32>> recs = {record(0), record(1), record(2)};

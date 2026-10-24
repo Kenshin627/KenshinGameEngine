@@ -177,6 +177,20 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME include_case
         COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tools/check_include_case.py)
 endif()
+
+# ── Khronos sample gate (roadmap 1.3e): only with a glTF-Sample-Assets
+# checkout (tools/fetch_gltf_samples.py) and Pillow - configure with
+# -DKENSHIN_GLTF_SAMPLES=<dir>. Renders every curated model through the
+# asset database and compares against tests/data/khronos/*.png.
+set(KENSHIN_GLTF_SAMPLES "" CACHE PATH
+    "glTF-Sample-Assets checkout; enables the khronos_gate test")
+if(KENSHIN_GLTF_SAMPLES AND Python3_Interpreter_FOUND)
+    add_test(NAME khronos_gate
+        COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tools/khronos_gate.py
+            --samples ${KENSHIN_GLTF_SAMPLES} --demo $<TARGET_FILE:KENSHINDemo>
+            --out ${CMAKE_CURRENT_BINARY_DIR}/khronos --check)
+    set_tests_properties(khronos_gate PROPERTIES LABELS "gpu;khronos" TIMEOUT 3600)
+endif()
 set_tests_properties(kenshin_tests PROPERTIES
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}   # resolve tests/assets relative paths
 )

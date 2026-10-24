@@ -61,6 +61,10 @@ struct Args {
   // --cam: yaw,pitch,dist[,target xyz] in degrees/meters; nullopt = the
   // controller's interactive defaults.
   bool hasCam = false;
+  // --frame yaw,pitch[,scale]: auto-frame the loaded content's bounds
+  // from this angle at scale x its radius (defaults 45, 6, 2.8). Yaw 180
+  // looks at a glTF model's front (+Z there, -Y here).
+  float frameYaw = 45.0f, framePitch = 6.0f, frameScale = 2.8f;
   float camYaw = 0, camPitch = 0, camDist = 0;
   float camTarget[3] = {0, 0, 0};
   int viewMode = -1;            // --view; -1 = leave the panel state at Final

@@ -963,6 +963,103 @@ settings hash, importer version), so stale caches rebuild themselves.
   - ctest 12/12; validation 0 with auto and manual exposure; GCC check
     131 files clean.
 
+### 1.3e Khronos sample gate — done 2026-10-25 (Windows-verified)
+
+* **Samples**: the 23 curated models of KhronosGroup/glTF-Sample-Assets
+  at commit 8f49239: per model, the plain glTF variant, its reference
+  screenshot and license (334 files, 212.7 MB, verified file by file).
+  - `tools/gltf_samples.sparse` (sparse-checkout patterns) and
+    `tools/fetch_gltf_samples.py` (partial clone + sparse checkout +
+    pin).
+  - The checkout lives outside the repository (here
+    `C:/code/glTF-Sample-Assets`, downloaded by the user).
+* **`tools/khronos_gate.py`**:
+  - Copies each model's glTF folder into a throwaway project, imports
+    it through the asset database, and renders it headless through
+    the 1.3d project mode.
+  - Each model gets a view matching its Khronos screenshot: front,
+    3/4, face-on test boards, Sponza from inside. New demo flag
+    `--frame yaw,pitch,scale` auto-frames the bounds from an angle.
+  - Writes a contact sheet (ours | reference) and a summary of import
+    notes, warnings and validation messages per model.
+  - `--update-refs` / `--check` keep our renders, downscaled to 320 px,
+    as regression references (`tests/data/khronos`, 23 PNGs, 1 MB).
+    The `khronos_gate` ctest registers when `KENSHIN_GLTF_SAMPLES`
+    names a checkout.
+* **Defects the gate found, all fixed**:
+  - **Emissive maps were ignored**. glTF emissive = factor x map, and
+    these files rely on the map to mask a (1,1,1) factor, so
+    WaterBottle, BoomBox, DamagedHelmet, Lantern and MultiUVTest
+    rendered solid white. Material records grow to 16 floats (a 4th
+    float4: the emissive map reference); `decode_material` and
+    `translucent` sample it. The `--kgeo` regressions are byte-identical.
+  - **One-primitive meshes skipped every conditioning pass** (a 1.3b
+    regression). MeshData's "empty triMaterial = all slot 0" shorthand
+    made the double-sided, translucent-split and layer passes return
+    early. TextureSettingsTest's double-sided row showed a cross and
+    TextureCoordinateTest lost its back plane; BLEND on a single
+    primitive stayed opaque. The importer now materialises the slot
+    list (model importer v3).
+  - **Sparse accessors were rejected**; now supported: base values (or
+    zeros without a bufferView), substitutions, bounds checks
+    (SimpleSparseAccessor).
+  - **`byteStride` was ignored**, a latent bug: interleaved vertex
+    data would have been read as garbage. No sample interleaves (all
+    434 strided accessors are tightly packed), so a unit test pins it.
+  - **A model as `--scene` failed** (a 1.3d bug): a model's own Guid
+    names no artifact, so `worldDocumentOf` returned before its
+    "model -> prefab" branch.
+  - **A material-less mesh slot recorded a Guid naming nothing**, and
+    every build logged a failed load. It is now a null Guid.
+  - **Tiny props were unframeable**: the camera's 0.1 m zoom floor and
+    1 cm near plane left BoomBox (2 cm) as a speck. CameraController
+    now owns a distance range (defaults = the old effective 0.1-100),
+    and project framing scales it and the near plane with the bounds.
+* **Classification** (contact sheet by eye against the references):
+  - Correct: Box, BoxTextured, Duck, Avocado, WaterBottle, BoomBox,
+    DamagedHelmet (front view), FlightHelmet, Lantern, AntiqueCamera,
+    MetalRoughSpheres, NormalTangentTest, NormalTangentMirrorTest,
+    TextureCoordinateTest, TextureSettingsTest (every row passes),
+    OrientationTest, SimpleSparseAccessor.
+  - Correct apart from known gaps:
+    - Sponza: alpha-mask foliage renders as cards (W7), and the scene
+      is brighter (auto exposure, studio light).
+    - ABeautifulGame: KHR_materials_transmission / volume ignored.
+    - DamagedHelmet: a separate occlusion map is ignored.
+  - Known gaps, rendering as expected for a viewer without the
+    feature (W7, step 1.4):
+    - AlphaBlendModeTest (MASK cutoff, BLEND);
+    - MultiUVTest (shows the file's own "multiple UVs not supported"
+      fallback texture);
+    - VertexColorTest (its crosses);
+    - TextureTransformTest (KHR_texture_transform).
+* Gate evidence:
+  - All 23 models import and render with 0 validation messages and
+    no warnings beyond the known gaps above.
+  - Same binary twice: 22/23 renders byte-identical. Sponza differs
+    by about 250 px with max delta 3 (depth ties in a dense interior);
+    after downscaling, 1 thumbnail pixel against a budget of 379.
+    `--check` passes 23/23.
+  - New tests:
+    - one-primitive conditioning (double-sided back faces, BLEND
+      split, untouched plain);
+    - interleaved and sparse accessors against dense twins, plus four
+      hostile variants;
+    - scene / model / prefab documents;
+    - the null slot of a material-less mesh.
+    The conditioning and documents tests fail without their fixes.
+  - **Mutation test**: 8 deliberate bugs are all killed.
+    - Emissive map sampling, the emissive ref in the record and the
+      zoom floor fail the gate on exactly the affected models (the 5
+      emissive ones; Avocado + BoomBox).
+    - One-primitive conditioning, byteStride, sparse values and the
+      null slot fail unit tests. Importer mutations do not reach the
+      gate's import cache.
+    - The model document fix fails both.
+  - ctest 13/13 including `khronos_gate` (147 s from an empty cache).
+    Debug: 30 cases (glTF / asset db / hot reload / watcher) pass. GCC
+    check 131 files clean.
+
 
 ## 8. Decisions (2026-10-23)
 

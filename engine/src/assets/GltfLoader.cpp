@@ -376,9 +376,8 @@ struct Accessor {
   u32 componentType = 0;  // 5120..5126
   u32 count = 0;
   u32 perElement = 0;  // SCALAR=1 .. MAT4=16
-  u32 bufferView = 0xFFFFFFFFu;
+  u32 bufferView = 0xFFFFFFFFu;  // none = all zeros (+ sparse values)
   u32 byteOffset = 0;
-  bool sparse = false;
 };
 
 u32 componentSize(u32 t) {
@@ -478,10 +477,89 @@ bool parseAccessor(const JVal& j, Accessor& a, std::string& log) {
   }
   a.bufferView = u32(bvNum);
   a.byteOffset = u32(offNum);
-  a.sparse = j.find("sparse") != nullptr;
-  if (a.sparse) {
-    log = "sparse accessors are not supported (v1)";
+  return true;
+}
+
+/// The accessor's elements as densely packed bytes (1.3e): the
+/// bufferView's byteStride resolved (interleaved vertex data), sparse
+/// substitutions applied, everything bounds-checked. Without a
+/// bufferView the elements start as zeros (glTF 3.6.2.3).
+bool accessorBytes(const Gltf& g, const JVal& j, const Accessor& a, std::vector<u8>& out,
+                   std::string& log) {
+  const usize elem = usize(componentSize(a.componentType)) * a.perElement;
+  out.assign(usize(a.count) * elem, 0);
+  if (a.bufferView != 0xFFFFFFFFu) {
+    usize remaining = 0;
+    const u8* base = g.accessorBase(a, &remaining);
+    if (!base) {
+      log = "accessor out of buffer bounds";
+      return false;
+    }
+    u32 stride = 0;
+    if (!checkedU32(g.bufferViews->at(a.bufferView).numOr("byteStride", 0), stride)) {
+      log = "bufferView byteStride out of range";
+      return false;
+    }
+    if (stride == 0) stride = u32(elem);
+    if (stride < elem) {
+      log = "bufferView byteStride is smaller than the accessor's element";
+      return false;
+    }
+    if (a.count > 0 && usize(a.count - 1) * stride + elem > remaining) {
+      log = "accessor data overruns its buffer";
+      return false;
+    }
+    // Byte-wise copies: the source may be arbitrarily aligned.
+    for (u32 i = 0; i < a.count; ++i)
+      std::memcpy(out.data() + usize(i) * elem, base + usize(i) * stride, elem);
+  }
+  const JVal* sp = j.find("sparse");
+  if (sp == nullptr) return true;
+  u32 n = 0;
+  if (!checkedU32(sp->numOr("count", 0), n) || n == 0 || n > a.count) {
+    log = "sparse count out of range";
     return false;
+  }
+  const JVal* si = sp->find("indices");
+  const JVal* sv = sp->find("values");
+  if (!si || !sv || si->type != JVal::Obj || sv->type != JVal::Obj) {
+    log = "sparse accessor without indices/values";
+    return false;
+  }
+  // Both are tightly packed bufferView ranges (no byteStride by spec).
+  const auto view = [&](const JVal& v, Accessor& r, usize bytes) -> const u8* {
+    if (!checkedU32(v.numOr("bufferView", 4294967295.0), r.bufferView) ||
+        r.bufferView >= g.bufferViews->size() ||
+        !checkedU32(v.numOr("byteOffset", 0), r.byteOffset))
+      return nullptr;
+    usize remaining = 0;
+    const u8* p = g.accessorBase(r, &remaining);
+    return p && bytes <= remaining ? p : nullptr;
+  };
+  Accessor ia;
+  if (!checkedU32(si->numOr("componentType", 0), ia.componentType) ||
+      (ia.componentType != 5121 && ia.componentType != 5123 && ia.componentType != 5125)) {
+    log = "sparse indices must be UNSIGNED_BYTE/SHORT/INT";
+    return false;
+  }
+  const usize isz = componentSize(ia.componentType);
+  const u8* ib = view(*si, ia, usize(n) * isz);
+  Accessor va;
+  const u8* vb = view(*sv, va, usize(n) * elem);
+  if (!ib || !vb) {
+    log = "sparse indices/values out of buffer bounds";
+    return false;
+  }
+  u32 prev = 0;
+  for (u32 k = 0; k < n; ++k) {
+    u32 idx = 0;
+    std::memcpy(&idx, ib + usize(k) * isz, isz);  // little-endian, zero-extended
+    if (idx >= a.count || (k > 0 && idx <= prev)) {
+      log = "sparse indices must be increasing and inside the accessor";
+      return false;
+    }
+    prev = idx;
+    std::memcpy(out.data() + usize(idx) * elem, vb + usize(k) * elem, elem);
   }
   return true;
 }
@@ -516,25 +594,10 @@ bool readFloatVec(Gltf& g, const JVal& acc, std::vector<Vec>& out) {
             std::to_string(sizeOfVec(Vec{}));
     return false;
   }
-  usize remaining = 0;
-  const u8* base = g.accessorBase(a, &remaining);
-  if (!base) {
-    g.log = "accessor out of buffer bounds";
-    return false;
-  }
-  const usize stride = usize(a.count) * a.perElement * 4;
-  if (stride > remaining) {
-    g.log = "accessor data overruns its buffer";
-    return false;
-  }
+  std::vector<u8> bytes;
+  if (!accessorBytes(g, acc, a, bytes, g.log)) return false;
   out.resize(a.count);
-  // Byte-wise copy into the (properly aligned) std::vector - the
-  // source bytes may be arbitrarily aligned inside the buffer.
-  if (stride > 0) {
-    std::vector<u8> tmp(stride);
-    std::memcpy(tmp.data(), base, stride);
-    std::memcpy(out.data(), tmp.data(), stride);
-  }
+  if (!bytes.empty()) std::memcpy(out.data(), bytes.data(), bytes.size());
   return true;
 }
 
@@ -542,17 +605,13 @@ bool readFloatVec(Gltf& g, const JVal& acc, std::vector<Vec>& out) {
 bool readIndices(Gltf& g, const JVal& acc, std::vector<u32>& out) {
   Accessor a;
   if (!parseAccessor(acc, a, g.log)) return false;
-  usize remaining = 0;
-  const u8* base = g.accessorBase(a, &remaining);
-  if (!base) {
-    g.log = "index accessor out of buffer bounds";
+  if (a.perElement != 1) {
+    g.log = "index accessor must be SCALAR";
     return false;
   }
-  const usize esz = componentSize(a.componentType);
-  if (usize(a.count) * esz > remaining) {
-    g.log = "index data overruns its buffer";
-    return false;
-  }
+  std::vector<u8> bytes;
+  if (!accessorBytes(g, acc, a, bytes, g.log)) return false;
+  const u8* base = bytes.data();
   out.resize(a.count);
   for (u32 i = 0; i < a.count; ++i) {
     u32 v = 0;

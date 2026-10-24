@@ -34,7 +34,7 @@ void CameraController::handleInput(Camera& camera,
     // Geometric zoom: each notch scales the distance by a factor,
     // symmetric and scale-free.
     const f32 factor = std::pow(0.90f, input.wheel);
-    m_distance = glm::clamp(m_distance * factor, 0.05f, 500.0f);
+    m_distance = glm::clamp(m_distance * factor, minDistance, maxDistance);
   }
 
   // WASD/QE pan the target in the camera's screen plane (Z-up basis).
@@ -65,6 +65,7 @@ void CameraController::handleInput(Camera& camera,
 void CameraController::updateMatrices(Camera& camera, f32 aspect) {
   camera.setPerspective(fovYDeg, aspect, nearPlane, farPlane);
   camera.setTarget(m_target);
+  camera.setZoomLimits(minDistance, maxDistance);
   camera.setSpherical(radians(m_yawDeg), radians(m_pitchDeg), m_distance);
   camera.computeMatrices();
 }

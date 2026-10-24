@@ -83,7 +83,7 @@ bool MaterialDecodePass::init(backend::IRenderBackend& backend,
   m_dummyPairs[1] = backend.createBuffer(desc);
   desc.size = 48;  // v5 page header (12 u32)
   m_dummyPageHeader = backend.createBuffer(desc);
-  desc.size = 48;  // one GpuMaterial record (12 f32) - the v2 stand-in
+  desc.size = 64;  // one GpuMaterial record (16 f32) - the v2 stand-in (unread)
   m_dummyMaterial = backend.createBuffer(desc);
   return m_dummyU32[0] != backend::IRenderBackend::kInvalidBufferHandle &&
          m_dummyU32[1] != backend::IRenderBackend::kInvalidBufferHandle &&

@@ -257,6 +257,152 @@ TEST_CASE("gltf model: prefab reproduces the flattened world space", "[gltf]") {
   }
 }
 
+TEST_CASE("gltf model: one-primitive meshes are conditioned like the others", "[gltf]") {
+  // A single primitive leaves MeshData::triMaterial empty ("all slot
+  // 0"); the double-sided and BLEND passes must still see its material.
+  TempDir dir("kenshin_gltf_oneprim_test");
+  Bin b;
+  const int pos = b.floats({0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0}, 3);
+  const int nrm = b.floats({0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1}, 3);
+  const int idx = b.indices({0, 1, 2, 2, 1, 3});
+  dir.write("b.bin", b.data.data(), b.data.size());
+  const std::string prim = R"({"attributes": {"POSITION": )" + std::to_string(pos) +
+                           R"(, "NORMAL": )" + std::to_string(nrm) + R"(}, "indices": )" +
+                           std::to_string(idx);
+  dir.write("m.gltf", R"({"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0, 1, 2]}],
+    "nodes": [{"mesh": 0}, {"mesh": 1}, {"mesh": 2}],
+    "meshes": [{"name": "Double", "primitives": [)" + prim + R"(, "material": 0}]},
+               {"name": "Glass", "primitives": [)" + prim + R"(, "material": 1}]},
+               {"name": "Plain", "primitives": [)" + prim + R"(, "material": 2}]}],
+    "materials": [{"doubleSided": true}, {"alphaMode": "BLEND", "pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 0.5]}}, {}],
+    "buffers": [{"uri": "b.bin", "byteLength": )" + std::to_string(b.data.size()) + R"(}],
+    "bufferViews": )" + Bin::join(b.views) + R"(, "accessors": )" + Bin::join(b.accessors) + "}");
+  importer::ImportedModel m;
+  std::string log;
+  INFO(log);
+  REQUIRE(importer::importGltfModel(dir.str("m.gltf"), {}, m, log));
+  REQUIRE(m.meshes.size() == 3);
+  CHECK(m.meshes[0].mesh.indices.size() / 3 == 4);  // + its two back faces
+  CHECK(m.meshes[1].mesh.indices.empty());          // all BLEND: moved out
+  CHECK(m.meshes[1].translucent.triangleCount() == 2);
+  CHECK(m.meshes[2].mesh.indices.size() / 3 == 2);  // untouched
+  CHECK(m.meshes[2].translucent.triangleCount() == 0);
+}
+
+TEST_CASE("gltf scene: interleaved and sparse accessors", "[gltf]") {
+  // Each variant must load exactly like its tightly packed, dense twin
+  // (1.3e: byteStride used to be ignored, sparse rejected).
+  TempDir dir("kenshin_gltf_accessor_test");
+  const std::vector<f32> pos = {0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0};
+  const std::vector<f32> nrm = {0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1};
+  const std::vector<u32> idx = {0, 1, 2, 2, 1, 3};
+  // One file: `views` + `accessors` JSON, attributes POSITION/NORMAL.
+  const auto write = [&](const std::string& name, Bin& b, int posAcc, int nrmAcc, int idxAcc) {
+    dir.write(name + ".bin", b.data.data(), b.data.size());
+    dir.write(name + ".gltf", R"({"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}],
+      "nodes": [{"mesh": 0}],
+      "meshes": [{"primitives": [{"attributes": {"POSITION": )" + std::to_string(posAcc) +
+                                  R"(, "NORMAL": )" + std::to_string(nrmAcc) + R"(}, "indices": )" +
+                                  std::to_string(idxAcc) + R"(}]}],
+      "buffers": [{"uri": ")" + name + R"(.bin", "byteLength": )" + std::to_string(b.data.size()) + R"(}],
+      "bufferViews": )" + Bin::join(b.views) + R"(, "accessors": )" + Bin::join(b.accessors) + "}");
+  };
+  const auto load = [&](const std::string& name, std::string& log) {
+    GltfScene s;
+    if (!assets::loadGltfScene(dir.str(name + ".gltf"), s, log)) return assets::MeshData();
+    REQUIRE(s.meshes.size() == 1);
+    return s.meshes[0].mesh;
+  };
+  const auto accessor = [](Bin& b, int view, usize offset, usize count, const char* type,
+                           const std::string& extra = "") {
+    b.accessors.push_back("{" + (view >= 0 ? "\"bufferView\":" + std::to_string(view) + "," : "") +
+                          "\"byteOffset\":" + std::to_string(offset) +
+                          ",\"componentType\":5126,\"count\":" + std::to_string(count) +
+                          ",\"type\":\"" + type + "\"" + extra + "}");
+    return static_cast<int>(b.accessors.size()) - 1;
+  };
+  std::string log;
+  INFO(log);
+
+  // The dense reference.
+  {
+    Bin b;
+    const int p = b.floats(pos, 3), n = b.floats(nrm, 3), i = b.indices(idx);
+    write("dense", b, p, n, i);
+  }
+  const assets::MeshData dense = load("dense", log);
+  REQUIRE(dense.positions.size() == 12);
+
+  // Interleaved: POSITION and NORMAL in one view, 24-byte stride.
+  {
+    Bin b;
+    std::vector<f32> inter;
+    for (int v = 0; v < 4; ++v)
+      for (int k = 0; k < 6; ++k) inter.push_back(k < 3 ? pos[v * 3 + k] : nrm[v * 3 + k - 3]);
+    const int view = b.view(inter.data(), inter.size() * 4);
+    b.views[usize(view)].insert(b.views[usize(view)].size() - 1, ",\"byteStride\":24");
+    const int p = accessor(b, view, 0, 4, "VEC3"), n = accessor(b, view, 12, 4, "VEC3");
+    write("interleaved", b, p, n, b.indices(idx));
+  }
+  const assets::MeshData inter = load("interleaved", log);
+  CHECK(inter.positions == dense.positions);
+  CHECK(inter.normals == dense.normals);
+
+  // Sparse over a base: vertices 1 and 3 replaced.
+  const auto sparse = [&](const std::string& name, bool withBase, const std::string& indicesJson,
+                          u32 sparseCount) {
+    Bin b;
+    std::vector<f32> base = pos;
+    for (int k = 0; k < 3; ++k) base[3 + k] = base[9 + k] = 7.0f;  // overwritten below
+    const int baseView = withBase ? b.view(base.data(), base.size() * 4) : -1;
+    const u16 ids[2] = {1, 3};
+    const int idView = b.view(ids, sizeof(ids));
+    const f32 vals[6] = {pos[3], pos[4], pos[5], pos[9], pos[10], pos[11]};
+    const int valView = b.view(vals, sizeof(vals));
+    const std::string sp =
+        ",\"sparse\":{\"count\":" + std::to_string(sparseCount) + ",\"indices\":{\"bufferView\":" +
+        std::to_string(idView) + indicesJson + "},\"values\":{\"bufferView\":" + std::to_string(valView) + "}}";
+    const int p = accessor(b, baseView, 0, 4, "VEC3", sp);
+    const int n = b.floats(nrm, 3);
+    write(name, b, p, n, b.indices(idx));
+  };
+  sparse("sparse", true, ",\"componentType\":5123", 2);
+  CHECK(load("sparse", log).positions == dense.positions);
+  // No base view: zeros, then the values. Vertex 0 is (0,0,0) and
+  // vertex 2 is (0,1,0) in the reference - only 0 survives as zeros.
+  sparse("sparsezero", false, ",\"componentType\":5123", 2);
+  {
+    const assets::MeshData z = load("sparsezero", log);
+    REQUIRE(z.positions.size() == 12);
+    CHECK(std::vector<f32>(z.positions.begin(), z.positions.begin() + 3) ==
+          std::vector<f32>(dense.positions.begin(), dense.positions.begin() + 3));
+    CHECK(std::vector<f32>(z.positions.begin() + 3, z.positions.begin() + 6) ==
+          std::vector<f32>(dense.positions.begin() + 3, dense.positions.begin() + 6));
+    CHECK(z.positions[6] == 0.0f);
+    CHECK(z.positions[7] == 0.0f);
+    CHECK(z.positions[8] == 0.0f);
+  }
+
+  // Hostile variants.
+  sparse("badtype", true, ",\"componentType\":5126", 2);
+  CHECK(load("badtype", log).positions.empty());
+  CHECK(log.find("sparse indices must be") != std::string::npos);
+  sparse("badcount", true, ",\"componentType\":5123", 9);
+  CHECK(load("badcount", log).positions.empty());
+  CHECK(log.find("sparse count") != std::string::npos);
+  sparse("badbounds", true, ",\"componentType\":5125", 2);  // 8 bytes of u32 ids in a 4-byte view
+  CHECK(load("badbounds", log).positions.empty());
+  CHECK(log.find("out of buffer bounds") != std::string::npos);
+  {
+    Bin b;
+    const int view = b.view(pos.data(), pos.size() * 4);
+    b.views[usize(view)].insert(b.views[usize(view)].size() - 1, ",\"byteStride\":8");
+    write("narrow", b, accessor(b, view, 0, 4, "VEC3"), b.floats(nrm, 3), b.indices(idx));
+  }
+  CHECK(load("narrow", log).positions.empty());
+  CHECK(log.find("byteStride") != std::string::npos);
+}
+
 TEST_CASE("gltf scene: hostile and unsupported files", "[gltf]") {
   TempDir dir("kenshin_gltf_hostile_test");
   Bin b;

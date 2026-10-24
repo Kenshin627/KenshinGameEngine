@@ -242,10 +242,19 @@ int main(int argc, char** argv) {
   else if (vgScene && !vgScene->meshes().empty() &&
            vgScene->meshes()[0].boundsSphere.w > 0.0f) {
     const glm::vec4& bs = vgScene->meshes()[0].boundsSphere;
-    controller.setup(45.0f, 6.0f, bs.w * 2.8f, glm::vec3(bs), aspect);
+    controller.setup(args.frameYaw, args.framePitch, bs.w * args.frameScale, glm::vec3(bs),
+                     aspect);
   } else if (projectMode && project.renderer.bounds().w > 0.0f) {
     const glm::vec4 bs = project.renderer.bounds();
-    controller.setup(45.0f, 6.0f, bs.w * 2.8f, glm::vec3(bs), aspect);
+    KENSHIN_INFO("[project] bounds center ({:.3f},{:.3f},{:.3f}) radius {:.3f}", bs.x, bs.y, bs.z,
+                 bs.w);
+    controller.setup(args.frameYaw, args.framePitch, bs.w * args.frameScale, glm::vec3(bs),
+                     aspect);
+    // Scale-aware limits: a 2 cm prop (BoomBox) sat at the 0.1 m zoom
+    // floor and against the 1 cm near plane.
+    controller.minDistance = std::min(controller.minDistance, bs.w * 0.05f);
+    controller.maxDistance = std::max(controller.maxDistance, bs.w * 500.0f);
+    controller.nearPlane = std::min(controller.nearPlane, bs.w * 0.01f);
   }
 
   kenshin::core::FrameStats<240> stats;

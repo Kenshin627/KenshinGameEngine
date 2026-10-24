@@ -35,9 +35,10 @@
 //   5: uint vis[]         - the VisBuffer as u32 pairs (lo payload, hi
 //                           depth bits)
 //   6: float4 sceneMaterials[] - the kgeo's RUNTIME material table
-//                           (decode_material's GpuMaterial, 3 float4:
+//                           (decode_material's GpuMaterial, 4 float4:
 //                           kdTex = kd + albedo layer, params = rough,
-//                           metal, MR, normal layers, emissive) - the
+//                           metal, MR, normal layers, emissive, ext =
+//                           emissive map) - the
 //                           same ids; the texture layers the
 //                           app resolved at load time live here
 //   7: Sampler2DArray envMap - the IBL probe (layer 0)
@@ -164,10 +165,12 @@ float4 fsMain(VSOut i) : SV_Target {
     // factor x albedo texel (sRGB format: sampled linear); MR texel G =
     // roughness, B = metallic (linear data), factors multiply. Real
     // derivatives here - this is a forward pass, implicit LOD is valid.
-    const float4 kdTex = sceneMaterials[i.mat * 3u];
-    const float4 params = sceneMaterials[i.mat * 3u + 1u];
-    emissive = max(sceneMaterials[i.mat * 3u + 2u].rgb, float3(0.0)) *
+    const float4 kdTex = sceneMaterials[i.mat * 4u];
+    const float4 params = sceneMaterials[i.mat * 4u + 1u];
+    emissive = max(sceneMaterials[i.mat * 4u + 2u].rgb, float3(0.0)) *
                push.envParams.w;
+    const uint emRef = asuint(sceneMaterials[i.mat * 4u + 3u].x);
+    if (hasTexture(emRef)) emissive *= sampleTexture(emRef, i.uv).rgb;
     albedo = kdTex.rgb;
     rough = params.x;
     metal = params.y;

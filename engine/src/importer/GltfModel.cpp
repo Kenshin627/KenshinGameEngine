@@ -123,6 +123,12 @@ bool importGltfModel(const std::string& path, const ModelImportOptions& options,
     // legacy builder's --fit semantics), so units do not matter.
     const std::vector<assets::GltfMaterial> slots = slotView(model, src);
     const f32 size = longestSide(m.mesh);
+    // MeshData's "empty triMaterial = all slot 0" shorthand (a one-
+    // primitive mesh) would make every conditioning pass below skip the
+    // mesh: a double-sided or BLEND material on a single primitive got
+    // no back faces / no translucent split (1.3e, TextureSettingsTest).
+    if (m.mesh.triMaterial.empty() && !slots.empty())
+      m.mesh.triMaterial.assign(m.mesh.indices.size() / 3, 0u);
     if (options.splitTranslucent) splitTranslucent(m.mesh, slots, m.translucent);
     if (options.conditionLayers) {
       sinkHuggingBlend(m.mesh, slots, size);

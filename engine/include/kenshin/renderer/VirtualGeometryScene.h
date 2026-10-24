@@ -189,14 +189,15 @@ class VirtualGeometryScene {
   u32 pageTableBuffer() const { return m_pageTableBuffer; }
   u32 pageHeaderBuffer() const { return m_pageHeaderBuffer; }
   u32 clusterMetaBuffer() const { return m_clusterMetaBuffer; }
-  /// M8.2: the GPU material table (12-f32 records: kd + base-colour
-  /// ref, rough/metal + MR/normal refs, emissive + occlusion) + the
+  /// M8.2: the GPU material table (16-f32 records: kd + base-colour
+  /// ref, rough/metal + MR/normal refs, emissive + occlusion, emissive
+  /// map ref + 3 reserved) + the
   /// disk-side texture paths. The app resolves the dag's texture refs
   /// through the TextureManager BEFORE addMeshPaged bakes the records.
   u32 materialTableBuffer() const { return m_materialBuffer; }
   /// GPU material record width (decode_material's GpuMaterial: kdTex,
-  /// params, emissive - 3 float4).
-  static constexpr u32 kMaterialFloats = 12;
+  /// params, emissive, ext - 4 float4).
+  static constexpr u32 kMaterialFloats = 16;
   /// One GPU record from a material (the layout above).
   static void packMaterial(const geometry::ClusterDag::DagMaterial& mat,
                            f32 (&record)[kMaterialFloats]);
@@ -250,7 +251,7 @@ class VirtualGeometryScene {
   std::vector<u32> m_clusterPage;
   std::vector<u32>
       m_clusterMetaFlat;  // v5 per-cluster meta ordinals    // global cluster -> global page
-  std::vector<f32> m_materialData;              // 12-f32 GPU material records
+  std::vector<f32> m_materialData;              // 16-f32 GPU material records
   std::vector<std::string> m_materialTexPaths;  // disk-side albedo refs
   std::vector<u32> m_meshMaterialBase;  // per mesh: first material index
   std::vector<u32> m_pageMetaFlat;      // 6 u32 per global page

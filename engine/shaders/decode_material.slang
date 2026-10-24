@@ -159,13 +159,14 @@ float2 v5Uv(uint vi, uint uvBase, uint poolTotal, uint vertexOffset,
                 qm.uvMinY + float(qy) * (qm.uvRangeY / 255.0));
 }
 
-// M8.2: the material table record (12 f32, packed identically in
+// M8.2: the material table record (16 f32, packed identically in
 // VirtualGeometryScene). 1.3a: the texture slots hold bindless texture
 // references as raw bits (asuint; 0xFFFFFFFF = none - bindless.slang).
 struct GpuMaterial {
   float4 kdTex;   // rgb kd, a = base-colour texture ref (bits)
   float4 params;  // x roughness, y metallic, z MR ref, w normal ref (bits)
   float4 emissive;  // rgb emitted radiance (linear), w occlusion strength
+  float4 ext;       // x emissive map ref (bits; 1.3e), yzw reserved
 };
 
 struct DecodePush {
@@ -866,6 +867,11 @@ struct GBufferOut {
     const uint nrmRef = asuint(mat.params.w);
     if (hasTexture(albedoRef))
       kd *= sampleTextureGrad(albedoRef, uv, dUVdx, dUVdy).rgb;
+    // glTF emissive = factor x map (sRGB format: sampled linear). The
+    // factor alone is often (1,1,1) with the map doing the masking.
+    const uint emRef = asuint(mat.ext.x);
+    if (hasTexture(emRef))
+      emissiveOut *= sampleTextureGrad(emRef, uv, dUVdx, dUVdy).rgb;
     if (hasTexture(mrRef)) {
       // glTF MR packing: roughness in G, metallic in B (linear data);
       // factors multiply the map.

@@ -7,17 +7,21 @@ KENSHIN_NS_BEGIN
 namespace scene {
 
 core::Guid worldDocumentOf(const assets::AssetDatabase& db, const core::Guid& asset) {
+  // A model's own Guid names no artifact (only its sub-assets do): its
+  // document is the prefab sub-asset.
+  if (const assets::AssetRecord* rec = db.find(asset);
+      rec && rec->type == assets::AssetType::Model) {
+    for (const assets::Artifact& a : rec->artifacts)
+      if (a.type == assets::ArtifactType::Prefab) return a.guid;
+    return {};
+  }
   const auto r = db.resolve(asset);
   if (!r) return {};
   switch (r->artifact->type) {
     case assets::ArtifactType::Scene:
     case assets::ArtifactType::Prefab: return r->artifact->guid;
-    default: break;
+    default: return {};
   }
-  if (r->asset->type == assets::AssetType::Model)
-    for (const assets::Artifact& a : r->asset->artifacts)
-      if (a.type == assets::ArtifactType::Prefab) return a.guid;
-  return {};
 }
 
 bool loadWorldAsset(const assets::AssetDatabase& db, const core::Guid& asset,
