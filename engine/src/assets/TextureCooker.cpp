@@ -127,6 +127,19 @@ Plane toPlane(const Image& img, const Layout& L) {
       if (L.normal) rgba[ch] = rgba[ch] * 2.0f - 1.0f;
       else if (L.srgb && !hdr) rgba[ch] = srgbToLinear(rgba[ch]);
     }
+    if (L.normal) {
+      // Unit source normals: a mip texel's averaged vector is then
+      // shorter exactly as much as the normals it covers disagree (the
+      // variance the alpha channel records - see texel()).
+      const f32 len = std::sqrt(rgba[0] * rgba[0] + rgba[1] * rgba[1] + rgba[2] * rgba[2]);
+      if (len > 1e-8f) {
+        for (int ch = 0; ch < 3; ++ch) rgba[ch] /= len;
+      } else {  // degenerate texel: the flat normal
+        rgba[0] = 0.0f;
+        rgba[1] = 0.0f;
+        rgba[2] = 1.0f;
+      }
+    }
     f32* d = p.v.data() + t * p.c;
     if (L.weighted) {
       for (int ch = 0; ch < 3; ++ch) d[ch] = rgba[ch] * rgba[3];
@@ -153,12 +166,17 @@ std::array<f32, 4> texel(const Plane& p, u32 x, u32 y, const Layout& L) {
       for (int ch = 0; ch < 3; ++ch) o[ch] = s[4 + ch];
   }
   if (L.normal) {
+    // RGB: the renormalized average normal. ALPHA: the average's length
+    // r (1 = the covered normals agree), encoded a = 1 - sqrt(1 - r) for
+    // resolution near 1 - the shaders' specular anti-aliasing
+    // (bindless.slang normalVarianceRoughness) widens roughness by it.
     const f32 len = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
     if (len > 1e-8f)
       for (int ch = 0; ch < 3; ++ch) o[ch] /= len;
     else
-      o = {0.0f, 0.0f, 1.0f, o[3]};
+      o = {0.0f, 0.0f, 1.0f, 0.0f};
     for (int ch = 0; ch < 3; ++ch) o[ch] = o[ch] * 0.5f + 0.5f;
+    o[3] = 1.0f - std::sqrt(1.0f - std::min(len, 1.0f));
   }
   return o;
 }
@@ -215,10 +233,14 @@ bool cookTexture(const Image& image, const TextureSettings& settings, CookedText
   CookedTexture cooked;
   cooked.format = format;
   // Mip 0 of an unchanged-precision source is copied verbatim: exact
-  // by construction, never a decode/encode round trip.
-  const bool verbatim = (image.depth == Image::Depth::U8 &&
-                         (format == TextureFormat::RGBA8Srgb || format == TextureFormat::RGBA8Unorm)) ||
-                        (image.depth == Image::Depth::U16 && format == TextureFormat::RGBA16Unorm);
+  // by construction, never a decode/encode round trip. Not normal maps:
+  // their alpha carries the variance channel (glTF ignores a normal
+  // map's own alpha) and their vectors are renormalized.
+  const bool samePrecision =
+      (image.depth == Image::Depth::U8 &&
+       (format == TextureFormat::RGBA8Srgb || format == TextureFormat::RGBA8Unorm)) ||
+      (image.depth == Image::Depth::U16 && format == TextureFormat::RGBA16Unorm);
+  const bool verbatim = samePrecision && !settings.normalMap;
 
   Plane plane = toPlane(image, L);
   bool first = true;  // still the full-resolution level

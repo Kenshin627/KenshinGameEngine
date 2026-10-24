@@ -25,6 +25,25 @@ float4 sampleTextureGrad(uint ref, float2 uv, float2 ddx, float2 ddy) {
       gSamplers[NonUniformResourceIndex(sampler)], uv, ddx, ddy);
 }
 
+/// Specular anti-aliasing from normal-map variance (Toksvig, in the
+/// vMF form of Neubelt & Pettineo 2013). The texture cooker writes into
+/// a normal map's ALPHA the length r of the average of the unit normals
+/// each texel covers, encoded a = 1 - sqrt(1 - r) (resolution where it
+/// matters, near r = 1; mip 0 is a = 1). A footprint that averages
+/// disagreeing normals is rougher than any of them: GGX alpha^2 widens
+/// by 2 / kappa, kappa = (3r - r^3) / (1 - r^2). Takes and returns
+/// PERCEPTUAL roughness (alpha = rough^2).
+float normalVarianceRoughness(float rough, float encodedLength) {
+  const float s = 1.0 - saturate(encodedLength);
+  const float r = 1.0 - s * s;
+  if (r >= 0.9999) return rough;  // mip 0 / flat footprint: unchanged
+  const float rc = max(r, 1e-3);
+  const float kappa = (3.0 * rc - rc * rc * rc) / (1.0 - rc * rc);
+  const float a = rough * rough;
+  const float a2 = saturate(a * a + 2.0 / kappa);
+  return sqrt(sqrt(a2));
+}
+
 /// Implicit-derivative sample (forward passes).
 float4 sampleTexture(uint ref, float2 uv) {
   const uint slot = ref & 0xFFFFFFu;

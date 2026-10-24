@@ -884,6 +884,11 @@ struct GBufferOut {
     // dP/dv - the decode already holds both, and the page format stays
     // as is.
     if (hasTexture(nrmRef)) {
+      const float4 nmTexel = sampleTextureGrad(nrmRef, uv, dUVdx, dUVdy);
+      // Normal detail finer than the pixel footprint: shade the
+      // rougher average instead of letting the highlight jump between
+      // sub-pixel normals every jittered frame (specular aliasing).
+      rough = normalVarianceRoughness(rough, nmTexel.a);
       const float2 du1 = uv1 - uv0, du2 = uv2 - uv0;
       const float3 e1w = w1 - w0, e2w = w2 - w0;
       const float uvDet = du1.x * du2.y - du2.x * du1.y;
@@ -895,8 +900,7 @@ struct GBufferOut {
           const float3 T = normalize(t0);
           const float hand = dot(cross(nrm, T), dPdv) < 0.0 ? -1.0 : 1.0;
           const float3 B = cross(nrm, T) * hand;
-          const float3 nm =
-              sampleTextureGrad(nrmRef, uv, dUVdx, dUVdy).rgb * 2.0 - 1.0;
+          const float3 nm = nmTexel.rgb * 2.0 - 1.0;
           const float3 pn = T * nm.x + B * nm.y + nrm * nm.z;
           if (dot(pn, pn) > 1e-12) nrm = normalize(pn);
         }

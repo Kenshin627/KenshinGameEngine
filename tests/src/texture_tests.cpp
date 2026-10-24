@@ -220,6 +220,40 @@ TEST_CASE("texture: normal maps stay unit length", "[texture][mips]") {
   // A naive average would have length 0.71.
 }
 
+TEST_CASE("texture: normal-map alpha records the normal variance", "[texture][mips]") {
+  // Specular anti-aliasing input: alpha = 1 - sqrt(1 - r), r = length of
+  // the average of the unit normals a texel covers.
+  TextureSettings s;
+  s.normalMap = true;
+  CookedTexture t;
+  std::string err;
+  // +X next to +Z: r = |(0.5, 0, 0.5)| = 0.7071 -> a = 0.4588 -> 117.
+  REQUIRE(cookTexture(rgba8(2, 1, {255, 128, 128, 77, 128, 128, 255, 77}), s, t, err));
+  CHECK(mip(t, 0)[3] == 255);  // a single texel agrees with itself
+  CHECK(mip(t, 0)[7] == 255);  // (the source alpha 77 is not a normal map's data)
+  CHECK(std::abs(int(mip(t, 1)[3]) - 117) <= 1);
+  // A flat normal map has no variance at any level.
+  REQUIRE(cookTexture(makeImageRgba8(16, 8, [] {
+                        std::vector<u8> px;
+                        for (int i = 0; i < 16 * 8; ++i) px.insert(px.end(), {128, 128, 255, 0});
+                        return px;
+                      }()),
+                      s, t, err));
+  for (usize m = 0; m < t.mips.size(); ++m) {
+    INFO("mip " << m);
+    CHECK(mip(t, m)[3] == 255);
+    CHECK(mip(t, m)[2] == 255);
+  }
+  // Short source vectors (sloppy bakes, quantization) that AGREE carry
+  // no variance: lengths are normalized away before averaging.
+  REQUIRE(cookTexture(rgba8(2, 1, {192, 128, 128, 255, 192, 128, 128, 255}), s, t, err));
+  CHECK(mip(t, 1)[3] == 255);
+  CHECK(mip(t, 1)[0] == 255);  // and the direction comes back unit length (+X)
+  // Opposite normals cancel: no direction survives (r = 0 -> a = 0).
+  REQUIRE(cookTexture(rgba8(2, 1, {128, 128, 255, 255, 128, 128, 0, 255}), s, t, err));
+  CHECK(mip(t, 1)[3] <= 2);
+}
+
 TEST_CASE("texture: size limit and no-mip settings", "[texture][mips]") {
   CookedTexture t;
   std::string err;

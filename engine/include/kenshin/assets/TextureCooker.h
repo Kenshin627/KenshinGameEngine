@@ -7,7 +7,10 @@
 //     filtered, re-encoded) - filtering sRGB codes darkens mips;
 //   * colour is alpha-weighted (premultiplied while filtering), so
 //     transparent texels do not bleed their colour into mips;
-//   * normal maps are filtered as vectors and renormalized per mip;
+//   * normal maps are filtered as unit vectors and renormalized per
+//     mip; their ALPHA records the average's length r (encoded
+//     1 - sqrt(1 - r)), the normal variance the shaders turn into
+//     roughness (specular anti-aliasing - bindless.slang);
 //   * any size works: each mip texel averages exactly the source area
 //     it covers (odd sizes included), down to 1x1.
 
