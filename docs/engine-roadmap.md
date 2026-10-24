@@ -665,6 +665,63 @@ settings hash, importer version), so stale caches rebuild themselves.
     cross-mesh layer separation (merged world space) has no
     equivalent for instanced meshes. Watch for it in the 1.3e review.
 
+### Fix — helmet flicker with shadows off (2026-10-24, Windows-verified)
+
+* **Symptom**: with shadows off, the helmet flickered.
+* **Measurement**: the earlier per-frame-capture metric hid it,
+  because capturing every frame serializes CPU and GPU. Measured the
+  way a monitor sees it instead: free-running at ~575 fps, every 17th
+  frame captured, temporal luma sigma over 41 captures.
+  - Whole-helmet single-frame flashes (mean 91 -> 96-98).
+  - 87,584 px with sigma > 5 (153,203 at fixed exposure); 469 with
+    shadows on. The count varied run to run.
+  - `--no-taa`: 0 (no race in the frames themselves); `--no-async`:
+    unchanged.
+* **Cause**: `MaterialDecodePass` kept its per-draw params (paged
+  flag, material count, pair capacity) in ONE host-visible buffer,
+  written at record time.
+  - The shadows-off "clear the shadow map" decode, recorded every
+    frame, wrote paged = 0 / materialCount = 0 while the previous
+    frame's main decode could still be executing. That decode shaded
+    the helmet unpaged and material-less for one frame.
+  - Within a frame, the shadow-level decodes also read the main
+    decode's values.
+  - With shadows on, the cached shadow map rarely redraws, so the
+    stray write was rare.
+* **Fix**:
+  - `IRenderBackend::transientHostBuffer(data, bytes)`: per-draw
+    host-visible constants, one buffer per call, pooled per frame slot
+    and rewound after that slot's completion wait.
+    `snapshotHostBuffer` remains the once-per-frame variant.
+  - The decode pass allocates its params per draw.
+  - The per-frame imposter pair list is snapshotted where the decode
+    consumes it (the same cross-frame race while the camera moves).
+  - Audit: lighting, TAA, translucent, imposter params and the
+    VisBuffer chain already used per-slot copies.
+* After: 532-536 px with sigma > 5 (609 at fixed exposure), helmet
+  brightness range 0.01. The rest is ordinary TAA edge jitter
+  (shadows on: 466).
+* Gate: GPU test (two dispatches in one frame each read their own
+  transient data; same-slot frames reuse their buffers). The
+  "shared buffer" and "no recycling" mutations are both killed.
+  ctest 7/7; Debug suites pass; GCC check clean; 0 validation errors
+  in the live runs.
+* Also fixed on the way (separate commit): **specular anti-aliasing
+  for normal maps** (Toksvig / vMF).
+  - 1.3a's correct per-texture mips and anisotropy resolve more
+    normal detail, which sparkled under unshadowed direct light: 646
+    vs 257 px with sigma > 5 at matched exposure, from consecutive
+    frames.
+  - The cooker now stores each normal-map texel's average-normal
+    length in alpha (1 - sqrt(1 - r)); the decode pass widens GGX
+    roughness by 2/kappa.
+  - Back to 265 px. Mip 0 / close-ups are unchanged; the ribbed strap
+    shows a smooth sheen instead of sparkle. Cooker tests cover the
+    encoding (4 mutations killed). The shader effect is verified by
+    measurement only (no automated GPU test).
+* Open: geometric specular AA (screen-space normal derivatives) for
+  fine geometry, phase 2.
+
 
 ## 8. Decisions (2026-10-23)
 

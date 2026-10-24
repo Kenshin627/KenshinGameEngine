@@ -128,7 +128,6 @@ class MaterialDecodePass {
   u32 m_gbufferPipeline = ~0u;                // M8.1: the fsGBuffer MRT variant
   u32 m_shadowPipeline[3] = {~0u, ~0u, ~0u};  // per-level (M3.3
       // same-frame set-update discipline)
-  u32 m_decodeParams = ~0u;  // 32B host-visible: [0] mode flags, [1].x pair cap
   u32 m_dummyMaterial = ~0u;         // v2 material-table stand-in (32B)
   u32 m_dummyU32[2] = {~0u, ~0u};    // v2 stand-ins (bindings 8/9)
   u32 m_dummyPageHeader = ~0u;       // v2 stand-in (binding 10)

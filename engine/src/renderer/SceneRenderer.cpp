@@ -526,7 +526,9 @@ void SceneRenderer::render(const FrameInputs& in,
             m_chain.visBufferCurrent(be), pd, m_chain.pairsCurrent(be),
             m_chain.hwPairsCurrent(be), m_chain.postPairsCurrent(be),
             m_chain.maxPairs(),
-            m_imposterReady ? m_imposter.pairsBuffer() : 0);
+            m_imposterReady
+                ? be.snapshotHostBuffer(m_imposter.pairsBuffer())  // rebuilt per frame
+                : 0);
       } else {
         m_decode.drawPaged(be, viewProjJ, scene, decodeParams, ci.width,
                            ci.height, m_chain.visBufferCurrent(be), pd,

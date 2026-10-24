@@ -257,6 +257,71 @@ TEST_CASE("bindless: slots are reused and released slots read white", "[gpu][bin
   be->shutdown();
 }
 
+TEST_CASE("transient host buffers: each draw of a frame reads its own data", "[gpu][bindless]") {
+  // The shadows-off flicker: one host buffer rewritten by several draws
+  // of a frame is read by all of them with the LAST values (and by the
+  // previous, still-executing frame). transientHostBuffer must hand
+  // every call its own buffer.
+  auto be = backend::createVulkanBackend();
+  REQUIRE(be->initialize({}));
+  {
+    manager::ShaderManager shaders;
+    REQUIRE(shaders.init(kShaderRoot));
+    std::vector<u32> spirv;
+    std::string log;
+    REQUIRE(shaders.compileFile("bindless_probe.slang", spirv, log, "main"));
+    const u32 pipe = be->createComputePipeline({spirv.data(), spirv.size() * sizeof(u32)});
+    REQUIRE(pipe != IRenderBackend::kInvalidPipelineHandle);
+    const std::vector<std::array<u8, 4>> black = {{0, 0, 0, 255}};
+    const u32 tex = upload(*be, levels8(1, 1, TextureFormat::RGBA8Unorm, black));
+    const SamplerDesc s{WrapMode::Clamp, WrapMode::Clamp, FilterMode::Nearest};
+    auto probe = [&](u32 ref) {
+      glm::vec4 p(0.0f, 0.5f, 0.5f, 1e-6f);
+      std::memcpy(&p.x, &ref, 4);
+      return p;
+    };
+    const glm::vec4 pBlack = probe(backend::textureRef(be->bindlessSlot(tex), s));
+    const glm::vec4 pWhite = probe(backend::textureRef(0, s));
+    u32 out[2];
+    for (u32& o : out)
+      o = be->createBuffer({16, IRenderBackend::BufferStorage, nullptr, "results"});
+
+    CHECK(be->transientHostBuffer(&pBlack, 16) == IRenderBackend::kInvalidBufferHandle);  // no frame
+    std::vector<u32> seen;
+    for (int frame = 0; frame < 4; ++frame) {
+      REQUIRE(be->beginFrame(backend::FrameBeginInfo{.width = 64, .height = 64}) ==
+              backend::FrameStatus::Ready);
+      const u32 a = be->transientHostBuffer(&pBlack, sizeof(pBlack));
+      const u32 b = be->transientHostBuffer(&pWhite, sizeof(pWhite));
+      REQUIRE(a != IRenderBackend::kInvalidBufferHandle);
+      REQUIRE(b != IRenderBackend::kInvalidBufferHandle);
+      CHECK(a != b);
+      seen.push_back(a);
+      const u32 ha[2] = {a, out[0]}, hb[2] = {b, out[1]};
+      be->dispatchCompute(pipe, ha, 2, 1, 1, 1);
+      be->dispatchCompute(pipe, hb, 2, 1, 1, 1);
+      be->endFrame();
+      std::vector<u8> raw;
+      glm::vec4 ra, rb;
+      REQUIRE(be->readbackBuffer(out[0], 0, 16, raw));
+      std::memcpy(&ra, raw.data(), 16);
+      REQUIRE(be->readbackBuffer(out[1], 0, 16, raw));
+      std::memcpy(&rb, raw.data(), 16);
+      INFO("frame " << frame);
+      CHECK(near(ra, glm::vec4(0, 0, 0, 1), 1e-6f));  // its own probe, not the later one
+      CHECK(near(rb, glm::vec4(1.0f), 1e-6f));
+    }
+    // Pools are per frame slot and recycled: frames of the same slot
+    // reuse their buffers instead of growing without bound.
+    CHECK(seen[0] == seen[2]);
+    CHECK(seen[1] == seen[3]);
+    for (const u32 o : out) be->destroyBuffer(o);
+    be->destroyTexture(tex);
+    be->destroyComputePipeline(pipe);
+  }
+  be->shutdown();
+}
+
 TEST_CASE("bindless: invalid texture descriptions are rejected", "[gpu][bindless]") {
   auto be = backend::createVulkanBackend();
   REQUIRE(be->initialize({}));

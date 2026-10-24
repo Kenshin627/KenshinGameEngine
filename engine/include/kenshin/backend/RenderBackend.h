@@ -235,6 +235,15 @@ class IRenderBackend {
   /// memoryless paths converge). The passthrough default keeps
   /// headless/test backends unchanged.
   virtual u32 snapshotHostBuffer(u32 buffer) { return buffer; }
+  /// Per-DRAW constants: a host-visible storage buffer holding a copy of
+  /// `data`, private to the work recorded next in THIS frame (call
+  /// between beginFrame and endFrame). Every call returns a different
+  /// buffer, so two draws of one frame never share one - unlike
+  /// snapshotHostBuffer, which keeps ONE copy per frame slot and suits
+  /// blocks written once per frame. Buffers are owned by the frame slot
+  /// and recycled once its previous frame has provably completed.
+  /// Returns kInvalidBufferHandle outside a frame or on failure.
+  virtual u32 transientHostBuffer(const void* data, usize bytes) = 0;
   /// Deferred destruction (safe while frames are in flight).
   virtual void destroyBuffer(u32 buffer) = 0;
   /// Blocking readback of a byte range (verification paths). Returns false

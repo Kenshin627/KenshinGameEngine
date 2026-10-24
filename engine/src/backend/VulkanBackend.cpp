@@ -164,6 +164,14 @@ struct VulkanBackend::Impl {
   // snapshotHostBuffer mirrors: source handle -> per-slot copies
   // (created lazily; few entries - one per hot shared params buffer).
   std::unordered_map<u32, u32> snapMirrors[kMaxFramesInFlight];
+  // transientHostBuffer pools: per slot, handed out in order and
+  // rewound at beginFrame (after that slot's completion wait).
+  struct TransientPool {
+    std::vector<u32> buffers;
+    std::vector<usize> sizes;
+    u32 next = 0;
+  };
+  TransientPool transientHost[kMaxFramesInFlight];
   u32 taaParity = 0;
   u32 taaSize = 0;
   u32 taaHeight = 0;  // both extents key the pair (height-only resizes
@@ -777,6 +785,9 @@ FrameStatus VulkanBackend::beginFrame(const FrameBeginInfo& info) {
   impl.chainValueA = impl.chainValueB = 0;
   impl.chainSubmittedThisFrame = false;
 
+  // This slot's per-draw constant buffers are free again (the wait
+  // above proves its previous frame completed).
+  impl.transientHost[impl.frameSync.frameIndex].next = 0;
   // Harvest this slot's previous timing queries (the wait above proves
   // they completed). Guarded until every slot has recorded at least one
   // frame: the in-frame vkCmdResetQueryPool is the first legal reset of a
@@ -1447,6 +1458,33 @@ void VulkanBackend::destroyGraphicsPipeline(u32 pipeline) {
 u32 VulkanBackend::createBuffer(const BufferDesc& desc) {
   return m_impl->buffers.create(m_impl->device,
                                 m_impl->frameSync.slots[0].commandPool, desc);
+}
+
+u32 VulkanBackend::transientHostBuffer(const void* data, usize bytes) {
+  Impl& impl = *m_impl;
+  if (!impl.frameActive || data == nullptr || bytes == 0) return kInvalidBufferHandle;
+  Impl::TransientPool& pool = impl.transientHost[impl.frameSync.frameIndex];
+  const u32 i = pool.next;
+  if (i == pool.buffers.size() || pool.sizes[i] < bytes) {
+    const usize size = (std::max)(bytes, usize(256));
+    BufferDesc desc;
+    desc.size = size;
+    desc.usage = IRenderBackend::BufferStorage | IRenderBackend::BufferHostVisible;
+    desc.debugName = "transient-host";
+    const u32 created = createBuffer(desc);
+    if (created == kInvalidBufferHandle) return kInvalidBufferHandle;
+    if (i == pool.buffers.size()) {
+      pool.buffers.push_back(created);
+      pool.sizes.push_back(size);
+    } else {
+      destroyBuffer(pool.buffers[i]);  // deferred: safe while in flight
+      pool.buffers[i] = created;
+      pool.sizes[i] = size;
+    }
+  }
+  ++pool.next;
+  std::memcpy(impl.buffers.mapped(pool.buffers[i]), data, bytes);
+  return pool.buffers[i];
 }
 
 u32 VulkanBackend::snapshotHostBuffer(u32 buffer) {
