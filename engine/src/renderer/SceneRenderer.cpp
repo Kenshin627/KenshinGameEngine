@@ -605,11 +605,11 @@ void SceneRenderer::render(const FrameInputs& in,
         tf.blend = m_taaPrevValid && m_taaWarmup > 1 ? 0.95f : 0.0f;
         tf.jitter = taaJitterUV;
         tf.sharpen = s.taaSharpen;
-        // The HDR weight's exposure: the adapted scale (a frame or two
-        // behind) under auto exposure.
-        tf.exposure = s.autoExposure && m_stats.autoScale > 0.0f
-                          ? m_stats.autoScale
-                          : s.exposure;
+        // The HDR weight's exposure: under auto exposure the previous
+        // frame's adapted scale, read by the resolve from the exposure
+        // state on the GPU (deterministic); `exposure` until it is valid.
+        tf.exposure = s.exposure;
+        if (s.autoExposure && m_exposure.ready()) tf.exposureState = m_exposure.stateBuffer();
         m_taa.draw(be, tf, ci.width, ci.height);
         resolvedByTaa = true;
         taaRanThisFrame = true;

@@ -33,6 +33,12 @@ struct TaaFrame {
   float sharpen = 0.3f;    // post-resolve unsharp strength
   float exposure = 1.0f;   // tonemap exposure (the HDR weight
                            // 1/(4 + Y*exposure) sees display luma)
+  /// Auto exposure: the ExposurePass state buffer. The resolve reads
+  /// the adapted scale from it ON THE GPU (the previous frame's, by
+  /// queue order) and falls back to `exposure` until it is valid. A
+  /// CPU readback of the same value lags by one or two frames
+  /// depending on GPU progress - the resolve came out timing-dependent.
+  u32 exposureState = 0xFFFFFFFFu;
 };
 
 class TaaPass {

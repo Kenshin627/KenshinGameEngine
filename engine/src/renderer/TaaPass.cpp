@@ -55,9 +55,11 @@ void TaaPass::draw(backend::IRenderBackend& backend, const TaaFrame& frame,
   p[9] =
       glm::vec4(1.0f / static_cast<f32>(width), 1.0f / static_cast<f32>(height),
                 frame.exposure, frame.sharpen);
-  p[10] = glm::vec4(frame.jitter, 0.0f, 0.0f);
-  const u32 handles[1] = {m_params};
-  backend.drawTaa(m_pipeline, handles, 1, nullptr, 0, width, height);
+  const bool gpuExposure = frame.exposureState != 0xFFFFFFFFu;
+  p[10] = glm::vec4(frame.jitter, gpuExposure ? 1.0f : 0.0f, 0.0f);
+  // Binding 4 needs a buffer either way (unread without auto exposure).
+  const u32 handles[2] = {m_params, gpuExposure ? frame.exposureState : m_params};
+  backend.drawTaa(m_pipeline, handles, 2, nullptr, 0, width, height);
 }
 
 void TaaPass::onShutdown(backend::IRenderBackend& backend) {

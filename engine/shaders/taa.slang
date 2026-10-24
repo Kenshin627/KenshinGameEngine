@@ -46,6 +46,10 @@
 //   3: SSBO taaParams - the two matrices + camera/blend/texel/jitter
 //      (a push block would need 160B+; the guaranteed push limit is
 //      128)
+//   4: SSBO exposureState - ExposurePass's state ([0] = scale, target,
+//      avgLum, valid), read when jitter.z = 1: the previous frame's
+//      adapted scale by queue order (a CPU readback lags by a GPU-
+//      timing-dependent one or two frames)
 
 struct TaaParams
 {
@@ -60,13 +64,15 @@ struct TaaParams
     float4 texel;      // xy = 1/w, 1/h, z = exposure (HDR weight),
                        // w = sharpen strength (tonemap-side, unused here)
     float4 jitter;     // xy = THIS frame's jitter in UV units: the texel
-                       // at uv shows the unjittered position uv + j
+                       // at uv shows the unjittered position uv + j;
+                       // z = 1: exposure from exposureState
 };
 
 [[vk::binding(0)]] Sampler2D currentHdr;
 [[vk::binding(1)]] Sampler2D history;
 [[vk::binding(2)]] Sampler2D gbufferA;
 [[vk::binding(3)]] StructuredBuffer<TaaParams> taaParams;
+[[vk::binding(4)]] StructuredBuffer<float4> exposureState;
 
 struct VSOut
 {
@@ -159,7 +165,13 @@ float4 fsMain(float4 frag : SV_Position) : SV_Target
     const float2 size = 1.0 / invSize;
     const float2 uv = frag.xy * invSize;  // this pixel's center
     const float2 jPx = tp.jitter.xy * size;  // jitter in pixels
-    const float exposure = max(tp.texel.z, 1e-4);
+    float exposure = tp.texel.z;
+    if (tp.jitter.z > 0.5)
+    {
+        const float4 st = exposureState[0];
+        if (st.w > 0.5 && st.x > 0.0) exposure = st.x;
+    }
+    exposure = max(exposure, 1e-4);
 
     // ---- 1+2: filtered current + neighborhood statistics -------------
     float4 filtered = float4(0.0);

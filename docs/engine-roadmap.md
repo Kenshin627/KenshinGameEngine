@@ -893,10 +893,8 @@ settings hash, importer version), so stale caches rebuild themselves.
     - Interleaved A/B on the same `.kgeo`, parent commit (cf92d33) vs
       this step: 4/120 vs 1/120 runs, the same signature. The parent
       has it too.
-    - Suspected: page-streaming completion timing (the pages beyond
-      the synchronous warmup's 64 flip in at frame k or k+1) seen
-      through bloom. Not confirmed; it did not appear under full CPU
-      load (8 runs).
+    - Cause found and fixed afterwards: see "Fix - TAA exposure read
+      on the CPU" below.
   - **Mutation test**: 17 deliberate bugs are all killed.
     - Slot rewrite on replace, in-place reload, unchanged artifacts
       left alone, settling, resident meshes in the plan.
@@ -928,6 +926,42 @@ settings hash, importer version), so stale caches rebuild themselves.
     incremental GPU scene updates come with the dynamic bridge (1.4).
   - glTF `data:` buffers are still unsupported (the fixture uses a
     `.bin`).
+
+
+### Fix — TAA exposure read on the CPU (2026-10-25, Windows-verified)
+
+* **Symptom**: `render_kgeo_nohw` intermittently rendered a second
+  state (89 px, max delta 1), in about 2% of runs (A/B: 4/120 before
+  1.3d, 1/120 after).
+* **Diagnosis**:
+  - The streaming timeline was identical in failing runs (logged per
+    frame), which ruled streaming out.
+  - The value that moved was TAA's HDR weight exposure. SceneRenderer
+    took it from `ExposurePass::readState`, a CPU read of the
+    host-mapped state that the GPU's adapt pass writes. Which frame's
+    value it saw depended on how far the GPU had got.
+  - Caught in a failing run: frame 4 used frame 3's stale 1.40257716
+    instead of 1.36214256. The resolve carried the difference into
+    its history.
+* **Fix**:
+  - The resolve reads the adapted scale from the exposure state on
+    the GPU (`taa.slang` binding 4). By queue order it is always the
+    previous frame's value.
+  - A fragment->compute barrier orders the read before that frame's
+    adapt overwrite.
+  - The CPU readback now only feeds the panel and stats. Manual
+    exposure, and the first frames before the state is valid, use the
+    CPU value as before.
+* Gate evidence:
+  - 150/150 runs byte-identical (the same command line).
+  - The TAA-on references shift: knot 103 px, max delta 1; albedo
+    367 px, max delta 4. Routed and `--no-hw` remain byte-identical to
+    each other. Both references were regenerated; 3 reruns pass.
+  - Reverting to the CPU read would fail `render_kgeo`: the old
+    code's usual image is the previous reference, 103 px from the new
+    one.
+  - ctest 12/12; validation 0 with auto and manual exposure; GCC check
+    131 files clean.
 
 
 ## 8. Decisions (2026-10-23)

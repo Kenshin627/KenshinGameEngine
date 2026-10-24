@@ -2424,6 +2424,10 @@ bool VulkanBackend::drawExposure(u32 histogramPipeline, u32 adaptPipeline,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+  // The TAA resolve read this frame's state (the previous frame's
+  // adapted scale) in its fragment shader: done before the overwrite.
+  memoryBarrier(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
   dispatch(adaptPipeline, 1, 1);
   // state -> the tonemap's fragment read (and the host's panel readout
   // after the frame fence).
