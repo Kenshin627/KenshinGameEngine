@@ -149,6 +149,11 @@ u32 BindlessTable::allocate(VkDevice device, VkImageView view) {
   return slot;
 }
 
+void BindlessTable::update(VkDevice device, u32 slot, VkImageView view) {
+  if (slot == 0 || slot >= m_next) return;
+  write(device, slot, view);
+}
+
 void BindlessTable::release(VkDevice device, u32 slot) {
   if (slot == 0 || slot >= m_next) return;
   write(device, slot, m_white);

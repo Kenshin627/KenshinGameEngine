@@ -19,6 +19,9 @@
 //     left the .meta behind keeps its Guid);
 //   - a duplicated Guid (a copied .meta) is re-issued to the copy;
 //   - a corrupt .meta is reported and never overwritten.
+// * Imports build into <guid>.tmp; the old folder is renamed aside
+//   first, so a cache file held open elsewhere (a streamed mesh) fails
+//   the import cleanly instead of half-deleting the old artifacts.
 // * Staleness: an import is current while the importer version, the
 //   settings and every source file (content, checked by size + mtime
 //   first, SHA-1 when they changed) match its import record. Imports
@@ -62,6 +65,13 @@ struct Artifact {
   ArtifactType type = ArtifactType::Texture;
   std::string name;  // display name
   std::string file;  // file name inside the asset's cache folder
+  /// Mesh / translucent mesh: the material asset of each slot (the
+  /// .kgeo's per-cluster material ids index this list).
+  std::vector<core::Guid> materials;
+  /// SHA-1 of the cooked file (set by the database after an import):
+  /// a re-import that reproduces an artifact byte for byte leaves its
+  /// loaded copy alone (hot reload, 1.3d).
+  std::string sha1;
 };
 
 struct AssetRecord {

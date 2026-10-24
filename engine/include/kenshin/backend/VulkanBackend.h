@@ -46,6 +46,7 @@ class VulkanBackend final : public IRenderBackend {
                       std::vector<u8>& out) override;
   u32 createFullscreenPipeline(const FullscreenPipelineInfo& info) override;
   u32 createTexture(const TextureDesc& desc) override;
+  bool replaceTexture(u32 texture, const TextureDesc& desc) override;
   u32 bindlessSlot(u32 texture) const override;
   u32 bindlessUsed() const override;
   u32 createTextureArray(const TextureArrayDesc& desc) override;
@@ -135,6 +136,8 @@ class VulkanBackend final : public IRenderBackend {
   /// Register an uploaded image under a texture handle (bindless slot
   /// or kNoTexture).
   u32 storeTexture(struct GpuImage&& image, u32 slot);
+  /// Validates `desc` and uploads it into `image` (no slot, no store).
+  bool buildTexture(const TextureDesc& desc, struct GpuImage& image, const char* what);
 
   /// (Re)create ImGui descriptor sets when offscreen targets change.
   void ensureViewportTextures();

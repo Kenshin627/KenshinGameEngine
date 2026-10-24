@@ -1836,11 +1836,11 @@ u32 VulkanBackend::storeTexture(GpuImage&& image, u32 slot) {
   return static_cast<u32>(impl.textures.size() - 1);
 }
 
-u32 VulkanBackend::createTexture(const TextureDesc& desc) {
+bool VulkanBackend::buildTexture(const TextureDesc& desc, GpuImage& image, const char* what) {
   Impl& impl = *m_impl;
   if (desc.data == nullptr) {
-    KENSHIN_ERROR("[vulkan] createTexture: no texel data");
-    return kInvalidTextureHandle;
+    KENSHIN_ERROR("[vulkan] {}: no texel data", what);
+    return false;
   }
   const usize texel = texelBytes(desc.format);
   usize expect = 0;
@@ -1849,9 +1849,9 @@ u32 VulkanBackend::createTexture(const TextureDesc& desc) {
   if (desc.width == 0 || desc.height == 0 || desc.width > 16384 || desc.height > 16384 ||
       desc.mipCount == 0 || desc.mipCount > fullMipCount(desc.width, desc.height) ||
       desc.bytes != expect) {
-    KENSHIN_ERROR("[vulkan] createTexture: bad desc ({}x{}, {} mips, {} bytes, expected {})",
+    KENSHIN_ERROR("[vulkan] {}: bad desc ({}x{}, {} mips, {} bytes, expected {})", what,
                   desc.width, desc.height, desc.mipCount, desc.bytes, expect);
-    return kInvalidTextureHandle;
+    return false;
   }
   const VkFormat format = toVkFormat(desc.format);
   VkFormatProperties fp{};
@@ -1860,25 +1860,50 @@ u32 VulkanBackend::createTexture(const TextureDesc& desc) {
                                     VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
                                     VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
   if ((fp.optimalTilingFeatures & need) != need) {
-    KENSHIN_ERROR("[vulkan] createTexture: format {} cannot be sampled with filtering here",
+    KENSHIN_ERROR("[vulkan] {}: format {} cannot be sampled with filtering here", what,
                   static_cast<int>(format));
-    return kInvalidTextureHandle;
+    return false;
   }
-  GpuImage image;
   if (!uploadImage2D(impl.device, image, desc.width, desc.height, desc.mipCount, format,
                      desc.data, desc.bytes, texel)) {
-    KENSHIN_ERROR("[vulkan] createTexture: upload failed ({}x{})", desc.width, desc.height);
-    return kInvalidTextureHandle;
+    KENSHIN_ERROR("[vulkan] {}: upload failed ({}x{})", what, desc.width, desc.height);
+    return false;
   }
   if (desc.debugName)
     vkutil::setName(impl.device.device, VK_OBJECT_TYPE_IMAGE,
                     reinterpret_cast<uint64_t>(image.image), desc.debugName);
+  return true;
+}
+
+u32 VulkanBackend::createTexture(const TextureDesc& desc) {
+  Impl& impl = *m_impl;
+  GpuImage image;
+  if (!buildTexture(desc, image, "createTexture")) return kInvalidTextureHandle;
   const u32 slot = impl.bindless.allocate(impl.device.device, image.view);
   if (slot == BindlessTable::kInvalidSlot) {
     image.destroy(impl.device.allocator, impl.device.device);
     return kInvalidTextureHandle;
   }
   return storeTexture(std::move(image), slot);
+}
+
+bool VulkanBackend::replaceTexture(u32 texture, const TextureDesc& desc) {
+  Impl& impl = *m_impl;
+  if (texture >= impl.textures.size() || !impl.textureAlive[texture] ||
+      impl.textureSlot[texture] == kNoTexture) {
+    KENSHIN_ERROR("[vulkan] replaceTexture: invalid handle {}", texture);
+    return false;
+  }
+  GpuImage image;
+  if (!buildTexture(desc, image, "replaceTexture")) return false;
+  // The slot is rewritten in place: nothing in flight may still sample
+  // the old view (and an update-after-bind write must not race a
+  // pending command buffer that uses the slot).
+  vkDeviceWaitIdle(impl.device.device);
+  impl.bindless.update(impl.device.device, impl.textureSlot[texture], image.view);
+  impl.textures[texture].destroy(impl.device.allocator, impl.device.device);
+  impl.textures[texture] = std::move(image);
+  return true;
 }
 
 u32 VulkanBackend::bindlessSlot(u32 texture) const {

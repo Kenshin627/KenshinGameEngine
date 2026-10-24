@@ -83,6 +83,19 @@ struct Args {
   // streams in and stays resident - the v2-equivalent fast path);
   // N = the slot pool + residency cap for .kgeo v3 assets.
   int streamBudgetMb = 0;
+  // 1.3d: a project's scene through the asset database. --scene is a
+  // project-relative path (a .kscene, a .kprefab or a model); the
+  // startup scene of project.kproject when omitted.
+  std::string project;
+  std::string scene;
+  // Seconds between hot-reload polls (0 = every frame: scripted runs
+  // reload a fixed number of frames after a change); <0 = no watching.
+  float watchInterval = 0.25f;
+  // --touch <frame> <src> <dst>: at that frame, rewrite <dst> with the
+  // bytes of <src> (the hot-reload test's scripted edit; a fresh write,
+  // so the file's mtime changes like an editor's save).
+  int touchFrame = -1;
+  std::string touchSrc, touchDst;
 };
 
 Args parseArgs(int argc, char** argv);

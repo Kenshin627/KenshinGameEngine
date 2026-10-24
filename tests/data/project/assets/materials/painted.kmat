@@ -1,0 +1,30 @@
+{
+  "format": "kenshin.material",
+  "version": 1,
+  "base_color": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "metallic": 0.0,
+  "roughness": 0.35,
+  "emissive": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "alpha_mode": "opaque",
+  "alpha_cutoff": 0.5,
+  "double_sided": false,
+  "normal_scale": 1.0,
+  "occlusion_strength": 1.0,
+  "textures": {
+    "base_color": {
+      "texture": "5d0c6a43-8f1e-4b7a-9c2d-3e4f5a6b7c82",
+      "wrap_u": "repeat",
+      "wrap_v": "repeat",
+      "filter": "linear"
+    }
+  }
+}

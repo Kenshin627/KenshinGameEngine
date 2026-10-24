@@ -61,6 +61,7 @@ add_library(kenshin_engine STATIC
     src/backend/vulkan/BufferStore.cpp
     src/backend/vulkan/DescriptorCache.cpp
     src/backend/vulkan/UploadEngine.cpp
+    src/core/FileWatcher.cpp
     src/core/Guid.cpp
     src/core/Sha1.cpp
     src/core/Input.cpp
@@ -76,6 +77,7 @@ add_library(kenshin_engine STATIC
     src/importer/MeshCooker.cpp
     src/manager/MeshPool.cpp
     src/manager/ShaderManager.cpp
+    src/manager/AssetManager.cpp
     src/manager/TextureManager.cpp
     src/renderer/BaselineForwardPipeline.cpp
     src/renderer/Renderer.cpp
@@ -90,6 +92,7 @@ add_library(kenshin_engine STATIC
     src/renderer/ExposurePass.cpp
     src/renderer/Environment.cpp
     src/renderer/SceneRenderer.cpp
+    src/renderer/WorldRenderer.cpp
     src/renderer/TonemapPass.cpp
     src/renderer/MaterialDecodePass.cpp
     src/renderer/VisBufferChain.cpp
@@ -99,6 +102,7 @@ add_library(kenshin_engine STATIC
     src/ecs/Reflection.cpp
     src/ecs/World.cpp
     src/scene/ProjectFile.cpp
+    src/scene/SceneAssets.cpp
     src/scene/SceneSerializer.cpp
     src/serialization/Json.cpp
     src/scene/Camera.cpp

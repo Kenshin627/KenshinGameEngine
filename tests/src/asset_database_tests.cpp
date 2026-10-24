@@ -5,6 +5,7 @@
 // byte-identical re-imports. Plus SHA-1 / RFC 4122 v5 test vectors.
 
 #include <catch2/catch_test_macros.hpp>
+#include <cstdio>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -405,12 +406,68 @@ TEST_CASE("asset db: model sub-assets with derived guids", "[assetdb]") {
   CHECK(db.resolve(red.normalTexture.texture)->artifact->key == "texture/1.normal");
   CHECK(red.baseColorTexture.sampler.filter == backend::FilterMode::Nearest);
 
+  // 1.3d: a mesh names its slot materials (the Quad's two primitives),
+  // the translucent part the same list; every artifact carries the
+  // SHA-1 of its file; both survive a new session.
+  const auto artifact = [&](const AssetDatabase& d, const std::string& key) {
+    return d.resolve(AssetDatabase::subAssetGuid(model->guid, key))->artifact;
+  };
+  const std::vector<core::Guid> quadSlots = {AssetDatabase::subAssetGuid(model->guid, "material/0"),
+                                             AssetDatabase::subAssetGuid(model->guid, "material/1")};
+  CHECK(artifact(db, "mesh/0")->materials == quadSlots);
+  CHECK(artifact(db, "mesh/0#translucent")->materials == quadSlots);
+  CHECK(artifact(db, "material/0")->materials.empty());
+  for (const auto& a : model->artifacts) {
+    std::string bytes;
+    REQUIRE(util::readFile(db.artifactPath(a.guid), bytes));
+    CHECK(a.sha1 == core::Sha1::hex(core::Sha1::of(bytes)));
+  }
+  {
+    AssetDatabase again = openDb(p);
+    CHECK(artifact(again, "mesh/0")->materials == quadSlots);
+    CHECK(artifact(again, "texture/0.srgb")->sha1 == artifact(db, "texture/0.srgb")->sha1);
+    CHECK_FALSE(artifact(again, "prefab")->sha1.empty());
+  }
+
   // Dependencies: the .bin and the image file are part of the stamp.
   CHECK_FALSE(db.isStale(model->guid));
   std::string bin = p.read("assets/models/model.bin");
   bin.back() ^= 1;
   p.write("assets/models/model.bin", bin);
   CHECK(db.isStale(model->guid));
+}
+
+TEST_CASE("asset db: a re-import never half-replaces artifacts in use", "[assetdb]") {
+  // The swap renames the old cache folder aside before the new one moves
+  // in. Where an open file blocks that (Windows), the import fails with
+  // every old artifact intact; elsewhere it succeeds and the open file
+  // keeps reading the old bytes. Never a mix of the two.
+  Project p("inuse");
+  p.write("assets/a.png", png(10));
+  AssetDatabase db = openDb(p);
+  REQUIRE(db.importAll().failed.empty());
+  const core::Guid g = db.findByPath("assets/a.png")->guid;
+  const std::map<std::string, std::string> before = cacheHashes(db);
+  p.write("assets/a.png", png(240));
+  bool ok = false;
+  std::string err;
+  {
+    std::FILE* held = std::fopen(util::pathToUtf8(db.artifactPath(g)).c_str(), "rb");
+    REQUIRE(held);
+    ok = db.reimport(g, &err);
+    std::fclose(held);
+  }
+  INFO(err);
+  if (!ok) {
+    CHECK(err.find("in use") != std::string::npos);
+    CHECK(cacheHashes(db) == before);  // the old import, complete
+    CHECK(db.isStale(g));
+    REQUIRE(db.reimport(g, &err));  // released: now it goes through
+  }
+  CHECK(cacheHashes(db) != before);
+  CHECK_FALSE(db.isStale(g));
+  for (const auto& e : fs::directory_iterator(db.cacheDir()))
+    CHECK(e.path().filename().string().find('.') == std::string::npos);  // no .tmp / .old left
 }
 
 TEST_CASE("asset db: OBJ models track their MTL and texture", "[assetdb]") {

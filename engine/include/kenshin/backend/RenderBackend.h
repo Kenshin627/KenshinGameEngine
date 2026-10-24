@@ -285,6 +285,12 @@ class IRenderBackend {
   /// Uploads (blocking, one-shot) and returns the texture handle, or
   /// kInvalidTextureHandle (bad desc, out of memory, table full).
   virtual u32 createTexture(const TextureDesc& desc) = 0;
+  /// Hot reload (1.3d): uploads `desc` as the new contents of
+  /// `texture`, keeping its handle AND its bindless slot - every
+  /// texture reference baked into a material stays valid. Drains the
+  /// device (call between frames). On failure (bad desc, out of
+  /// memory) the old contents stay and false is returned.
+  virtual bool replaceTexture(u32 texture, const TextureDesc& desc) = 0;
   /// The texture's bindless slot (for textureRef), or kNoTexture for
   /// an invalid handle or a texture array.
   virtual u32 bindlessSlot(u32 texture) const = 0;

@@ -11,6 +11,8 @@
 //   KENSHINDemo --kgeo path.kgeo                 virtual geometry scene
 //   KENSHINDemo --cam yaw,pitch,dist[,tx,ty,tz]  fixed camera pose
 //   KENSHINDemo --view N                         decode view 0..6 (0 final)
+//   KENSHINDemo --project dir [--scene path]     a project scene (1.3d),
+//                                                hot-reloading its assets
 // The full flag list lives in AppArgs.h.
 
 #include <glm/glm.hpp>
@@ -24,6 +26,7 @@
 #include "AppArgs.h"
 #include "DemoScene.h"
 #include "KgeoScene.h"
+#include "ProjectScene.h"
 #include "VgPanel.h"
 #include "kenshin/DebugOverlay.h"
 #include "kenshin/Engine.h"
@@ -46,6 +49,7 @@
 #include "kenshin/scene/Camera.h"
 #include "kenshin/scene/CameraController.h"
 #include "kenshin/util/BmpWriter.h"
+#include "kenshin/util/File.h"
 
 namespace kr = kenshin::renderer;
 
@@ -161,8 +165,9 @@ int main(int argc, char** argv) {
     overlay.markFirstRun();
 
   // ---- baseline demo scene (no --kgeo): one instance of every shape.
-  auto scene = args.kgeo.empty() ? demo::buildScene(args.mesh)
-                                 : std::vector<demo::SceneShape>{};
+  auto scene = args.kgeo.empty() && args.project.empty()
+                   ? demo::buildScene(args.mesh)
+                   : std::vector<demo::SceneShape>{};
   demo::uploadScene(scene, meshPool);
 
   // ---- virtual-geometry scene (--kgeo)
@@ -183,6 +188,27 @@ int main(int argc, char** argv) {
       case demo::KgeoSceneResult::LoadFailed:
         break;
     }
+  }
+  // ---- a project scene (--project, without --kgeo)
+  demo::ProjectScene project;
+  demo::KgeoPreview noPreview;  // the LOD panel's (empty) input
+  bool projectMode = false;
+  if (!args.project.empty() && args.kgeo.empty()) {
+    if (!demo::openProjectScene(args, engine, project)) return 1;
+    projectMode = true;
+    overlay.setExtraPanel([&] {
+      demo::drawVgPanel(vgDebug, noPreview, project.renderer.streamer());
+    });
+    auto& backend = engine.get<kenshin::backend::IRenderBackend>();
+    const kr::EnvironmentProbe probe = loadEnvironment(args, backend);
+    if (probe.hasSun) {
+      vgDebug.lightDir = probe.sunDir;
+      vgDebug.lightColor = probe.sunColor;
+      vgDebug.lightIntensity = probe.sunIntensity;
+      if (args.envIntensity < 0.0f) vgDebug.envIntensity = 1.0f;
+    }
+    project.renderer.setEnvironment(probe);
+    if (args.noAsync) backend.setAsyncChainEnabled(false);
   }
   kr::SceneRenderer sceneRenderer;
   kr::VirtualGeometryScene* vgScene = nullptr;
@@ -216,6 +242,9 @@ int main(int argc, char** argv) {
   else if (vgScene && !vgScene->meshes().empty() &&
            vgScene->meshes()[0].boundsSphere.w > 0.0f) {
     const glm::vec4& bs = vgScene->meshes()[0].boundsSphere;
+    controller.setup(45.0f, 6.0f, bs.w * 2.8f, glm::vec3(bs), aspect);
+  } else if (projectMode && project.renderer.bounds().w > 0.0f) {
+    const glm::vec4 bs = project.renderer.bounds();
     controller.setup(45.0f, 6.0f, bs.w * 2.8f, glm::vec3(bs), aspect);
   }
 
@@ -253,6 +282,17 @@ int main(int argc, char** argv) {
       window.requestClose();
     }
     input.nextFrame();
+    if (frame == args.touchFrame) {
+      // The scripted edit: a fresh write (new mtime), like a save.
+      std::string bytes;
+      if (kenshin::util::readFile(kenshin::util::pathFromUtf8(args.touchSrc), bytes) &&
+          kenshin::util::writeFileAtomic(kenshin::util::pathFromUtf8(args.touchDst), bytes,
+                                         nullptr))
+        KENSHIN_INFO("[touch] frame {}: {} <- {}", frame, args.touchDst, args.touchSrc);
+      else
+        KENSHIN_ERROR("[touch] frame {}: cannot rewrite {} from {}", frame, args.touchDst,
+                      args.touchSrc);
+    }
 
     const kenshin::f32 dt = static_cast<kenshin::f32>(frameTimer.elapsedSeconds());
     frameTimer.reset();
@@ -305,7 +345,7 @@ int main(int argc, char** argv) {
                                 demo::kStudioLight[2])},
         items);
 
-    if (kgeoMode && drawable) {
+    if ((kgeoMode || projectMode) && drawable) {
       const std::vector<kr::GpuLightC> lights = buildLights(vgDebug);
       const kr::SceneRenderSettings settings =
           demo::resolveSettings(vgDebug, args);
@@ -317,8 +357,14 @@ int main(int argc, char** argv) {
       fi.frameIndex = static_cast<kenshin::u32>(frame);
       fi.dt = dt;
       fi.lights = lights;
-      sceneRenderer.render(fi, settings);
-      const kr::SceneRenderStats& st = sceneRenderer.stats();
+      if (projectMode)
+        project.renderer.render(fi, settings);
+      else
+        sceneRenderer.render(fi, settings);
+      static const kr::SceneRenderStats kNoStats;
+      const kr::SceneRenderStats& st =
+          projectMode ? (project.renderer.stats() ? *project.renderer.stats() : kNoStats)
+                      : sceneRenderer.stats();
       demo::absorbStats(vgDebug, st);
       if (isLastFrame && settings.autoExposure && st.exposureValid)
         KENSHIN_INFO("[exposure] scale {:.4f} target {:.4f} avg lum {:.5f}",
@@ -333,6 +379,11 @@ int main(int argc, char** argv) {
       sceneRenderer.afterEndFrame();
       vgDebug.missPages = sceneRenderer.stats().missPages;
     }
+    if (projectMode) {
+      project.renderer.afterEndFrame();
+      // Between frames: the hot-reload step (re-imports, GPU swaps).
+      demo::syncProjectScene(project, dt);
+    }
     engine.endFrame();
 
     stats.push(dt * 1000.0f);
@@ -341,6 +392,7 @@ int main(int argc, char** argv) {
                    stats.averageMs(), stats.stddevMs(), stats.maxMs(),
                    stats.fps());
       if (kgeoMode) sceneRenderer.logStats();
+      if (projectMode) project.renderer.logStats();
     }
     if (exiting) {
       if (!args.screenshot.empty())
@@ -358,6 +410,7 @@ int main(int argc, char** argv) {
   KENSHIN_INFO("main loop exited after {} frames", frame);
   if (kgeo.streamer) kgeo.streamer->shutdown();
   if (kgeoMode) sceneRenderer.shutdown();
+  if (projectMode) demo::closeProjectScene(project);
   // Reverse registration order: overlay context, mesh pool (all GPU
   // meshes), renderer pipeline, shader manager, backend, window.
   engine.shutdown();

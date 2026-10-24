@@ -24,7 +24,7 @@ using serialization::Json;
 u32 baseImporterVersion(AssetType type) {
   switch (type) {
     case AssetType::Texture: return 1;
-    case AssetType::Model: return 1;
+    case AssetType::Model: return 2;  // 2: mesh slot materials
     case AssetType::Material: return 1;
     case AssetType::Scene: return 1;
     case AssetType::Prefab: return 1;
@@ -179,7 +179,9 @@ bool cookModel(ImportContext& ctx, importer::ImportedModel& model, std::string& 
     // The per-slot factor table keeps the .kgeo self-describing; the
     // renderer binds the material ASSETS (and their textures) by slot.
     std::vector<GltfMaterial> slots;
+    std::vector<core::Guid> slotGuids;
     for (const std::string& key : m.slotMaterials) {
+      slotGuids.push_back(sub(key));
       GltfMaterial gm;
       for (const importer::ImportedMaterial& im : model.materials)
         if (im.key == key) {
@@ -212,14 +214,14 @@ bool cookModel(ImportContext& ctx, importer::ImportedModel& model, std::string& 
       const std::string file = fileStem(m.key) + ".kgeo";
       if (!importer::writeCookedMesh(ctx.outDir / file, dag, cook, error))
         return fail(error, m.name + ": " + error);
-      ctx.artifacts.push_back({m.key, sub(m.key), ArtifactType::Mesh, m.name, file});
+      ctx.artifacts.push_back({m.key, sub(m.key), ArtifactType::Mesh, m.name, file, slotGuids});
     }
     if (m.translucent.triangleCount() > 0) {
       const std::string key = m.key + "#translucent";
       const std::string file = fileStem(key) + ".tmesh";
       if (!importer::writeTranslucentMesh(ctx.outDir / file, slots, m.translucent, error))
         return false;
-      ctx.artifacts.push_back({key, sub(key), ArtifactType::TranslucentMesh, m.name, file});
+      ctx.artifacts.push_back({key, sub(key), ArtifactType::TranslucentMesh, m.name, file, slotGuids});
     }
   }
   // The prefab only uses built-in components.

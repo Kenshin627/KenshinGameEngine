@@ -31,6 +31,9 @@ class BindlessTable {
   /// Points the slot back at white and frees it. The caller guarantees
   /// no in-flight work samples it (destroyTexture drains the device).
   void release(VkDevice device, u32 slot);
+  /// Points an allocated slot at another view (texture replacement;
+  /// same caller guarantee as release).
+  void update(VkDevice device, u32 slot, VkImageView view);
 
   VkDescriptorSetLayout layout() const { return m_layout; }
   VkDescriptorSet set() const { return m_set; }

@@ -445,8 +445,16 @@ bool AssetDatabase::loadRecord(const core::Guid& guid, ImportRecord& out) const 
       const auto t = artifactTypeFromName(a.at("type").get<std::string>());
       const auto g = core::Guid::parse(a.at("guid").get<std::string>());
       if (!t || !g) return false;
-      r.artifacts.push_back({a.at("key").get<std::string>(), *g, *t, a.at("name").get<std::string>(),
-                             a.at("file").get<std::string>()});
+      Artifact art{a.at("key").get<std::string>(), *g, *t, a.at("name").get<std::string>(),
+                   a.at("file").get<std::string>()};
+      if (a.contains("materials"))
+        for (const Json& m : a.at("materials")) {
+          const auto mg = core::Guid::parse(m.get<std::string>());
+          if (!mg) return false;
+          art.materials.push_back(*mg);
+        }
+      if (a.contains("sha1")) art.sha1 = a.at("sha1").get<std::string>();
+      r.artifacts.push_back(std::move(art));
     }
     for (const Json& n : doc.at("notes")) r.notes.push_back(n.get<std::string>());
     out = std::move(r);
@@ -533,13 +541,20 @@ bool AssetDatabase::importOne(AssetRecord& asset, std::string& error) {
   }
   doc["sources"] = std::move(sources);
   Json artifacts = Json::array();
-  for (const Artifact& a : ctx.artifacts) {
+  for (Artifact& a : ctx.artifacts) {
+    a.sha1 = fileSha1(tmp / util::pathFromUtf8(a.file));
     Json j = Json::object();
     j["key"] = a.key;
     j["guid"] = a.guid.toString();
     j["type"] = std::string(artifactTypeName(a.type));
     j["name"] = a.name;
     j["file"] = a.file;
+    if (!a.materials.empty()) {
+      Json mats = Json::array();
+      for (const core::Guid& m : a.materials) mats.push_back(m.toString());
+      j["materials"] = std::move(mats);
+    }
+    j["sha1"] = a.sha1;
     artifacts.push_back(std::move(j));
   }
   doc["artifacts"] = std::move(artifacts);
@@ -552,13 +567,29 @@ bool AssetDatabase::importOne(AssetRecord& asset, std::string& error) {
     error = why;
     return false;
   }
-  fs::remove_all(finalDir, ec);
+  // Swap: the old folder moves aside first. If any of its files is
+  // held open (Windows refuses to rename the folder then) the import
+  // fails with the old artifacts intact; the caller retries once the
+  // file is released.
+  const fs::path old = cacheDir() / (id + ".old");
+  fs::remove_all(old, ec);
+  const bool hadOld = fs::exists(finalDir, ec);
+  if (hadOld) {
+    fs::rename(finalDir, old, ec);
+    if (ec) {
+      error = "the previous import is in use (" + ec.message() + ")";
+      fs::remove_all(tmp, ec);
+      return false;
+    }
+  }
   fs::rename(tmp, finalDir, ec);
   if (ec) {
     error = "cannot move the import into place: " + ec.message();
     fs::remove_all(tmp, ec);
+    if (hadOld) fs::rename(old, finalDir, ec);
     return false;
   }
+  fs::remove_all(old, ec);  // a leftover is collected by collectGarbage
   asset.imported = true;
   asset.artifacts = std::move(ctx.artifacts);
   asset.notes = std::move(ctx.notes);

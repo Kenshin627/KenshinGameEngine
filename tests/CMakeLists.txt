@@ -23,6 +23,7 @@ add_executable(kenshin_tests
     src/ecs_tests.cpp
     src/engine_tests.cpp
     src/gltf_import_tests.cpp
+    src/hot_reload_tests.cpp
     src/kgeo_tests.cpp
     src/lodcut_tests.cpp
     src/pagestream_tests.cpp
@@ -111,8 +112,53 @@ add_test(NAME render_kgeo_albedo
         -DALBEDO=${CMAKE_CURRENT_SOURCE_DIR}/assets/checker_64.bmp
         -DTOLERANCE=64
         -P ${CMAKE_CURRENT_SOURCE_DIR}/render_regression.cmake)
+# 1.3d: a project scene through the asset database, and hot reload -
+# each reload test edits one file mid-run and must end on the image a
+# cold start of the edited project renders (tests/render_project.cmake).
+set(PROJECT_TEST_ARGS
+    -DDEMO=$<TARGET_FILE:KENSHINDemo>
+    -DBMPDIFF=$<TARGET_FILE:bmpdiff>
+    -DPROJECT=${CMAKE_CURRENT_SOURCE_DIR}/data/project
+    -DEXEDIR=$<TARGET_FILE_DIR:KENSHINDemo>
+    -DTOLERANCE=64)
+add_test(NAME render_project
+    COMMAND ${CMAKE_COMMAND} ${PROJECT_TEST_ARGS}
+        -DREF=${CMAKE_CURRENT_SOURCE_DIR}/data/render_project_ref.bmp
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_project_out.bmp
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_project.cmake)
+# A texture: replaced in place (same bindless slot, no rebuild).
+add_test(NAME render_project_reload_texture
+    COMMAND ${CMAKE_COMMAND} ${PROJECT_TEST_ARGS}
+        -DEDIT_SRC=${CMAKE_CURRENT_SOURCE_DIR}/data/project_edits/swatch_green.png
+        -DEDIT_DST=assets/textures/swatch.png
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_project_reload_texture.bmp
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_project.cmake)
+# A material: its records are rewritten (a new material table).
+add_test(NAME render_project_reload_material
+    COMMAND ${CMAKE_COMMAND} ${PROJECT_TEST_ARGS}
+        -DEDIT_SRC=${CMAKE_CURRENT_SOURCE_DIR}/data/project_edits/painted_blue.kmat
+        -DEDIT_DST=assets/materials/painted.kmat
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_project_reload_material.bmp
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_project.cmake)
+# A model dependency: the streamed mesh files close, the model
+# re-imports (its texture sub-asset swaps in place), the scene rebuilds.
+add_test(NAME render_project_reload_model
+    COMMAND ${CMAKE_COMMAND} ${PROJECT_TEST_ARGS}
+        -DEDIT_SRC=${CMAKE_CURRENT_SOURCE_DIR}/data/project_edits/checker_blue.png
+        -DEDIT_DST=assets/models/checker.png
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_project_reload_model.bmp
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_project.cmake)
+# The scene document: the World reloads and the scene rebuilds.
+add_test(NAME render_project_reload_scene
+    COMMAND ${CMAKE_COMMAND} ${PROJECT_TEST_ARGS}
+        -DEDIT_SRC=${CMAKE_CURRENT_SOURCE_DIR}/data/project_edits/main_moved.kscene
+        -DEDIT_DST=assets/scenes/main.kscene
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/render_project_reload_scene.bmp
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/render_project.cmake)
 set_tests_properties(render_baseline render_kgeo render_kgeo_nohw
-    render_kgeo_albedo PROPERTIES LABELS "gpu")
+    render_kgeo_albedo render_project render_project_reload_texture
+    render_project_reload_material render_project_reload_model
+    render_project_reload_scene PROPERTIES LABELS "gpu")
 
 add_test(NAME kenshin_tests COMMAND kenshin_tests)
 

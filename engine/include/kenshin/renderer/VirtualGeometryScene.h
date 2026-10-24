@@ -15,19 +15,18 @@
 
 #include <cstring>
 #include <glm/glm.hpp>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "kenshin/Common.h"
 #include "kenshin/backend/RenderBackend.h"
+#include "kenshin/geometry/ClusterDag.h"
 
 KENSHIN_NS_BEGIN
 
 class Engine;
-
-namespace geometry {
-struct ClusterDag;
-}
 
 namespace renderer {
 
@@ -96,12 +95,19 @@ struct VgInstance {
   glm::mat4 model{1.0f};
   u32 meshId = 0;
   glm::vec4 boundsSphere{0.0f, 0.0f, 0.0f, -1.0f};
+  /// First material record of this instance's slots; the default is the
+  /// mesh's own block (addMaterials adds blocks for per-instance
+  /// material overrides).
+  u32 materialBase = 0xFFFFFFFFu;
 };
 
 class VirtualGeometryScene {
  public:
   /// Subsystem hook: resolve the render backend from the registry.
   bool onInit(Engine& engine);
+  /// Standalone use (not a registered subsystem: a scene that is
+  /// rebuilt, 1.3d). Release with onShutdown().
+  bool init(backend::IRenderBackend& backend);
 
   /// Append a dag's clusters/vertices/indices into the shared pools.
   /// Returns the mesh id (index into the registry). Must be called
@@ -115,6 +121,19 @@ class VirtualGeometryScene {
   /// KGeoPageReader. flushPools() then creates the slot pool + the
   /// three page tables instead of the v2 pools.
   u32 addMeshPaged(const geometry::ClusterDag& dag);
+  /// The same with the slot materials supplied by the caller (material
+  /// assets, 1.3d) instead of the dag's own table; `materials.size()`
+  /// must cover every per-cluster material id.
+  u32 addMeshPaged(const geometry::ClusterDag& dag,
+                   std::span<const geometry::ClusterDag::DagMaterial> materials);
+  /// Appends a block of material records (before flushPools); returns
+  /// the first record's index (a VgInstance::materialBase).
+  u32 addMaterials(std::span<const geometry::ClusterDag::DagMaterial> materials);
+  /// After flushPools: rewrites records (index, new contents) and
+  /// re-uploads the material table (the old buffer retires once the
+  /// frames in flight finish). False if an index is out of range.
+  bool updateMaterials(
+      std::span<const std::pair<u32, geometry::ClusterDag::DagMaterial>> records);
 
   /// True once a paged dag was added (the v2 addMesh must not mix in).
   bool paged() const { return m_paged; }
@@ -178,6 +197,11 @@ class VirtualGeometryScene {
   /// GPU material record width (decode_material's GpuMaterial: kdTex,
   /// params, emissive - 3 float4).
   static constexpr u32 kMaterialFloats = 12;
+  /// One GPU record from a material (the layout above).
+  static void packMaterial(const geometry::ClusterDag::DagMaterial& mat,
+                           f32 (&record)[kMaterialFloats]);
+  /// Host copy of the material table (tests, tools).
+  std::span<const f32> materialData() const { return m_materialData; }
   u32 materialCount() const {
     return u32(m_materialData.size() / kMaterialFloats);
   }

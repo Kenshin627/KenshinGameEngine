@@ -1,0 +1,99 @@
+{
+  "format": "kenshin.scene",
+  "version": 1,
+  "entities": [
+    {
+      "guid": "5d0c6a43-8f1e-4b7a-9c2d-3e4f5a6b7d01",
+      "name": "Ground",
+      "parent": null,
+      "components": {
+        "transform": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "mesh_renderer": {
+          "mesh": "0fff1e6f-c1f8-56f1-93bd-bbba17828199",
+          "material": null,
+          "visible": true,
+          "cast_shadows": false
+        }
+      }
+    },
+    {
+      "guid": "5d0c6a43-8f1e-4b7a-9c2d-3e4f5a6b7d02",
+      "name": "Sphere A",
+      "parent": null,
+      "components": {
+        "transform": {
+          "position": [
+            -0.8,
+            0.0,
+            0.5
+          ],
+          "rotation": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "mesh_renderer": {
+          "mesh": "f72238e2-68e4-5233-b43a-0aa576f14022",
+          "material": null,
+          "visible": true,
+          "cast_shadows": true
+        }
+      }
+    },
+    {
+      "guid": "5d0c6a43-8f1e-4b7a-9c2d-3e4f5a6b7d03",
+      "name": "Sphere B",
+      "parent": null,
+      "components": {
+        "transform": {
+          "position": [
+            0.8,
+            0.0,
+            0.5
+          ],
+          "rotation": [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "mesh_renderer": {
+          "mesh": "f72238e2-68e4-5233-b43a-0aa576f14022",
+          "material": "5d0c6a43-8f1e-4b7a-9c2d-3e4f5a6b7c83",
+          "visible": true,
+          "cast_shadows": true
+        }
+      }
+    }
+  ]
+}

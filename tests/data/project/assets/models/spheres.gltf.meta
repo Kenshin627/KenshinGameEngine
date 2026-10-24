@@ -1,0 +1,12 @@
+{
+  "format": "kenshin.meta",
+  "version": 1,
+  "guid": "5d0c6a43-8f1e-4b7a-9c2d-3e4f5a6b7c80",
+  "type": "model",
+  "settings": {
+    "split_translucent": true,
+    "condition_layers": true,
+    "double_sided": true,
+    "compress_pages": true
+  }
+}

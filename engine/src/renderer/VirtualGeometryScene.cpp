@@ -116,6 +116,62 @@ bool VirtualGeometryScene::onInit(Engine& engine) {
   return true;
 }
 
+bool VirtualGeometryScene::init(backend::IRenderBackend& backend) {
+  m_backend = &backend;
+  return true;
+}
+
+void VirtualGeometryScene::packMaterial(const geometry::ClusterDag::DagMaterial& mat,
+                                        f32 (&r)[kMaterialFloats]) {
+  // decode_material's GpuMaterial: kdTex, params, emissive (3 float4;
+  // emissive.w = occlusion strength, live only with an MR map). The
+  // texture slots carry bindless refs as raw bits (asuint in the
+  // shaders, 1.3a).
+  const bool hasMr = mat.mrTexRef != backend::kNoTexture;
+  const f32 v[kMaterialFloats] = {mat.kd[0],       mat.kd[1],       mat.kd[2],
+                                  std::bit_cast<f32>(mat.texRef), mat.roughness, mat.metallic,
+                                  std::bit_cast<f32>(mat.mrTexRef),
+                                  std::bit_cast<f32>(mat.nrmTexRef), mat.emissive[0],
+                                  mat.emissive[1], mat.emissive[2],
+                                  hasMr ? mat.occlusion : 0.0f};
+  std::memcpy(r, v, sizeof(v));
+}
+
+u32 VirtualGeometryScene::addMaterials(
+    std::span<const geometry::ClusterDag::DagMaterial> materials) {
+  const u32 base = static_cast<u32>(m_materialData.size() / kMaterialFloats);
+  for (const auto& mat : materials) {
+    f32 r[kMaterialFloats];
+    packMaterial(mat, r);
+    m_materialData.insert(m_materialData.end(), r, r + kMaterialFloats);
+    m_materialTexPaths.push_back(mat.texPath);
+  }
+  m_poolsDirty = true;
+  return base;
+}
+
+bool VirtualGeometryScene::updateMaterials(
+    std::span<const std::pair<u32, geometry::ClusterDag::DagMaterial>> records) {
+  if (m_backend == nullptr) return false;
+  for (const auto& rec : records)
+    if (rec.first >= materialCount()) return false;  // before any write
+  for (const auto& [index, mat] : records) {
+    f32 r[kMaterialFloats];
+    packMaterial(mat, r);
+    std::memcpy(m_materialData.data() + usize(index) * kMaterialFloats, r, sizeof(r));
+    m_materialTexPaths[index] = mat.texPath;
+  }
+  if (m_materialBuffer == backend::IRenderBackend::kInvalidBufferHandle) return true;  // pre-flush
+  // A fresh buffer, not an in-place write: frames still in flight keep
+  // reading the old one until it retires (deferred destroy).
+  const u32 fresh = uploadVerified(m_backend, m_materialData.data(), m_materialData.size() * 4,
+                                   "vg-materials");
+  if (fresh == backend::IRenderBackend::kInvalidBufferHandle) return false;
+  m_backend->destroyBuffer(m_materialBuffer);
+  m_materialBuffer = fresh;
+  return true;
+}
+
 u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
   VgMeshRange range;
   range.clusterBegin = m_clusterCount;
@@ -204,6 +260,12 @@ u32 VirtualGeometryScene::addMesh(const geometry::ClusterDag& dag) {
 }
 
 u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
+  return addMeshPaged(dag, dag.materials);
+}
+
+u32 VirtualGeometryScene::addMeshPaged(
+    const geometry::ClusterDag& dag,
+    std::span<const geometry::ClusterDag::DagMaterial> materials) {
   // v3 (tables-only) dag: pools stay empty, cluster offsets are already
   // PAGE-LOCAL (nothing to rebase - pages are the pool), and the page
   // machinery appends into the shared page tables.
@@ -275,23 +337,7 @@ u32 VirtualGeometryScene::addMeshPaged(const geometry::ClusterDag& dag) {
   // offset into the concatenated table rides the GPU instance
   // (GpuInstance.materialBase) and the decode adds it - multi-mesh
   // scenes resolve their OWN materials.
-  m_meshMaterialBase.push_back(
-      static_cast<u32>(m_materialData.size() / kMaterialFloats));
-  for (const auto& mat : dag.materials) {
-    // decode_material's GpuMaterial: kdTex, params, emissive (3 float4;
-    // emissive.w = occlusion strength, live only with an MR map). The
-    // texture slots carry bindless refs as raw bits (asuint in the
-    // shaders, 1.3a).
-    const bool hasMr = mat.mrTexRef != backend::kNoTexture;
-    f32 r[kMaterialFloats] = {mat.kd[0],       mat.kd[1],       mat.kd[2],
-                              std::bit_cast<f32>(mat.texRef), mat.roughness, mat.metallic,
-                              std::bit_cast<f32>(mat.mrTexRef),
-                              std::bit_cast<f32>(mat.nrmTexRef), mat.emissive[0],
-                              mat.emissive[1], mat.emissive[2],
-                              hasMr ? mat.occlusion : 0.0f};
-    m_materialData.insert(m_materialData.end(), r, r + kMaterialFloats);
-    m_materialTexPaths.push_back(mat.texPath);
-  }
+  m_meshMaterialBase.push_back(addMaterials(materials));
   m_pageCount += dag.pageCount;
   range.pageEnd = m_pageCount;
 
@@ -369,7 +415,9 @@ void VirtualGeometryScene::setInstances(
     std::memcpy(ptr + 64, &instances[i].meshId, 4);
     // M8.2 v2: the mesh's material-table offset (per-cluster ids are
     // per-DAG; the decode adds this base - multi-mesh correctness).
-    const u32 matBase = m_meshMaterialBase[instances[i].meshId];
+    const u32 matBase = instances[i].materialBase != 0xFFFFFFFFu
+                            ? instances[i].materialBase
+                            : m_meshMaterialBase[instances[i].meshId];
     std::memcpy(ptr + 68, &matBase, 4);
     std::memset(ptr + 72, 0, 8);
     glm::vec4 world = instances[i].boundsSphere;

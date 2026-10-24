@@ -1,0 +1,6 @@
+{
+  "format": "kenshin.project",
+  "version": 1,
+  "name": "ProjectFixture",
+  "startup_scene": "assets/scenes/main.kscene"
+}

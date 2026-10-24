@@ -12,6 +12,7 @@ add_executable(KENSHINDemo
     src/KgeoPreview.cpp
     src/AppArgs.cpp
     src/KgeoScene.cpp
+    src/ProjectScene.cpp
     src/VgPanel.cpp
 )
 

@@ -106,6 +106,17 @@ Args parseArgs(int argc, char** argv) {
       args.grid = std::atoi(argv[++i]);
     else if (std::strcmp(argv[i], "--wall") == 0)
       args.wall = true;
+    else if (std::strcmp(argv[i], "--project") == 0 && i + 1 < argc)
+      args.project = argv[++i];
+    else if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc)
+      args.scene = argv[++i];
+    else if (std::strcmp(argv[i], "--watch-interval") == 0 && i + 1 < argc)
+      args.watchInterval = static_cast<float>(std::atof(argv[++i]));
+    else if (std::strcmp(argv[i], "--touch") == 0 && i + 3 < argc) {
+      args.touchFrame = std::atoi(argv[++i]);
+      args.touchSrc = argv[++i];
+      args.touchDst = argv[++i];
+    }
     else if (std::strcmp(argv[i], "--cam") == 0 && i + 1 < argc) {
       const int n = std::sscanf(argv[++i], "%f,%f,%f,%f,%f,%f", &args.camYaw,
                              &args.camPitch, &args.camDist, &args.camTarget[0],
