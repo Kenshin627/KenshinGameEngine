@@ -19,7 +19,10 @@ if(NOT KENSHIN_GIT_SHA)
 endif()
 
 add_library(kenshin_engine STATIC
+    src/assets/AssetDatabase.cpp
+    src/assets/AssetImporters.cpp
     src/assets/GltfLoader.cpp
+    src/assets/Material.cpp
     src/assets/Image.cpp
     src/assets/Ktx2.cpp
     src/assets/TextureCooker.cpp
@@ -59,6 +62,7 @@ add_library(kenshin_engine STATIC
     src/backend/vulkan/DescriptorCache.cpp
     src/backend/vulkan/UploadEngine.cpp
     src/core/Guid.cpp
+    src/core/Sha1.cpp
     src/core/Input.cpp
     src/core/Keys.cpp
     src/core/Log.cpp

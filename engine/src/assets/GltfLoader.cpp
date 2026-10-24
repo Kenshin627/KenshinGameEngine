@@ -407,6 +407,9 @@ struct Gltf {
   std::vector<std::vector<u8>> buffers;  // decoded (BIN chunk or files)
   std::string dir;                       // for relative uri resolution
   std::string log;
+  /// Every file read besides the document itself (buffers, images):
+  /// the asset database's dependency list.
+  mutable std::vector<std::string> externalFiles;
 
   const JVal* arrayOrNull(const JVal& root, const char* key) {
     const JVal* v = root.find(key);
@@ -677,6 +680,7 @@ bool imageBytes(const Gltf& g, const JVal& img, std::vector<u8>& bytes,
         log = "image file not found: " + u;
         return false;
       }
+      g.externalFiles.push_back(util::pathToUtf8(file));
       name = util::pathToUtf8(file.stem());
     }
   } else {
@@ -884,6 +888,7 @@ bool openDocument(const std::string& path, JVal& root, Gltf& g, std::string& log
         log = "buffer file not found: " + uri->text;
         return false;
       }
+      g.externalFiles.push_back(util::pathToUtf8(bufferFile));
       g.buffers.push_back(std::move(data));
     }
   }
@@ -1595,6 +1600,10 @@ bool loadGltfSceneImpl(const std::string& path, GltfScene& out, std::string& log
     log = "no triangle meshes in the default scene";
     return false;
   }
+  scene.externalFiles = g.externalFiles;
+  std::sort(scene.externalFiles.begin(), scene.externalFiles.end());
+  scene.externalFiles.erase(std::unique(scene.externalFiles.begin(), scene.externalFiles.end()),
+                            scene.externalFiles.end());
   out = std::move(scene);
   return true;
 }

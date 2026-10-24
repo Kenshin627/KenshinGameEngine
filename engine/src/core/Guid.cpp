@@ -4,6 +4,8 @@
 #include <random>
 #include <thread>
 
+#include "kenshin/core/Sha1.h"
+
 KENSHIN_NS_BEGIN
 namespace core {
 
@@ -44,6 +46,26 @@ Guid Guid::generate() {
   // the top bits of byte 8. Both are non-zero, so never the null Guid.
   g.hi = (g.hi & ~0x000000000000F000ull) | 0x0000000000004000ull;
   g.lo = (g.lo & ~0xC000000000000000ull) | 0x8000000000000000ull;
+  return g;
+}
+
+Guid Guid::fromName(const Guid& space, std::string_view name) {
+  u8 ns[16];
+  for (int i = 0; i < 8; ++i) {
+    ns[i] = u8(space.hi >> (56 - 8 * i));
+    ns[8 + i] = u8(space.lo >> (56 - 8 * i));
+  }
+  Sha1 sha;
+  sha.update(ns, 16);
+  sha.update(name);
+  const Sha1::Digest d = sha.finish();
+  Guid g;
+  for (int i = 0; i < 8; ++i) {
+    g.hi = (g.hi << 8) | d[usize(i)];
+    g.lo = (g.lo << 8) | d[usize(8 + i)];
+  }
+  g.hi = (g.hi & ~0x000000000000F000ull) | 0x0000000000005000ull;  // version 5
+  g.lo = (g.lo & ~0xC000000000000000ull) | 0x8000000000000000ull;  // RFC variant
   return g;
 }
 

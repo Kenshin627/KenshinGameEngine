@@ -85,6 +85,9 @@ struct GltfScene {
   std::vector<GltfSceneMaterial> materials;
   std::vector<GltfSceneImage> images;
   std::vector<std::string> notes;  // ignored/unsupported content
+  /// UTF-8 paths of every file read besides the document (external
+  /// buffers, image files) - sorted, unique; dependency tracking.
+  std::vector<std::string> externalFiles;
 };
 
 /// Never throws; false with a reason in `log` for unreadable or

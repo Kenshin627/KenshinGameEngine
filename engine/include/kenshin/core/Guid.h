@@ -21,6 +21,11 @@ struct Guid {
   u64 hi = 0;  // bytes 0..7 of the canonical form, big-endian
   u64 lo = 0;  // bytes 8..15
 
+  /// The RFC 4122 version-5 (SHA-1, name-based) Guid of `name` in the
+  /// `space` namespace: deterministic - the asset database derives sub-
+  /// asset Guids from (parent asset Guid, sub-asset key) this way, so a
+  /// re-import reproduces them.
+  static Guid fromName(const Guid& space, std::string_view name);
   /// A fresh random version-4 Guid (thread-safe; never the null Guid).
   static Guid generate();
   /// Parse the canonical form "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"

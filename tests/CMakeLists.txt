@@ -9,6 +9,7 @@ project(KENSHINTests VERSION 0.1.0 LANGUAGES CXX)
 find_package(Catch2 CONFIG REQUIRED)
 
 add_executable(kenshin_tests
+    src/asset_database_tests.cpp
     src/assets_tests.cpp
     src/bindless_tests.cpp
     src/clod_tests.cpp

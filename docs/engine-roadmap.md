@@ -722,6 +722,80 @@ settings hash, importer version), so stale caches rebuild themselves.
 * Open: geometric specular AA (screen-space normal derivatives) for
   fine geometry, phase 2.
 
+### 1.3c Asset database — done 2026-10-24 (Windows-verified)
+
+* **`assets::AssetDatabase`** over a project folder: `project.kproject`,
+  `assets/` (sources + `.meta` sidecars, in VCS), and
+  `.kenshin/cache/<guid>/` (artifacts + `import.json`, disposable).
+* **Types**:
+  - texture (png/jpg/tga/bmp/hdr/ktx2 -> cooked KTX2);
+  - model (gltf/glb/obj -> per-mesh `.kgeo` with a per-slot factor
+    table, `.tmesh` for BLEND parts, per-texture KTX2 by colour role,
+    per-material `.kmat`, and the prefab);
+  - material (`.kmat` -> canonical);
+  - scene / prefab (validated against the component registry,
+    copied).
+* **Identity**:
+  - `.meta` = guid + type + importer settings (strict, defaults
+    filled; a texture name heuristic for new assets: normal / linear
+    data).
+  - Sub-asset Guids are RFC 4122 v5 (SHA-1) of (asset Guid, key), so
+    re-imports and lost caches reproduce them. New `core::Sha1` and
+    `core::Guid::fromName`.
+* **Repairs on scan**:
+  - Missing `.meta` -> created.
+  - An orphaned `.meta` whose last import matches a new file's content
+    is adopted (a move that left the `.meta` behind keeps its Guid).
+  - A duplicated Guid (copied `.meta`) is re-issued to the copy; the
+    asset its import record names keeps it.
+  - A corrupt `.meta` is reported, its asset skipped, the file never
+    overwritten.
+  - Orphans are reported and kept.
+* **Staleness**: type, importer version (plus a test salt), settings
+  hash, and every source and dependency (the glTF's `.bin`/images,
+  the OBJ's MTL and `map_Kd`). Size + mtime is checked first, SHA-1
+  only when those changed; a moved asset is checked at its new path.
+  Imports build in `<guid>.tmp` and replace the old artifacts only on
+  success. `collectGarbage` removes caches of vanished assets and
+  temp leftovers.
+* **Material format** (`assets/Material.h`): factors, alpha mode/
+  cutoff, double-sided, normal scale, occlusion strength, five
+  texture slots (Guid + wrap U/V + filter); canonical, strict,
+  versioned.
+* `GltfScene::externalFiles`: every file the loader read (dependency
+  tracking).
+* Gate evidence:
+  - 15 test cases on temp projects: SHA-1 FIPS vectors (incl. 1M 'a'
+    fed in uneven chunks), the RFC 4122 v5 vector.
+  - New sources -> metas -> import -> a new session has nothing to
+    do.
+  - Staleness: same-bytes rewrite stays current, new content, settings
+    (validated, written to `.meta`), importer version.
+  - **A deleted cache re-imports byte-identically** (all cache files
+    including records, with the generated glTF reference model).
+  - Moves with and without the `.meta`; a copied `.meta`; three kinds
+    of corrupt `.meta` left untouched; orphans + GC.
+  - Model sub-assets: 9 keys with derived Guids; the prefab's mesh
+    refs and the materials' texture refs resolve; the `.bin` is a
+    dependency.
+  - OBJ: mesh/material/texture/prefab; the MTL is a dependency.
+  - Validation (bad `.kmat`, unknown component, no registry); a
+    failed re-import keeps the good artifacts; `.kmat` round trip +
+    6 strict-load errors; missing project file.
+  - The real Vulture imports and resolves through the database.
+  - **Mutation test**: 12 deliberate bugs (move adoption, guid
+    re-issue, corrupt-meta protection, settings / importer version /
+    content hash in staleness, moved-asset path, dependency stamps,
+    derived Guids, GC keeping live caches, failed import keeping
+    artifacts, the texture name heuristic) are all killed.
+  - ctest 7/7; Debug 56 cases; GCC check 125 files clean.
+* Notes:
+  - The Vulture import takes 14.5 s: every 4096^2 texture is
+    CPU-cooked, and the model's images are cooked twice (as model
+    sub-assets and as standalone files in `textures/`).
+    Parallel/background import is planned with the editor (Phase 6).
+  - OBJ is imported as-is (no up-axis conversion), like `kgeo_builder`.
+
 
 ## 8. Decisions (2026-10-23)
 
